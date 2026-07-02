@@ -1,0 +1,12 @@
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+build/
+checkpoints/
+*.ckpt
+*.bin
+*.npy
+*.npz
+*.mojopkg
+__pycache__/
+.ipynb_checkpoints/

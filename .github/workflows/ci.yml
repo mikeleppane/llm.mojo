@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+# A newer push to the same branch/PR cancels the older, still-running job.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# The default token only needs to read the repo.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: format + tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up pixi
+        uses: prefix-dev/setup-pixi@v0.10.0
+        with:
+          # Install exactly what pixi.lock pins; fail if the lock is stale.
+          # This is what makes CI match local development (see AGENTS.md).
+          locked: true
+          # Cache the solved environment keyed on pixi.lock.
+          cache: true
+
+      - name: Mojo version
+        run: pixi run mojo-version
+
+      # Formatting is a gate, not an edit: `mojo format` rewrites in place, then
+      # `git diff --exit-code` fails the job if anything changed. Run
+      # `pixi run fmt` locally to fix before pushing.
+      - name: Format check
+        run: pixi run fmt-check
+
+      # Smoke test first (fails fast on a broken toolchain), then the suite.
+      - name: Tests
+        run: pixi run test
