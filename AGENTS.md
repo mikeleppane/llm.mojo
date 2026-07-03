@@ -99,6 +99,7 @@ src/llm/          the library — reusable implementation, one package per conce
   tensor/           Tensor2D/Tensor3D and ops (matmul, softmax, ...)
   nn/               parameter, linear, embedding, norm, activation, mlp
   transformer/      masks, attention, positional, block, model
+  models/           standalone models (bigram); not nn layers, not the GPT
   training/         loss, optimizer, trainer, checkpoint
   generation/       sampler, kv_cache, generate
   utils/            random, math, timing, logging
@@ -130,6 +131,7 @@ impossible to test in isolation — treat one as a bug.
 utils  →  tensor  →  nn  →  transformer  →  { training, generation }
 config + vocab  →  nn, transformer
 tokenizer  →  data  →  training
+tensor, data  →  models  →  { training, generation }
 ```
 
 When you add an import that points "up" the graph, stop: the dependency belongs
@@ -183,6 +185,7 @@ as modules emerge):
 | `tensor` | `src/llm/tensor/` |
 | `nn` | `src/llm/nn/` |
 | `transformer` | `src/llm/transformer/` |
+| `models` | `src/llm/models/` (standalone models, e.g. bigram) |
 | `training` | `src/llm/training/` (loss, optimizer, trainer) |
 | `checkpoint` | checkpoint save/load format |
 | `generation` | `src/llm/generation/` |
