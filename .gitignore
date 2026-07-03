@@ -10,3 +10,5 @@ checkpoints/
 *.mojopkg
 __pycache__/
 .ipynb_checkpoints/
+# internal working plans — never committed or published
+docs/plans/
