@@ -6,11 +6,11 @@
 # is deliberately GPT-2-shaped but framework-free: tokens are integer ids, the
 # vocab maps id -> byte sequence, and merges are looked up in two dictionaries.
 #
-# Representation (plan decision D1/D2): a token is an `Int` id; `vocab[id]` is its
-# byte sequence; a merge of ids (left, right) is keyed by a single packed `Int`
-# (see `pair_key`) into `merge_rank` (which merge wins) and `merge_result` (the
-# id it produces). Keeping the hot loop in integers — no unicode string juggling
-# — is what makes the algorithm readable.
+# Representation: a token is an `Int` id; `vocab[id]` is its byte sequence; a
+# merge of ids (left, right) is keyed by a single packed `Int` (see `pair_key`)
+# into `merge_rank` (which merge wins) and `merge_result` (the id it produces).
+# Keeping the hot loop in integers — no unicode string juggling — is what makes
+# the algorithm readable.
 #
 # Performance note: `encode_bytes` rescans the sequence once per merge (O(n * m)
 # for n bytes and m applicable merges). Chunks are short in practice (GPT-2
@@ -20,7 +20,7 @@
 # Ids are well under 2**31, so a pair (left, right) packs losslessly into one
 # Int: left occupies the high bits, right the low bits. A single Int key lets the
 # merge tables be plain Dict[Int, Int] and avoids allocating a string per lookup
-# in the innermost loop (plan decision D2).
+# in the innermost loop.
 comptime PAIR_BASE = 1 << 32
 
 # Save-format tag (see save/load). Byte sequences are stored as decimal integers.
@@ -250,9 +250,20 @@ struct BPETokenizer(Copyable, Movable):
                 token.append(UInt8(Int(String(parts[1 + j]))))
             tok.vocab.append(token^)
             cursor += 1
-        # Base byte tokens are ids 0..255 by construction.
+        # Recover byte_to_id from the single-byte vocab entries. Merged tokens
+        # are always >= 2 bytes, so every length-1 entry is a base byte token.
+        # This is a permutation for GPT-2 (byte b's id is not b) and the identity
+        # for a from-scratch tokenizer; deriving it handles both.
+        tok.byte_to_id = List[Int](length=N_BYTES, fill=-1)
+        for id in range(len(tok.vocab)):
+            if len(tok.vocab[id]) == 1:
+                tok.byte_to_id[Int(tok.vocab[id][0])] = id
         for b in range(N_BYTES):
-            tok.byte_to_id.append(b)
+            if tok.byte_to_id[b] == -1:
+                raise Error(
+                    "BPETokenizer.load: no single-byte token for byte "
+                    + String(b)
+                )
         # Merge section: count then one "left right merged" per rank.
         if cursor >= len(lines):
             raise Error("BPETokenizer.load: missing merge section")
