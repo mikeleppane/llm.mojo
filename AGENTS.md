@@ -52,6 +52,10 @@ publishable until its code passes these — see *Publishing* below):
   `s.field^` fails with "destroyed out of the middle of a value". `.copy()` the
   field (or move the whole `s`). Owned (`var`) args likewise need `^`/`.copy()`
   at the call site — `List`/`Dict`/user structs are not `ImplicitlyCopyable`.
+- **`Dict` subscript (`d[key]`) raises** on the pinned Mojo, so any function
+  that indexes a `Dict` must itself be `raises` — even a lookup guarded by
+  `if key in d` that can never actually miss. (Pretrained code and the chapter
+  drafts routinely mark such helpers non-raising; they will not compile.)
 
 ## Toolchain and the quality floor
 
