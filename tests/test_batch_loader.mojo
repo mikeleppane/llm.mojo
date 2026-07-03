@@ -145,17 +145,29 @@ def test_epoch_covers_all_windows_once() raises:
 
 def test_num_batches_drops_remainder() raises:
     # N=51, B=4, T=5, stride=5 -> 10 windows; 10 // 4 == 2 batches, and the two
-    # leftover windows are dropped. The iterator yields exactly 2 batches.
+    # leftover windows are dropped. The iterator yields exactly 2 batches, and —
+    # the point of a remainder case — exactly 8 *distinct* windows appear (no
+    # duplicate and no over-run past the dropped tail).
     var loader = BatchLoader(_range_dataset(51), 4, 5, stride=5)
     assert_equal(loader.num_windows(), 10)
     assert_equal(loader.num_batches(), 2)
     loader.start_epoch(0)
+    var starts: List[Int] = []
     var count = 0
     while loader.has_next():
-        _ = loader.next_batch()
+        var batch = loader.next_batch()
+        for b in range(batch.batch_size):
+            starts.append(batch.input_at(b, 0))  # id == position == start
         count += 1
     assert_equal(count, 2)
     assert_false(loader.has_next())
+    # 8 windows seen, all distinct, all drawn from the valid start set {0,5,..,45}.
+    assert_equal(len(starts), 8)
+    sort(starts)
+    for k in range(len(starts)):
+        assert_true(starts[k] % 5 == 0 and starts[k] <= 45)
+        if k > 0:
+            assert_true(starts[k] != starts[k - 1])  # no duplicates
 
 
 def test_window_bounds() raises:
@@ -180,6 +192,14 @@ def test_construct_invalid_args_raise() raises:
         _ = BatchLoader(_range_dataset(50), 4, 0, stride=8)  # T < 1
     with assert_raises():
         _ = BatchLoader(_range_dataset(50), 4, 8, stride=0)  # stride < 1
+
+
+def test_overfit_batch_too_small_raises() raises:
+    # overfit_batch delegates to the loader's construction guard: a dataset too
+    # small for one non-overlapping [B, T+1] batch must raise, not return a
+    # short batch. B=2, T=3 needs 2*3+1 == 7 tokens; 6 is one too few.
+    with assert_raises():
+        _ = overfit_batch(_range_dataset(6), 2, 3)
 
 
 def test_overfit_batch_is_fixed() raises:

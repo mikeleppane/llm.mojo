@@ -34,6 +34,11 @@ def test_first_values_golden() raises:
     # returning the new state. Values computed independently in Python from the
     # MMIX constants A = 6364136223846793005, C = 1442695040888963407. A wrong
     # constant or a non-wrapping multiply fails this instantly.
+    #
+    # Note: two goldens below (seed0[2] and seed42[0]) exceed 2**63 - 1. They are
+    # fine as written because Mojo's arbitrary-precision IntLiteral flows straight
+    # into UInt64(...); keep them going directly into UInt64 — routing either
+    # through an Int intermediate would overflow.
     var r0 = Rng(0)
     assert_equal(r0.next_u64(), UInt64(1442695040888963407))
     assert_equal(r0.next_u64(), UInt64(1876011003808476466))

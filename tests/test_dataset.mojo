@@ -64,6 +64,14 @@ def test_split_invalid_fraction_raises() raises:
         _ = train_val_split(_range_ids(3), 0.1)
 
 
+def test_split_empty_ids_raises() raises:
+    # An empty corpus can't be split: the empty-side guard must fire rather than
+    # return two empty datasets.
+    var empty: List[Int] = []
+    with assert_raises():
+        _ = train_val_split(empty, 0.1)
+
+
 def test_corpus_missing_file_raises() raises:
     # A missing corpus must fail with a message that names the download script,
     # so the failure tells the reader exactly how to fix it.
