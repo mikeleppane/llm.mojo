@@ -12,7 +12,8 @@ proves the part green on a fresh checkout (`pixi install` first).
 | V | Tokenization | ✅ green | `pixi run test` | 2026-07-03 |
 | VI | Dataset pipeline | ✅ green | `pixi run test` | 2026-07-03 |
 | VII | Tiny bigram LM | ✅ green | `pixi run test` | 2026-07-03 |
-| VIII+ | GPT model & training | not started | — | — |
+| VIII | Architecture family | ✅ green (preset + exact param count + comptime pin) | `pixi run test` | 2026-07-03 |
+| IX+ | GPT model & training | not started | — | — |
 
 ## Notes
 
@@ -40,6 +41,15 @@ proves the part green on a fresh checkout (`pixi install` first).
   `models/` package + scope. Trains char-level on tiny Shakespeare
   (`examples/bigram_shakespeare.mojo`); the `q → u` bigram is pinned. See
   [notes/part-07-notes.md](notes/part-07-notes.md).
+
+- **Part VIII deliverables:** `GPTConfig.gpt2_124m()` (the reference GPT-2 small
+  preset) and `GPTConfig.parameter_count()` (the exact GPT-2-layout total,
+  124,439,808, derived in the docstring), pinned at compile time by
+  `check_gpt2_contract()`. Plus two behavior-frozen metaprogramming cleanups:
+  derived `comptime` constants replacing the magic mantissa literal in
+  `utils/random.mojo`, and the GPT-2 byte↔unicode table bound at compile time in
+  `tokenizer/gpt2.mojo` (`materialize`d at use). No layers, traits, or new
+  packages — those are Part IX. See [notes/part-08-notes.md](notes/part-08-notes.md).
 
 ## Test suites (Parts II–VII)
 

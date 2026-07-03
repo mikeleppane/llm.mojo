@@ -56,6 +56,23 @@ publishable until its code passes these — see *Publishing* below):
   that indexes a `Dict` must itself be `raises` — even a lookup guarded by
   `if key in d` that can never actually miss. (Pretrained code and the chapter
   drafts routinely mark such helpers non-raising; they will not compile.)
+- **`comptime` evaluates user structs and non-raising methods.** A user struct
+  constructs in a comptime context and a non-raising method runs on it at
+  compile time (`comptime cfg = GPTConfig.gpt2_124m()` then
+  `comptime assert cfg.parameter_count() == N`). This is how a pure arithmetic
+  invariant becomes a *build* failure, not just a test failure. Raising
+  functions cannot be comptime-evaluated, so the method must be a plain `def`
+  with no `raises`.
+- **A `comptime assert` only fires where its function is *called*.** An
+  uncalled function's `comptime assert` is never evaluated (a deliberately
+  false one compiles clean). Give every contract pin a live call site — a test
+  that calls it — or it enforces nothing.
+- **A comptime value that isn't `ImplicitlyCopyable` can't be read at runtime
+  directly.** `comptime T = build_list()` compiles, but a bare use site fails
+  with "cannot materialize comptime value ... because it is not
+  'ImplicitlyCopyable'". Lift it explicitly with `materialize[T]()` — the build
+  runs at compile time, the read copies the frozen result. A bare use is a
+  compile error, never a silent copy.
 
 ## Toolchain and the quality floor
 
