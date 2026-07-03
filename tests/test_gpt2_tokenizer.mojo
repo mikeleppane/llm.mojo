@@ -68,6 +68,9 @@ def _samples() -> List[String]:
         String("GPT-2 uses byte-level BPE."),
         String("Mixed CASE and numb3rs!"),
         String("a"),
+        # '#'-led tokens exist in merges.txt ("# #", "## ##", ...); this sample
+        # exercises them so a loader that skips '#' lines fails parity loudly.
+        String("## Heading\n#include C# f# #hashtag ######"),
     ]
     return samples^
 
@@ -98,6 +101,14 @@ def test_byte_unicode_table_is_bijection() raises:
     # Inverse(table[b]) == b for every byte.
     for b in range(256):
         assert_equal(seen[table[b]], b)
+
+
+def test_all_merges_loaded() raises:
+    # GPT-2 has exactly 50000 merges. A structural count guards against the
+    # loader silently dropping rules (e.g. skipping every '#'-led line) even
+    # when no parity sample happens to exercise the dropped merges.
+    var tok = _load()
+    assert_equal(len(tok.bpe.merge_rank), 50000)
 
 
 def test_end_of_text_id() raises:

@@ -141,6 +141,16 @@ struct GPT2Tokenizer(Movable):
             vocab[id] = _token_to_bytes(token, unicode_to_byte)
             stoi[token] = id
 
+        # Every id 0..50256 must have been assigned exactly once. A duplicate or
+        # gap would leave a slot empty; catch it rather than encode garbage.
+        for id in range(GPT2_VOCAB_SIZE):
+            if len(vocab[id]) == 0:
+                raise Error(
+                    "GPT2Tokenizer.from_files: no token for id "
+                    + String(id)
+                    + " (duplicate or gap in vocab)"
+                )
+
         # Base byte tokens: raw byte b -> id of its single-character token.
         var byte_to_id = List[Int]()
         for b in range(256):
@@ -156,16 +166,20 @@ struct GPT2Tokenizer(Movable):
             byte_to_id.append(id.value())
 
         # Merges: each line "A B" (in rank order) resolves to ids by string
-        # lookup; the merged token is the id of the concatenation "AB". The first
-        # line is a "#version" comment; blank lines are skipped.
+        # lookup; the merged token is the id of the concatenation "AB". Only the
+        # leading "#version" header line is skipped — not every '#'-led line:
+        # '#' is an ordinary token byte and several real merges (e.g. "# #")
+        # begin with it. .strip() tolerates a stray CRLF on the right token.
         var merge_rank = Dict[Int, Int]()
         var merge_result = Dict[Int, Int]()
         var merges_content = open(merges_path, "r").read()
         var lines = merges_content.split("\n")
         var rank = 0
         for line_index in range(len(lines)):
-            var line = String(lines[line_index])
-            if line.byte_length() == 0 or line.startswith("#"):
+            var line = String(String(lines[line_index]).strip())
+            if line_index == 0 and line.startswith("#version"):
+                continue
+            if line.byte_length() == 0:
                 continue
             var parts = line.split(" ")
             if len(parts) != 2:
