@@ -70,13 +70,16 @@ struct BigramLM(Copyable, Movable):
         if smoothing <= 0.0:
             raise Error("BigramLM.from_counts: smoothing must be positive")
 
+        # Validate every id up front, not only those in a bigram pair — a
+        # single-token corpus like [5] with V=2 forms no pairs, so an in-loop
+        # check would let the bad id slip through and return a uniform model.
+        for k in range(len(ids)):
+            if ids[k] < 0 or ids[k] >= vocab_size:
+                raise Error("BigramLM.from_counts: token id out of range")
+
         var counts = zeros_2d(vocab_size, vocab_size)
         for k in range(len(ids) - 1):
-            var a = ids[k]
-            var b = ids[k + 1]
-            if a < 0 or a >= vocab_size or b < 0 or b >= vocab_size:
-                raise Error("BigramLM.from_counts: token id out of range")
-            counts[a, b] = counts[a, b] + 1.0
+            counts[ids[k], ids[k + 1]] = counts[ids[k], ids[k + 1]] + 1.0
 
         var model = BigramLM(vocab_size)
         for i in range(vocab_size):
@@ -127,6 +130,12 @@ struct BigramLM(Copyable, Movable):
         # into grad[i, :]. No [B, T, V] logits tensor is ever built — the forward
         # is a row lookup, so materializing one would be pure waste. Everything is
         # averaged by 1/(B*T), matching loss_on_batch. `grad` must be [V, V].
+        #
+        # This reference favors clarity over speed: it is O(B*T*V) and computes
+        # exp twice per position (once in cross_entropy_one's logsumexp, once in
+        # softmax_row), re-doing that work for every repeat of the same current
+        # token. A batched implementation that reuses each row's softmax arrives
+        # with the GPT; here the row lookup keeps even the naive form cheap.
         if grad.rows != self.vocab_size or grad.cols != self.vocab_size:
             raise Error("BigramLM.loss_and_grad: grad shape must be [V, V]")
         grad.fill(0.0)

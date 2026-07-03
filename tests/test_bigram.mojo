@@ -56,6 +56,42 @@ def test_from_counts_rejects_out_of_range_id() raises:
         _ = BigramLM.from_counts([0, 5, 1], 2, 1.0)
 
 
+def test_from_counts_rejects_out_of_range_single_token() raises:
+    # A single-token corpus forms no bigram pairs, but a bad id must still be
+    # rejected rather than silently yielding a uniform model.
+    with assert_raises(contains="out of range"):
+        _ = BigramLM.from_counts([5], 2, 1.0)
+
+
+def test_next_logits_returns_independent_copy() raises:
+    # Mutating the returned row must not touch the table.
+    var model = BigramLM.from_counts([0, 1, 0, 1, 0], 2, 1.0)
+    var before = model.table[0, 0]
+    var row = model.next_logits(0)
+    row[0] = row[0] + 100.0
+    assert_almost_equal(model.table[0, 0], before, atol=1e-12)
+
+
+def test_next_probs_temperature() raises:
+    # next_probs runs the row through temperature softmax: probs sum to 1, and a
+    # high temperature flattens toward uniform. On the [0,1,0,1,0] count model,
+    # row 0 is log([1/4, 3/4]); at T=1 that recovers [1/4, 3/4].
+    var model = BigramLM.from_counts([0, 1, 0, 1, 0], 2, 1.0)
+    var p = model.next_probs(0, 1.0)
+    assert_almost_equal(p[0] + p[1], 1.0, atol=1e-12)
+    assert_almost_equal(p[0], 0.25, atol=1e-12)
+    assert_almost_equal(p[1], 0.75, atol=1e-12)
+
+    var flat = model.next_probs(0, 1e6)
+    assert_almost_equal(flat[0], 0.5, atol=1e-4)
+
+
+def test_next_probs_rejects_bad_temperature() raises:
+    var model = BigramLM(3)
+    with assert_raises(contains="temperature"):
+        _ = model.next_probs(0, 0.0)
+
+
 def test_grad_matches_finite_difference() raises:
     # Central-difference check of every table entry against loss_and_grad, on a
     # tiny V=3 case with a non-trivial batch and a random (non-uniform) table.
