@@ -61,6 +61,39 @@ def test_invalid_probs_raise() raises:
         _ = sample_categorical([0.2, 0.2], rng)  # sums to 0.4
 
 
+def test_negative_probability_raises() raises:
+    var rng = Rng(1)
+    with assert_raises(contains="negative"):
+        _ = sample_categorical([1.5, -0.5], rng)  # sums to 1 but invalid
+
+
+def test_sum_slack_never_selects_zero_entry() raises:
+    # A distribution that sums to a hair under 1 (within the accept tolerance)
+    # must still never draw a zero-probability entry: the draw is scaled by the
+    # actual total, so u can't land in the [sum, 1) gap and fall through to the
+    # last index. Rng(953094) is a seed that returned the zero entry before the
+    # fix.
+    var probs: List[Float64] = [0.9999995, 0.0]
+    var r = Rng(953094)
+    assert_equal(sample_categorical(probs, r), 0)
+
+
+def test_draw_frequencies_track_probabilities() raises:
+    # The one invariant the determinism/support tests can't see: drawn mass is
+    # proportional to probability. 10k draws from [0.25, 0.75] should split near
+    # 1:3. Catches an inverse-CDF that is in-support but systematically skewed
+    # (e.g. a `<` vs `<=` off-by-one).
+    var probs: List[Float64] = [0.25, 0.75]
+    var rng = Rng(2024)
+    var ones = 0
+    var draws = 10000
+    for _ in range(draws):
+        if sample_categorical(probs, rng) == 1:
+            ones += 1
+    var frac = Float64(ones) / Float64(draws)
+    assert_true(frac > 0.72 and frac < 0.78)  # 0.75 +/- 0.03
+
+
 def test_bigram_plausibility_pin() raises:
     # The "bigram-plausible" criterion, made deterministic: on the full corpus,
     # the count model's argmax successor of 'q' is 'u'. No training, no sampling
