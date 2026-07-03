@@ -24,13 +24,17 @@ def dropout(
     # training/p>0 branch (one uniform draw per element). Raises if p is outside
     # [0, 1) — p = 1 would drop everything and divide by zero in the scale.
     #
-    # Eval mode, or p exactly 0, returns an identity copy WITHOUT drawing: p == 0
-    # is the caller's explicit "no dropout" sentinel, so the exact comparison is
-    # deliberate, and short-circuiting is what guarantees the generator is left
-    # untouched.
-    if p < 0.0 or p >= 1.0:
+    # The guard is written as "not in range" rather than "p < 0 or p >= 1" so a
+    # NaN p raises too: every comparison with NaN is false, so `p >= 0.0 and
+    # p < 1.0` is false for NaN and the negation fires. A NaN slipping through
+    # would zero the whole output while still consuming rng draws.
+    if not (p >= 0.0 and p < 1.0):
         raise Error("dropout: p must be in [0, 1), got " + String(p))
-    if not training or p == 0.0:
+    # Eval mode, or p == 0, returns an identity copy WITHOUT drawing — disabling
+    # dropout must not perturb the seeded generator. Since the guard above has
+    # already excluded p < 0, `p <= 0.0` here means exactly p == 0, and avoids a
+    # float `==` comparison.
+    if not training or p <= 0.0:
         return x.copy()
 
     var keep_prob = 1.0 - p

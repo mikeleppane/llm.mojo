@@ -59,6 +59,18 @@ def test_p_out_of_range_raises() raises:
         _ = dropout(x, 1.0, True, rng)
 
 
+def test_p_nan_raises() raises:
+    # A NaN p is neither < 0 nor >= 1, so a naive two-sided guard would let it
+    # through — silently zeroing the output while consuming rng draws. It must
+    # raise like any other out-of-range p.
+    var inf = 1.0e308 * 10.0  # overflows to +inf
+    var nan_p = inf - inf  # inf - inf = NaN
+    var x = from_rows([[1.0]])
+    var rng = Rng(1)
+    with assert_raises(contains="p must be in"):
+        _ = dropout(x, nan_p, True, rng)
+
+
 def test_training_is_deterministic_for_a_seed() raises:
     var x = full_2d(8, 8, 1.0)
     var rng_a = Rng(2024)

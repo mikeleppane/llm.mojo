@@ -10,6 +10,7 @@
 from std.testing import (
     assert_almost_equal,
     assert_equal,
+    assert_raises,
     assert_true,
     TestSuite,
 )
@@ -93,6 +94,17 @@ def test_constant_row_maps_to_bias() raises:
     assert_almost_equal(y[0, 0], 0.5, atol=1e-12)
     assert_almost_equal(y[0, 1], -0.5, atol=1e-12)
     assert_almost_equal(y[0, 2], 2.0, atol=1e-12)
+
+
+def test_bias_shape_mismatch_raises() raises:
+    # A LayerNorm hand-built with a bias narrower than the weight would read out
+    # of bounds at the per-column bias add. forward validates weight and bias are
+    # both [1, C] and raises instead.
+    var weight = from_rows([[1.0, 1.0, 1.0, 1.0]])  # C = 4
+    var bad_bias = from_rows([[0.0, 0.0, 0.0]])  # C = 3, mismatched
+    var ln = LayerNorm(Parameter(weight^), Parameter(bad_bias^))
+    with assert_raises(contains="bias"):
+        _ = ln.forward(ln_input())
 
 
 def test_init_default_shape_and_values() raises:

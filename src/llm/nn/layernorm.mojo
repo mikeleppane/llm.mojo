@@ -57,6 +57,18 @@ struct LayerNorm(Copyable, Movable):
                 + " features, got "
                 + String(c)
             )
+        # weight and bias must both be [1, C]; validate the bias here rather than
+        # read out of bounds at the per-column scale/shift.
+        if self.bias.value.rows != 1 or self.bias.value.cols != c:
+            raise Error(
+                "LayerNorm.forward: bias must be [1, "
+                + String(c)
+                + "], got ["
+                + String(self.bias.value.rows)
+                + ", "
+                + String(self.bias.value.cols)
+                + "]"
+            )
         var out = zeros_2d(x.rows, c)
         var inv_c = 1.0 / Float64(c)
         for r in range(x.rows):

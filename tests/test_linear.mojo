@@ -59,6 +59,18 @@ def test_shape_mismatch_raises() raises:
         _ = layer.forward(x)
 
 
+def test_bias_shape_mismatch_raises() raises:
+    # A layer hand-built with a bias whose width doesn't match out (the weight's
+    # row count) would otherwise read out of bounds when broadcasting the bias.
+    # forward validates the bias is [1, out] and raises instead.
+    var w = from_rows([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])  # out=2
+    var bad_bias = from_rows([[0.5]])  # [1, 1], should be [1, 2]
+    var layer = Linear(Parameter(w^), Parameter(bad_bias^))
+    var x = from_rows([[1.0, 0.0, -1.0]])
+    with assert_raises(contains="bias"):
+        _ = layer.forward(x)
+
+
 def test_init_random_is_deterministic() raises:
     var rng_a = Rng(1234)
     var rng_b = Rng(1234)

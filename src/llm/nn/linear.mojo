@@ -62,6 +62,19 @@ struct Linear(Copyable, Movable):
                 + " input features, got "
                 + String(x.cols)
             )
+        # The bias must be [1, out] so it broadcasts across rows; validate it here
+        # rather than read out of bounds at the per-column add (out = weight rows).
+        var out_features = self.weight.value.rows
+        if self.bias.value.rows != 1 or self.bias.value.cols != out_features:
+            raise Error(
+                "Linear.forward: bias must be [1, "
+                + String(out_features)
+                + "], got ["
+                + String(self.bias.value.rows)
+                + ", "
+                + String(self.bias.value.cols)
+                + "]"
+            )
         var wt = transpose(self.weight.value)  # [out, in] -> [in, out]
         var out = matmul(x, wt)  # [N, in] @ [in, out] -> [N, out]
         for r in range(out.rows):
