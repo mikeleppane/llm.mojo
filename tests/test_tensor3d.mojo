@@ -4,7 +4,12 @@
 # you catch a transposed stride before it becomes an attention bug. The rest
 # cover set-then-get, size, and the checked accessor's out-of-range raise.
 
-from std.testing import assert_equal, assert_raises, TestSuite
+from std.testing import (
+    assert_equal,
+    assert_almost_equal,
+    assert_raises,
+    TestSuite,
+)
 
 from llm.tensor.tensor3d import Tensor3D, zeros_3d
 
@@ -21,7 +26,7 @@ def test_offset_layout() raises:
 def test_set_get() raises:
     var t = zeros_3d(2, 3, 4)
     t[1, 2, 3] = 42.0
-    assert_equal(t[1, 2, 3], 42.0)
+    assert_almost_equal(t[1, 2, 3], 42.0, atol=1e-12)
     assert_equal(t.size(), 24)
 
 

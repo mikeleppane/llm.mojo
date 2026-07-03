@@ -4,7 +4,12 @@
 # ones/zeros/full constructors, the checked accessor's out-of-range raise, and
 # from_rows rejecting ragged input.
 
-from std.testing import assert_equal, assert_raises, TestSuite
+from std.testing import (
+    assert_equal,
+    assert_almost_equal,
+    assert_raises,
+    TestSuite,
+)
 
 from llm.tensor.tensor2d import Tensor2D, zeros_2d, ones_2d, full_2d, from_rows
 
@@ -14,14 +19,16 @@ def test_zeros_shape() raises:
     assert_equal(x.rows, 2)
     assert_equal(x.cols, 3)
     assert_equal(x.size(), 6)
-    assert_equal(x[0, 0], 0.0)
-    assert_equal(x[1, 2], 0.0)
+    # Stored floats: use the house tolerance habit even where the values are
+    # exact, so the pattern a reader copies is the safe one.
+    assert_almost_equal(x[0, 0], 0.0, atol=1e-12)
+    assert_almost_equal(x[1, 2], 0.0, atol=1e-12)
 
 
 def test_set_get() raises:
     var x = zeros_2d(2, 3)
     x[1, 2] = 7.5
-    assert_equal(x[1, 2], 7.5)
+    assert_almost_equal(x[1, 2], 7.5, atol=1e-12)
 
 
 def test_offset() raises:
@@ -33,14 +40,14 @@ def test_offset() raises:
 
 def test_ones() raises:
     var x = ones_2d(2, 2)
-    assert_equal(x[0, 0], 1.0)
-    assert_equal(x[1, 1], 1.0)
+    assert_almost_equal(x[0, 0], 1.0, atol=1e-12)
+    assert_almost_equal(x[1, 1], 1.0, atol=1e-12)
 
 
 def test_full() raises:
     var x = full_2d(2, 2, -3.0)
-    assert_equal(x[0, 1], -3.0)
-    assert_equal(x[1, 0], -3.0)
+    assert_almost_equal(x[0, 1], -3.0, atol=1e-12)
+    assert_almost_equal(x[1, 0], -3.0, atol=1e-12)
 
 
 def test_at_out_of_range_raises() raises:
@@ -53,8 +60,8 @@ def test_from_rows_values() raises:
     var a = from_rows([[1.0, 2.0], [3.0, 4.0]])
     assert_equal(a.rows, 2)
     assert_equal(a.cols, 2)
-    assert_equal(a[0, 1], 2.0)
-    assert_equal(a[1, 0], 3.0)
+    assert_almost_equal(a[0, 1], 2.0, atol=1e-12)
+    assert_almost_equal(a[1, 0], 3.0, atol=1e-12)
 
 
 def test_from_rows_rejects_ragged() raises:

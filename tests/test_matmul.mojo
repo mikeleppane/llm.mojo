@@ -5,12 +5,7 @@
 # equivalent (compared with tolerance, since float summation order differs).
 # matvec is pinned to a hand computation.
 
-from std.testing import (
-    assert_equal,
-    assert_almost_equal,
-    assert_raises,
-    TestSuite,
-)
+from std.testing import assert_almost_equal, assert_raises, TestSuite
 
 from llm.tensor.tensor2d import zeros_2d, from_rows
 from llm.tensor.ops import matmul, matmul_ikj, matvec
@@ -20,10 +15,10 @@ def test_matmul_small() raises:
     var a = from_rows([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
     var b = from_rows([[7.0, 8.0], [9.0, 10.0], [11.0, 12.0]])
     var c = matmul(a, b)
-    assert_equal(c[0, 0], 58.0)
-    assert_equal(c[0, 1], 64.0)
-    assert_equal(c[1, 0], 139.0)
-    assert_equal(c[1, 1], 154.0)
+    assert_almost_equal(c[0, 0], 58.0, atol=1e-12)
+    assert_almost_equal(c[0, 1], 64.0, atol=1e-12)
+    assert_almost_equal(c[1, 0], 139.0, atol=1e-12)
+    assert_almost_equal(c[1, 1], 154.0, atol=1e-12)
 
 
 def test_orders_agree() raises:
@@ -41,6 +36,14 @@ def test_matmul_shape_mismatch_raises() raises:
     var b = zeros_2d(2, 2)  # 3 != 2
     with assert_raises(contains="shape mismatch"):
         _ = matmul(a, b)
+
+
+def test_matmul_ikj_shape_mismatch_raises() raises:
+    # The ikj path has its own guard; pin it so it can't be deleted unnoticed.
+    var a = zeros_2d(2, 3)
+    var b = zeros_2d(2, 2)  # 3 != 2
+    with assert_raises(contains="shape mismatch"):
+        _ = matmul_ikj(a, b)
 
 
 def test_matvec_hand_computed() raises:
