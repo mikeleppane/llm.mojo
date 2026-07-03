@@ -48,6 +48,10 @@ publishable until its code passes these — see *Publishing* below):
 - No stdlib `Tensor[T]`. This project defines its own tensors under
   `src/llm/tensor/`.
 - Never compare floats with `==`. Use `assert_almost_equal` with a tolerance.
+- You **cannot transfer a single struct field** out of a live value:
+  `s.field^` fails with "destroyed out of the middle of a value". `.copy()` the
+  field (or move the whole `s`). Owned (`var`) args likewise need `^`/`.copy()`
+  at the call site — `List`/`Dict`/user structs are not `ImplicitlyCopyable`.
 
 ## Toolchain and the quality floor
 
