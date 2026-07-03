@@ -168,4 +168,25 @@ allocating value, but reading it at runtime requires an explicit
 
 ## Review triage
 
-<!-- filled in at the review gate -->
+One external reviewer (Claude Opus 4.8, xhigh reasoning), read-only,
+non-interactive, over `git diff main...part-08-architecture`. Verdict: **diff
+clean** — no blockers, no should-fix. The reviewer independently recomputed the
+parameter total to 124,439,808 term-by-term, confirmed the per-block constant
+`12C^2 + 13C`, and checked both cleanups for bit-identity — including the one
+real risk on the `TWO_PI` change: `*` is left-associative, so the original
+`cos(2.0 * pi * u2)` already grouped as `(2.0*pi)*u2`, and precomputing the
+product performs the same two multiplies in the same order (goldens hold).
+
+Two optional nits, both **fixed**:
+
+1. `test_parameter_count_embedding_share` comment claimed the exact count minus
+   its terms "leaves nothing over," but the assertion only checked
+   `count > embed`. Strengthened to reconstruct the full total from its
+   documented parts (`embed + T*C + L*(12C^2+13C) + 2C`) and assert exact
+   equality, so the test now proves what the comment says.
+2. `assert_true(cfg.dropout == 0.1)` used float `==` in a test. The house rule
+   bans float `==`; switched to `assert_almost_equal`, consistent with the rest
+   of the numeric suite. (Safe either way — exact literal round-trip — but the
+   rule is the rule.)
+
+No findings rejected; there were none to reject.
