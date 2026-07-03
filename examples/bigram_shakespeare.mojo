@@ -14,12 +14,10 @@
 # followed by 'u') but has no memory beyond one step. That limitation is the
 # whole motivation for the Transformer that follows.
 
-from std.math import exp
-
 from llm.config import TrainingConfig
 from llm.tokenizer.char import CharTokenizer
 from llm.data.corpus import load_text
-from llm.data.dataset import TokenDataset, train_val_split
+from llm.data.dataset import train_val_split
 from llm.data.loader import BatchLoader
 from llm.models.bigram import BigramLM
 from llm.tensor.tensor2d import zeros_2d
