@@ -141,12 +141,26 @@ Tolerances: `1e-9`–`1e-12` for `Float64` reference math, `1e-4`–`1e-5` for
 gradient checks) live in
 [test-driven-development](.agents/skills/test-driven-development/SKILL.md).
 
+**`TestSuite`'s per-test timing display is unreliable on the pinned Mojo
+(1.0.0b2)** — the bracketed `[70.977]`/`[309.171]` numbers can be off by orders
+of magnitude from the real cost (a whole file that runs in ~4 s of `time`
+wall-clock may print hundreds of "seconds"). Don't diagnose a "slow test" from
+those numbers; measure with `time pixi run mojo run -I src tests/<file>.mojo`.
+
 ## Commits
 
 Conventional Commits with a **required scope**, atomic, imperative subject ≤72
 chars, a body explaining *why*. **No AI/assistant attribution anywhere** — no
 `Co-Authored-By` for an AI, no "Generated with" line, no 🤖. The full rules are in
 [git-conventions](.agents/skills/git-conventions/SKILL.md).
+
+**No internal-plan references anywhere** — not in commit messages, PR bodies,
+docstrings, or code comments. The plans under `docs/plans/` are gitignored and
+unpublished, so `plan D3`, `decision D4`, `§5`, `per the plan`, and the like
+dangle for anyone reading the repo. State the reason itself, not the document
+that recorded it. External prior art (`minbpe-style`, `nanoGPT`, a paper) is
+fine — the ban is on this repo's private planning artifacts. (See
+[git-conventions](.agents/skills/git-conventions/SKILL.md).)
 
 **Scope vocabulary** (this list is authoritative; keep it in sync with the layout
 as modules emerge):

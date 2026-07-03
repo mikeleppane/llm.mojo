@@ -12,6 +12,7 @@ numpy = "*"
 matplotlib = "*"
 jupyterlab = "*"
 ipykernel = "*"
+regex = ">=2026.6.28,<2027"
 
 [tasks]
 mojo-version = "mojo --version"
