@@ -24,6 +24,19 @@ from .batch import TokenBatch
 from .dataset import TokenDataset
 
 
+def _window_starts(size: Int, seq_len: Int, stride: Int) -> List[Int]:
+    # Enumerate window starts in natural order: every s with s + seq_len + 1 <=
+    # size (so both ids[s : s+T] and ids[s+1 : s+T+1] stay in bounds), i.e.
+    # s <= size - seq_len - 1, stepping by stride from 0. Allocates the list.
+    var starts: List[Int] = []
+    var max_start = size - seq_len - 1
+    var s = 0
+    while s <= max_start:
+        starts.append(s)
+        s += stride
+    return starts^
+
+
 struct BatchLoader(Movable):
     var dataset: TokenDataset  # the token sequence being windowed
     var batch_size: Int  # B: windows per batch
@@ -62,16 +75,10 @@ struct BatchLoader(Movable):
         self.batch_size = batch_size
         self.seq_len = seq_len
         self.stride = stride
-        self.order = []
         self.cursor = 0
-
-        # Enumerate window starts: every s with s + seq_len + 1 <= size, i.e.
-        # s <= size - seq_len - 1, stepping by stride from 0.
-        var max_start = self.dataset.size() - seq_len - 1
-        var s = 0
-        while s <= max_start:
-            self.order.append(s)
-            s += stride
+        # Window starts in natural order; start_epoch reshuffles a fresh copy of
+        # this canonical enumeration so its result depends only on the seed.
+        self.order = _window_starts(self.dataset.size(), seq_len, stride)
 
         if len(self.order) < batch_size:
             raise Error(
@@ -96,9 +103,16 @@ struct BatchLoader(Movable):
         return self.num_windows() // self.batch_size
 
     def start_epoch(mut self, seed: UInt64):
-        # Begin a fresh epoch: shuffle the window starts with Rng(seed) and rewind
-        # the cursor. The same seed always yields the same order, so batches are
-        # reproducible. Callers who want per-epoch variation pass seed + epoch.
+        # Begin a fresh epoch: rebuild the canonical (natural-order) window starts
+        # and shuffle that copy with Rng(seed), then rewind the cursor. Rebuilding
+        # first is what makes the result depend *only* on the seed — shuffling the
+        # previous epoch's already-permuted order in place would make each epoch's
+        # order a function of the whole prior history, silently breaking "same
+        # seed -> same batches". Callers wanting per-epoch variation pass
+        # seed + epoch.
+        self.order = _window_starts(
+            self.dataset.size(), self.seq_len, self.stride
+        )
         var rng = Rng(seed)
         rng.shuffle(self.order)
         self.cursor = 0

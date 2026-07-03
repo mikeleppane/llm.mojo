@@ -108,6 +108,22 @@ def test_same_seed_identical_batches() raises:
     assert_true(any_diff)
 
 
+def test_start_epoch_depends_only_on_seed() raises:
+    # start_epoch(seed) must reproduce the same order regardless of what the
+    # loader did before — otherwise the order would depend on the whole history
+    # of prior epochs, not just the seed, and "same seed -> same batches" would
+    # quietly fail mid-training. Run a full epoch, then re-seed with the same
+    # value: the first batch must match the first batch of the first epoch.
+    var loader = BatchLoader(_range_dataset(80), 3, 5, stride=5)
+    loader.start_epoch(5)
+    var first = loader.next_batch()
+    while loader.has_next():
+        _ = loader.next_batch()  # exhaust the epoch (order is now consumed)
+    loader.start_epoch(5)  # same seed again
+    var again = loader.next_batch()
+    assert_true(_batches_equal(first, again))
+
+
 def test_epoch_covers_all_windows_once() raises:
     # N=46, B=3, T=5, stride=5 -> exactly 9 windows (starts 0,5,...,40), 3 full
     # batches, nothing dropped. Collect the start of every window seen in one
