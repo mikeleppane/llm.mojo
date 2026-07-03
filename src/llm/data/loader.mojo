@@ -17,6 +17,13 @@
 # `stride` is explicit: pass stride == seq_len for non-overlapping windows (each
 # token used once as an input), or a smaller stride to oversample with overlap.
 # There is no magic default — the caller states the step it wants.
+#
+# A fresh loader iterates in natural (unshuffled) order — convenient for
+# `overfit_batch` and inspection, but note that natural order is fixed and always
+# drops the same trailing `num_windows % B` windows (the corpus tail). A training
+# loop should call `start_epoch(seed + epoch)` at the top of every epoch: that
+# both varies the order and reshuffles which windows land in the dropped
+# remainder, so the tail is not permanently starved of training.
 
 from llm.utils import Rng
 
