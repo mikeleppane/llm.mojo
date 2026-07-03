@@ -8,8 +8,10 @@
 # Everything here is integer-valued, so every assertion is exact.
 
 from std.testing import assert_equal, assert_true, assert_raises, TestSuite
+from std.math import isnan
 
 from llm.utils import Rng
+from llm.tensor.init_weights import xavier_2d
 
 
 def test_same_seed_same_sequence() raises:
@@ -106,6 +108,72 @@ def test_shuffle_deterministic() raises:
     rb.shuffle(b)
     for i in range(50):
         assert_equal(a[i], b[i])
+
+
+def test_uniform_in_unit_interval() raises:
+    # 1000 draws all land in [0, 1).
+    var r = Rng(7)
+    for _ in range(1000):
+        var u = r.uniform()
+        assert_true(u >= 0.0 and u < 1.0)
+
+
+def test_uniform_deterministic() raises:
+    # Same seed -> identical float stream, draw for draw.
+    var a = Rng(99)
+    var b = Rng(99)
+    for _ in range(100):
+        assert_equal(a.uniform(), b.uniform())
+
+
+def test_uniform_range_within_bounds() raises:
+    var r = Rng(3)
+    for _ in range(1000):
+        var u = r.uniform_range(-2.0, 5.0)
+        assert_true(u >= -2.0 and u < 5.0)
+
+
+def test_normal_is_finite() raises:
+    # Box-Muller must never produce NaN or infinity, even across many draws
+    # (the log(0) guard is what makes this hold).
+    var r = Rng(11)
+    for _ in range(1000):
+        var z = r.normal(0.0, 1.0)
+        assert_true(not isnan(z))
+        assert_true(z > -1.0e6 and z < 1.0e6)
+
+
+def test_normal_deterministic() raises:
+    var a = Rng(5)
+    var b = Rng(5)
+    for _ in range(100):
+        assert_equal(a.normal(0.0, 1.0), b.normal(0.0, 1.0))
+
+
+def test_xavier_shape() raises:
+    # xavier_2d(fan_in, fan_out) produces a [fan_out, fan_in] weight tensor.
+    var r = Rng(1)
+    var w = xavier_2d(r, 4, 6)
+    assert_equal(w.rows, 6)  # fan_out
+    assert_equal(w.cols, 4)  # fan_in
+
+
+def test_xavier_deterministic() raises:
+    var ra = Rng(2)
+    var rb = Rng(2)
+    var wa = xavier_2d(ra, 3, 5)
+    var wb = xavier_2d(rb, 3, 5)
+    for i in range(wa.rows):
+        for j in range(wa.cols):
+            assert_equal(wa[i, j], wb[i, j])
+
+
+def test_xavier_no_nan() raises:
+    var r = Rng(4)
+    var w = xavier_2d(r, 8, 8)
+    for i in range(w.rows):
+        for j in range(w.cols):
+            assert_true(not isnan(w[i, j]))
 
 
 def main() raises:
