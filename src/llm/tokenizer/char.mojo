@@ -115,7 +115,13 @@ struct CharTokenizer(Copyable, Movable):
                     " declared)"
                 )
             var value = Int(String(lines[line_index]))
-            var symbol = String(Codepoint.from_u32(UInt32(value)).value())
+            var codepoint = Codepoint.from_u32(UInt32(value))
+            if not codepoint:
+                raise Error(
+                    "CharTokenizer.load: not a valid codepoint: "
+                    + String(value)
+                )
+            var symbol = String(codepoint.value())
             tok.stoi[symbol] = len(tok.itos)
             tok.itos.append(symbol)
         return tok^

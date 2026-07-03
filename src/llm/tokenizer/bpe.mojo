@@ -31,8 +31,9 @@ comptime N_BYTES = 256
 
 
 def pair_key(left: Int, right: Int) -> Int:
-    # Pack an adjacent (left, right) id pair into one Int key. Bijective for ids
-    # in [0, 2**32). Does not allocate; does not raise.
+    # Pack an adjacent (left, right) id pair into one Int key. Lossless for ids
+    # well under 2**31 (see PAIR_BASE) — ample for GPT-2's 50257 and any trained
+    # vocab here. Does not allocate; does not raise.
     return left * PAIR_BASE + right
 
 
@@ -59,7 +60,11 @@ struct BPETokenizer(Copyable, Movable):
         # Append one merge at the next rank and create its token. The new id is
         # the current vocab size; its bytes are the left token's bytes followed
         # by the right token's. Returns the new id. Mutates self; allocates.
+        # Raises on a pair already merged: re-registering it would desync the
+        # rank sequence from merge_rank's length and break save().
         var key = pair_key(left, right)
+        if key in self.merge_rank:
+            raise Error("BPETokenizer.register_merge: pair already merged")
         var new_id = len(self.vocab)
         self.merge_rank[key] = len(self.merge_rank)
         self.merge_result[key] = new_id
@@ -111,9 +116,10 @@ struct BPETokenizer(Copyable, Movable):
             ids = merged_ids^
         return ids^
 
-    def encode(self, text: String) raises -> List[Int]:
+    def encode(self, text: String) -> List[Int]:
         # Encode a whole string: its UTF-8 bytes through the merge loop. The core
         # BPE tokenizer does no pre-splitting (that is GPT-2's job, in gpt2.mojo).
+        # Cannot raise: every byte has a base id and encode_bytes is total.
         var bytes_view = text.as_bytes()
         var chunk: List[UInt8] = []
         for i in range(len(bytes_view)):
@@ -150,11 +156,16 @@ struct BPETokenizer(Copyable, Movable):
             )
         var num_merges = target_vocab_size - self.vocab_size()
 
-        # Working sequence of ids, starting from the raw bytes.
+        # Working sequence of ids. Encoding with the merges learned so far means
+        # already-merged pairs don't reappear, so training an already-trained
+        # tokenizer extends its vocab instead of re-learning (and re-registering)
+        # a pair it already knows. For a fresh tokenizer this is just the raw
+        # per-byte ids.
         var bytes_view = text.as_bytes()
-        var ids: List[Int] = []
+        var raw: List[UInt8] = []
         for i in range(len(bytes_view)):
-            ids.append(self.byte_to_id[Int(bytes_view[i])])
+            raw.append(bytes_view[i])
+        var ids = self.encode_bytes(raw)
 
         for _ in range(num_merges):
             if len(ids) < 2:
@@ -196,7 +207,8 @@ struct BPETokenizer(Copyable, Movable):
     def save(self, path: String) raises:
         # Write BPETOK v1: magic line, vocab size, one line per token in id order
         # (byte count then the byte values), then the merge count and one line per
-        # merge in rank order (left, right, merged). Integers only (D6).
+        # merge in rank order (left, right, merged). Integers only, so no
+        # newline/whitespace escaping is ever needed.
         var text = (
             String(BPETOK_MAGIC) + "\n" + String(self.vocab_size()) + "\n"
         )

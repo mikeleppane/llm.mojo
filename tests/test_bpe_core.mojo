@@ -34,7 +34,7 @@ def _assert_ids_equal(got: List[Int], expected: List[Int]) raises:
 
 
 def test_pair_key_packs_losslessly() raises:
-    # Distinct (left, right) pairs must map to distinct keys (D2). A collision
+    # Distinct (left, right) pairs must map to distinct packed keys. A collision
     # would corrupt the merge dictionaries.
     assert_true(pair_key(97, 98) != pair_key(98, 97))
     assert_true(pair_key(256, 97) != pair_key(97, 256))
@@ -130,6 +130,31 @@ def test_save_load_round_trip() raises:
     _assert_ids_equal(loaded.encode(corpus), tok.encode(corpus))
     var probe = String("brown dog fox")
     _assert_ids_equal(loaded.encode(probe), tok.encode(probe))
+
+
+def test_train_twice_extends_without_corruption() raises:
+    # Training an already-trained tokenizer must extend the vocab, not re-learn
+    # a pair it already knows: continuing from the current encoding keeps ranks
+    # contiguous so save/load and encode stay consistent.
+    var corpus = String("the quick brown fox jumps over the lazy dog. banana")
+    var tok = BPETokenizer()
+    tok.train(corpus, 280)
+    tok.train(corpus, 300)
+    assert_equal(tok.vocab_size(), 300)
+    # Ranks stay 0..(n-1) and contiguous, so save/load round-trips.
+    var path = _tmp_path("bpe_retrain.bpetok")
+    tok.save(path)
+    var loaded = BPETokenizer.load(path)
+    assert_equal(loaded.vocab_size(), 300)
+    _assert_ids_equal(loaded.encode(corpus), tok.encode(corpus))
+    assert_equal(tok.decode(tok.encode(corpus)), corpus)
+
+
+def test_register_duplicate_merge_raises() raises:
+    var tok = BPETokenizer()
+    _ = tok.register_merge(97, 98)
+    with assert_raises():
+        _ = tok.register_merge(97, 98)  # same pair twice must be rejected
 
 
 def test_train_below_base_raises() raises:
