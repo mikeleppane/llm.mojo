@@ -73,6 +73,19 @@ publishable until its code passes these — see *Publishing* below):
   'ImplicitlyCopyable'". Lift it explicitly with `materialize[T]()` — the build
   runs at compile time, the read copies the frozen result. A bare use is a
   compile error, never a silent copy.
+- **`std.math` transcendental/root functions run in a comptime context.** Not
+  just exact integer arithmetic — `comptime SQRT_2_OVER_PI = sqrt(2.0 / pi)`
+  compiles and is bit-identical to the hand-spelled literal (verified with a
+  `comptime assert` against `0.7978845608028654`). So a derived numeric constant
+  whose derivation is its documentation can be bound at compile time, not only a
+  literal. A constant that is *fitted*, not derived (e.g. GELU's `0.044715`), has
+  no expression to bind — name and cite it instead.
+- **A struct constructor that takes `var value` and needs the value's shape must
+  read the shape *before* the move.** `self.grad = zeros_2d(value.rows,
+  value.cols)` then `self.value = value^` works; reordering (move first, read
+  after) uses a destroyed value. This is the ownership shape of every layer
+  factory here (`Parameter`, and the `init_random`/`init_default` factories that
+  build tensors then hand them to `Parameter`).
 
 ## Toolchain and the quality floor
 
