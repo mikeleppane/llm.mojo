@@ -76,6 +76,31 @@ while implementing the tokenizers. Not published as-is.
 - **Temp files:** `from std.tempfile import gettempdir` → `/tmp`; used for
   save/load round-trip tests.
 
+## What the code review caught (after the suite was green)
+
+Two independent reviews (GPT-5.5 and Opus 4.8) ran against the branch. The
+capstone lesson: a green parity suite is only as good as its samples.
+
+- **The GPT-2 loader silently dropped 8 merges.** To skip the `#version: 0.2`
+  header, `from_files` skipped every merges.txt line `startswith("#")`. But `#`
+  is a normal token byte, and 8 real merges begin with it (`# #`, `## ##`,
+  `#### ####`, …). So 49992 merges loaded instead of 50000, and `encode("##")`
+  gave `[2, 2]` instead of GPT-2's `[2235]`. Every parity/golden test passed —
+  because not one sample string contained `#`. The fix is to skip only the
+  leading `#version` line. The durable fix is the *test*: a `#`-heavy parity
+  sample plus a structural `len(merge_rank) == 50000` invariant that fails even
+  when no sample happens to hit a dropped rule. Byte-exact fidelity has to be
+  proven on the bytes that are easy to forget.
+- **Re-training could corrupt the merge tables.** `train` rebuilt its working
+  sequence from raw bytes, so a second `train` call could re-select an
+  already-merged pair; `register_merge` then overwrote its rank while the dict
+  length stayed flat, and `save()` later indexed out of bounds. Fixed by
+  training from the current encoding (already-merged pairs can't reappear) and
+  rejecting a duplicate merge outright.
+- Smaller: an over-declared `raises`, a `pair_key` docstring that overstated the
+  safe range as `[0, 2**32)` when the real bound is `< 2**31`, and corrupt-file
+  paths that aborted (`Optional.value()`) instead of raising cleanly.
+
 ## Deferred / out of scope (as agreed)
 
 - No special-token handling in `encode` (matches OpenAI's `encoder.py`);
