@@ -11,7 +11,15 @@
 from std.testing import assert_equal, assert_true, assert_false, assert_raises
 from std.testing import TestSuite
 
-from llm.data import TokenDataset, TokenBatch, BatchLoader, overfit_batch
+from llm.data import (
+    TokenDataset,
+    TokenBatch,
+    BatchLoader,
+    overfit_batch,
+    load_text,
+    train_val_split,
+)
+from llm.tokenizer import CharTokenizer
 
 
 def _range_dataset(n: Int) -> TokenDataset:
@@ -168,6 +176,45 @@ def test_overfit_batch_is_fixed() raises:
     assert_equal(first.input_at(0, 0), 0)
     assert_equal(first.input_at(1, 0), 3)
     assert_equal(first.target_at(0, 0), 1)
+
+
+def test_end_to_end_tinyshakespeare() raises:
+    # The whole pipeline on the real corpus: load text, build a char vocab,
+    # encode, split 90/10, and window it. Proves the pieces compose and that a
+    # decoded input row is the actual corpus text — not just shape-correct noise.
+    var text = load_text("data/tinyshakespeare/input.txt")
+    var tok = CharTokenizer.from_text(text)
+    var ids = tok.encode(text)
+    var split = train_val_split(ids, 0.1)
+
+    var loader = BatchLoader(split.train.copy(), 4, 16, stride=16)
+    # No start_epoch: natural order, so the first batch's first row is the very
+    # start of the training ids, which equals the start of the corpus.
+    var batch = loader.next_batch()
+    assert_equal(batch.batch_size, 4)
+    assert_equal(batch.seq_len, 16)
+
+    # Shift-by-one holds on real ids too.
+    for b in range(4):
+        for t in range(15):
+            assert_equal(batch.target_at(b, t), batch.input_at(b, t + 1))
+
+    # Decode the first input row and compare it to the first 16 codepoints of the
+    # corpus. Both must read "First Citizen:\nB".
+    var row0: List[Int] = []
+    for t in range(16):
+        row0.append(batch.input_at(0, t))
+    var decoded = tok.decode(row0)
+
+    var expected = String("")
+    var taken = 0
+    for cp in text.codepoint_slices():
+        if taken >= 16:
+            break
+        expected += String(cp)
+        taken += 1
+    assert_equal(decoded, expected)
+    assert_equal(decoded, String("First Citizen:\nB"))
 
 
 def main() raises:
