@@ -206,7 +206,9 @@ The `mojo-syntax` skill has the full list; these are the ones that recur here:
   the tokenizer.
 - **Explicit copy/transfer** for non-`ImplicitlyCopyable` types (`List`, `Dict`,
   most user structs): `d.copy()` or transfer with `^`. `return my_struct` errors
-  until you transfer or add the conformance.
+  until you transfer or add the conformance. You **cannot `^` a single field out
+  of a still-live aggregate** — `some_struct.field^` fails with "destroyed out of
+  the middle of a value"; `.copy()` the field (or move the whole value) instead.
 - **Self-qualify struct parameters** inside a struct: `var data: Self.T`, not
   `var data: T`.
 - **Iterate `Dict` entries directly**: `for e in d.items(): print(e.key, e.value)`
