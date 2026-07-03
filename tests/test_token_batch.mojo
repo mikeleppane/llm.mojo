@@ -34,6 +34,17 @@ def test_length_mismatch_raises() raises:
         _ = TokenBatch(good.copy(), short.copy(), batch_size=2, seq_len=3)
 
 
+def test_nonpositive_dims_raise() raises:
+    # A batch must have a positive shape. Without an explicit check a negative
+    # batch_size and seq_len can multiply to the right flat length and slip
+    # through, leaving accessors with nonsensical ranges like [0, -2).
+    var six: List[Int] = [0, 1, 2, 3, 4, 5]
+    with assert_raises():
+        _ = TokenBatch([], [], batch_size=0, seq_len=0)
+    with assert_raises():
+        _ = TokenBatch(six.copy(), six.copy(), batch_size=-2, seq_len=-3)
+
+
 def test_out_of_bounds_raises() raises:
     var inputs: List[Int] = [0, 1, 2, 3, 4, 5]
     var targets: List[Int] = [0, 1, 2, 3, 4, 5]

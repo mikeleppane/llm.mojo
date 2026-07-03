@@ -28,9 +28,19 @@ struct TokenBatch(Copyable, Movable):
         batch_size: Int,
         seq_len: Int,
     ) raises:
-        # Take ownership of both arrays. Raises unless each flat array has exactly
-        # batch_size * seq_len elements, so a mis-shaped batch is caught at
-        # construction rather than as a bad read later.
+        # Take ownership of both arrays. Raises unless the shape is positive and
+        # each flat array has exactly batch_size * seq_len elements, so a
+        # mis-shaped batch is caught at construction rather than as a bad read
+        # later. The positivity check matters on its own: a negative batch_size
+        # and seq_len can multiply to the right length and otherwise slip through.
+        if batch_size < 1:
+            raise Error(
+                "TokenBatch: batch_size must be >= 1, got " + String(batch_size)
+            )
+        if seq_len < 1:
+            raise Error(
+                "TokenBatch: seq_len must be >= 1, got " + String(seq_len)
+            )
         var expected = batch_size * seq_len
         if len(inputs) != expected:
             raise Error(
