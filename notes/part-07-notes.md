@@ -144,4 +144,98 @@ No findings were rejected.
 
 ## Phase 1 — the bigram LM (branch `part-07-bigram`)
 
-_(pending)_
+The model is one `[V, V]` table: row `i` is the logits for the token after token
+`i`. New packages: `models/` (BigramLM), `training/` (perplexity, sgd_step,
+train_bigram), `generation/` (sample_categorical), plus
+`examples/bigram_shakespeare.mojo`. AGENTS.md gained the `models` scope, a layout
+line, and the layering edge `tensor, data → models → {training, generation}`.
+
+### Design notes that are blog gold
+
+- **One struct, two fillings.** `from_counts` sets `table[i,j] = log P̂(j|i)`
+  from smoothed bigram frequencies; feeding log-probabilities through softmax
+  reproduces exactly those probabilities, so the count model is simultaneously
+  the "embedding" model and the analytic optimum of the batch cross-entropy.
+  That identity is what makes `test_converges_to_count_optimum` a true oracle for
+  loss + gradient + update at once.
+- **The bigram loss floor is not 0.** If a token is followed by different tokens
+  in the batch, no table drives its loss to 0 — the floor is the batch's
+  conditional entropy `H(next|current)`. So the overfit criterion splits: a
+  *deterministic* cyclic batch (each token has exactly one successor) reaches
+  loss < 0.05, while on a *real-text* batch the honest target is the count
+  model's loss, not zero. Getting this wrong would make a correct model look
+  broken.
+- **The fused `p − onehot` gradient, no `[B,T,V]` tensor.** The forward is a row
+  lookup, so `loss_and_grad` never materializes a logits tensor: per position it
+  scatter-adds `softmax(table[i]) − onehot(target)` into `grad[i, :]`, scaled by
+  `1/(B·T)`. Verified entry-by-entry against central differences (V=3, h=1e-5,
+  atol 1e-4) and by the row-sum-zero invariant (every `p − onehot` sums to 0).
+
+### Frozen tolerances / tuned constants (loosening later is Ask-first)
+
+- `test_grad_matches_finite_difference`: central difference `h = 1e-5`, `atol
+  1e-4` (the Float64 sweet spot from Part III's step-size study).
+- `test_overfit_deterministic_batch`: V=6 cyclic, 2000 steps, lr 1.0 → loss
+  < 0.05.
+- `test_converges_to_count_optimum`: 200-char real slice, one window, 8000 steps,
+  lr 2.0, count-model smoothing 1e-6. The gap is deterministic (zeros init, no
+  RNG) — measured ~0.006, frozen at 0.02 (≈3.5× margin).
+- `test_loss_decreases`: 50 steps, lr 0.5 → non-increasing (float slack 1e-12)
+  and a net drop > 0.1. Full-batch GD on the convex bigram loss is monotone in
+  practice at this lr; no downsampled-checkpoint fallback was needed.
+- `test_loss_decreases_on_tinyshakespeare`: 4000-char slice, one overfit batch
+  (B=32, T=16), 400 steps, lr 1.0 → end < start − 0.5 and perplexity < V.
+
+### Deviations from the plan / decisions at EXECUTE
+
+- **`train_bigram` is single-fixed-batch full-batch GD** (as specified), so the
+  *example* implements its own multi-batch epoch loop over the corpus directly
+  from the primitives (`loss_and_grad` + `sgd_step`) rather than calling
+  `train_bigram` per step. The reusable multi-batch trainer arrives with the GPT.
+- **`from_counts` validates ids in `[0, V)`** and raises on out-of-range tokens —
+  not in the plan's signature but a cheap guard against a silent out-of-bounds
+  count write (the same defensive instinct the Phase 0 review rewarded).
+- The example trains 3000 steps (B=32, seq_len=16) on the full corpus: loss
+  falls 4.17 (=log 65) → ~2.66, perplexity 65 → ~14.3, and the sample is
+  bigram-plausible (English-looking letter pairs, no fluency — exactly the
+  limitation that motivates attention).
+
+### External review triage (part-07-bigram)
+
+Codex (GPT-5.5, high) and Opus 4.8 (xhigh) both reviewed the branch diff. Both
+independently confirmed the gradient is mathematically exact (sign, scale,
+repeated-row accumulation) and that the tests would fail under a sign-flipped or
+mis-scaled gradient — the load-bearing check passed. No Critical/High findings.
+All accepted; each fix got a failing test first.
+
+- **[Codex Medium — accepted] `sample_categorical` could draw a
+  zero-probability last entry.** With a distribution summing a hair under 1
+  (within the 1e-6 accept tolerance), an un-scaled `u = uniform()` in `[sum, 1)`
+  fell through the loop to the `return n - 1` clamp — which might be a zero-prob
+  entry (`[0.9999995, 0.0]`, seed 953094 → index 1). Fixed by drawing
+  `threshold = uniform() * total`: scaling by the actual total keeps the draw
+  strictly inside the real cumulative range, so a zero-prob entry can never be
+  selected and the final `return` becomes a pure rounding backstop. Also now
+  rejects negative entries. Regression test uses the exact triggering seed.
+- **[Codex Low — accepted] `from_counts` skipped id validation on a
+  single-token corpus.** The range check lived inside the bigram-pair loop, so
+  `from_counts([5], 2, ...)` (no pairs) returned a uniform model silently. Moved
+  to a pre-pass over every id.
+- **[Opus Nit — accepted] Two unused imports** in the example (`std.math.exp`,
+  `TokenDataset`) removed.
+- **[Opus Low — accepted as a note] `loss_and_grad` recomputes exp twice per
+  position** (logsumexp then softmax) and re-does it for repeated tokens. Opus
+  called it a defensible teaching choice; documented the O(B·T·V)
+  redundant-softmax cost in the docstring rather than optimizing (the batched
+  reuse arrives with the GPT).
+- **[Opus Nit — accepted] Sampler test only checked divergence, not that mass ∝
+  probability.** Added a 10k-draw frequency test on `[0.25, 0.75]` (within 3%),
+  the one invariant an in-support-but-skewed inverse-CDF would violate.
+- **[Opus Nit — accepted] Test gaps closed:** `next_probs` temperature path
+  (sum-to-1, T=1 recovers the count probs, high-T flattens, bad-T raises),
+  `next_logits` returns an independent copy (mutating it doesn't touch the
+  table), and `sgd_step`'s own shape-mismatch guard (new `tests/test_optimizer.mojo`).
+
+No findings were rejected. Opus explicitly verified the `return n - 1` in the
+sampler is not dead code (a genuine `[total, 1)` draw clamps there) — still true
+after the fix, now only as a rounding backstop.

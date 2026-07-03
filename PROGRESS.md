@@ -11,7 +11,8 @@ proves the part green on a fresh checkout (`pixi install` first).
 | IV | Utilities (rng, math) | ✅ green (`Rng` + float draws, timing) | `pixi run test` | 2026-07-03 |
 | V | Tokenization | ✅ green | `pixi run test` | 2026-07-03 |
 | VI | Dataset pipeline | ✅ green | `pixi run test` | 2026-07-03 |
-| VII+ | Model & training | not started | — | — |
+| VII | Tiny bigram LM | ✅ green | `pixi run test` | 2026-07-03 |
+| VIII+ | GPT model & training | not started | — | — |
 
 ## Notes
 
@@ -32,7 +33,15 @@ proves the part green on a fresh checkout (`pixi install` first).
   remainder-drop) with `overfit_batch`. Tiny Shakespeare is committed for offline
   tests. See [notes/part-06-notes.md](notes/part-06-notes.md).
 
-## Test suites (Parts II–VI)
+- **Part VII deliverables:** `BigramLM` (a single `[V, V]` logits table, filled
+  either by `from_counts` with Laplace smoothing or trained from zeros/random),
+  `loss_and_grad` with the fused `p − onehot` scatter-add, `perplexity`,
+  `sgd_step`, the single-batch `train_bigram`, and `sample_categorical`. New
+  `models/` package + scope. Trains char-level on tiny Shakespeare
+  (`examples/bigram_shakespeare.mojo`); the `q → u` bigram is pinned. See
+  [notes/part-07-notes.md](notes/part-07-notes.md).
+
+## Test suites (Parts II–VII)
 
 | File | Covers |
 |------|--------|
@@ -49,6 +58,9 @@ proves the part green on a fresh checkout (`pixi install` first).
 | `tests/test_finite_difference_step.mojo` | h-selection study (x³ truncation error = h²) |
 | `tests/test_argmax.mojo` | max index, deliberate first-wins tie |
 | `tests/test_timing.mojo` | median (odd/even), sort-in-place, hand-computed GFLOP/s |
+| `tests/test_bigram.mojo` | zeros→log V, hand-computed count model, finite-diff gradient, grad rows sum to 0, perplexity=exp(loss) |
+| `tests/test_bigram_training.mojo` | monotone decrease, deterministic-batch overfit, convergence to count optimum, training determinism, tiny-Shakespeare loss drop |
+| `tests/test_sampler.mojo` | degenerate/one-hot, seed determinism, support-respect, invalid-probs raises, q→u plausibility pin |
 | `tests/test_char_tokenizer.mojo` | codepoint vocab, round trips, save/load, errors |
 | `tests/test_bpe_core.mojo` | merge loop, rank order, trainer (hand-computed), save/load |
 | `tests/test_gpt2_tokenizer.mojo` | vocab size 50257, byte↔unicode bijection, oracle parity, goldens, save/load |
