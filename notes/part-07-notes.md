@@ -91,9 +91,54 @@ whitespace Vocabulary), `tensor/{tensor2d,tensor3d,ops,init_weights}.mojo`,
   renders it.
 - `std.time.perf_counter_ns` — present.
 
-### Rejected review findings
+### External review triage (foundation-restore)
 
-_(none yet — external review pending)_
+Two independent read-only reviews ran against `git diff main...foundation-restore`:
+Codex (GPT-5.5, high reasoning) and Claude Opus 4.8 (xhigh). They converged
+strongly — **every finding accepted**, several raised by both. Both confirmed
+the syntax contract, the numerics, the layering, and (critically) that the
+additive `Rng` merge leaves the frozen Part VI goldens byte-for-byte unchanged.
+
+Each accepted finding got a failing test first, then the fix:
+
+- **[Codex High — accepted] `softmax_row_temperature` overflowed at extreme T.**
+  It divided by `temperature` *before* the max subtraction, so a near-zero T
+  sent a large logit to `+inf` and the softmax returned `inf/inf = NaN`
+  (`softmax_row_temperature([1000, 0], 1e-307)`). The chapter explicitly (and
+  wrongly) claims stability "carries over for free" from the wrapper form. Fixed
+  by not delegating: subtract the row max first and divide the *difference*,
+  `exp((x_i - max)/T)` — algebraically identical, but every exponent is ≤ 0 so
+  nothing overflows. This is a genuine chapter correction (blog gold). Test:
+  `test_extreme_low_temperature_is_stable`.
+- **[Opus Medium — accepted] Float draws had no value goldens.** `uniform()`,
+  `normal()`, and `xavier_2d` were only tested for range/finiteness/determinism,
+  so a stub `return 0.5` / `return 0.0` / all-zeros would pass. Added independent
+  goldens derived from the frozen `next_u64` values: `Rng(0).uniform() =
+  (1442695040888963407 >> 11) / 2**53 = 0.0782086…`, `Rng(42).uniform() =
+  0.5682303…`, and a Box–Muller oracle `Rng(0).normal(0,1) = 1.8121678…`, plus a
+  distinct-values check so a stuck generator fails.
+- **[Codex Medium / Opus Low — accepted] `GPTConfig.validate` ignored `dropout`.**
+  A probability outside `[0, 1)` passed. Added the bound + `test_dropout_*`.
+- **[Codex Medium — accepted] `xavier_2d` accepted non-positive fans** (divide by
+  zero / degenerate shape). Made it `raises` and reject `fan_in/fan_out <= 0`.
+- **[Codex Medium / Opus Low — accepted] `softmax_rows` read `scores[r, 0]` with
+  no `cols == 0` guard** (out-of-bounds on a 0-column tensor, inconsistent with
+  `softmax_row`'s empty handling). Guarded; returns the empty tensor unchanged.
+- **[Opus Low — accepted] `cross_entropy_grad` skipped the target range check**
+  that `cross_entropy_one` performs (silent out-of-bounds write). Made it
+  `raises` with the same guard, so loss and gradient reject bad targets
+  symmetrically.
+- **[Opus Nit — accepted] `matmul_ikj`'s shape-mismatch guard was untested.**
+  Added `test_matmul_ikj_shape_mismatch_raises`.
+- **[Codex Low / Opus Nit — accepted, partial] Float `==` in tests.** Converted
+  computed/stored-float assertions to `assert_almost_equal` (house tolerance
+  habit) across the tensor/ops tests. Kept exact `==` only where
+  bit-reproducibility is the actual property under test — the RNG determinism
+  tests (`test_uniform_deterministic`, `test_normal_deterministic`,
+  `test_xavier_deterministic`) — with a comment saying why. Both reviewers
+  proposed exactly this split.
+
+No findings were rejected.
 
 ---
 
