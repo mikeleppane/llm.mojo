@@ -3,9 +3,8 @@
 This is OpenAI's *original* GPT-2 byte-pair encoding algorithm (from the public
 ``gpt-2`` repository, ``src/encoder.py``, MIT licensed), lightly adapted to load
 the reference files this repo already commits under ``data/gpt2/``. It is an
-independent reference implementation — OpenAI's, not ours — so it satisfies the
-"oracle must be a trusted, independent reference" rule for the tokenizer parity
-tests (plan decision D5).
+independent reference implementation — OpenAI's, not ours — so it is a trusted,
+independent oracle for the tokenizer parity tests.
 
 It is used **only** by tests. Nothing under ``src/`` imports it. Its sole job is
 to answer, for a given input string, "what token ids does canonical GPT-2

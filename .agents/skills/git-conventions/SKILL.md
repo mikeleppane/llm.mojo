@@ -149,6 +149,28 @@ write the message in your own voice and leave the tooling out of it.
 
 ---
 
+## No internal-plan references — hard rule
+
+**Commit messages, PR bodies, and code docstrings/comments must never cite an
+internal plan or spec.** The working plans under `docs/plans/` are gitignored and
+unpublished, so a reference to them dangles: nobody reading the public repo can
+follow it. Specifically forbidden:
+
+- `plan D3`, `decision D4`, `plan decision D1/D2`, `per the plan`, `see the plan`.
+- Section pointers into a plan/spec — `§5`, `§6`, `roadmap §2`, `the spec says`.
+- Any phrasing that only makes sense if you have the internal document open.
+
+State the *reason itself*, not the document that recorded it. Instead of
+"pack pair keys into one Int (plan decision D2)", write "pack pair keys into one
+Int so the merge tables are plain `Dict[Int, Int]` and avoid a per-lookup string
+allocation". The rationale teaches; the citation just points at a locked door.
+
+External, well-known references are fine and often teach (`minbpe-style`,
+`nanoGPT`, "OpenAI's encoder.py", a paper). The ban is on *this repo's private
+planning artifacts*, not on genuine prior art.
+
+---
+
 ## Atomic commits
 
 One logical change per commit, each passing the floor (`pixi run fmt`,

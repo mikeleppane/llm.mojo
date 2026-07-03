@@ -2,8 +2,8 @@
 """Fetch and verify the GPT-2 reference tokenizer files.
 
 These two files are committed to the repository under ``data/gpt2/`` so that
-tests and CI run offline (see the Part V plan, decision D4). This script exists
-for *provenance*: it records exactly where the files came from and pins their
+tests and CI run offline with no network fetch. This script exists for
+*provenance*: it records exactly where the files came from and pins their
 SHA-256 checksums, so anyone can reproduce ``data/gpt2/`` from scratch and prove
 the committed bytes were not tampered with.
 

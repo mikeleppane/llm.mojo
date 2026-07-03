@@ -148,6 +148,14 @@ chars, a body explaining *why*. **No AI/assistant attribution anywhere** — no
 `Co-Authored-By` for an AI, no "Generated with" line, no 🤖. The full rules are in
 [git-conventions](.agents/skills/git-conventions/SKILL.md).
 
+**No internal-plan references anywhere** — not in commit messages, PR bodies,
+docstrings, or code comments. The plans under `docs/plans/` are gitignored and
+unpublished, so `plan D3`, `decision D4`, `§5`, `per the plan`, and the like
+dangle for anyone reading the repo. State the reason itself, not the document
+that recorded it. External prior art (`minbpe-style`, `nanoGPT`, a paper) is
+fine — the ban is on this repo's private planning artifacts. (See
+[git-conventions](.agents/skills/git-conventions/SKILL.md).)
+
 **Scope vocabulary** (this list is authoritative; keep it in sync with the layout
 as modules emerge):
 
