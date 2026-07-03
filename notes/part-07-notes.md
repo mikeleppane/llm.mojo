@@ -202,4 +202,40 @@ line, and the layering edge `tensor, data → models → {training, generation}`
 
 ### External review triage (part-07-bigram)
 
-_(pending)_
+Codex (GPT-5.5, high) and Opus 4.8 (xhigh) both reviewed the branch diff. Both
+independently confirmed the gradient is mathematically exact (sign, scale,
+repeated-row accumulation) and that the tests would fail under a sign-flipped or
+mis-scaled gradient — the load-bearing check passed. No Critical/High findings.
+All accepted; each fix got a failing test first.
+
+- **[Codex Medium — accepted] `sample_categorical` could draw a
+  zero-probability last entry.** With a distribution summing a hair under 1
+  (within the 1e-6 accept tolerance), an un-scaled `u = uniform()` in `[sum, 1)`
+  fell through the loop to the `return n - 1` clamp — which might be a zero-prob
+  entry (`[0.9999995, 0.0]`, seed 953094 → index 1). Fixed by drawing
+  `threshold = uniform() * total`: scaling by the actual total keeps the draw
+  strictly inside the real cumulative range, so a zero-prob entry can never be
+  selected and the final `return` becomes a pure rounding backstop. Also now
+  rejects negative entries. Regression test uses the exact triggering seed.
+- **[Codex Low — accepted] `from_counts` skipped id validation on a
+  single-token corpus.** The range check lived inside the bigram-pair loop, so
+  `from_counts([5], 2, ...)` (no pairs) returned a uniform model silently. Moved
+  to a pre-pass over every id.
+- **[Opus Nit — accepted] Two unused imports** in the example (`std.math.exp`,
+  `TokenDataset`) removed.
+- **[Opus Low — accepted as a note] `loss_and_grad` recomputes exp twice per
+  position** (logsumexp then softmax) and re-does it for repeated tokens. Opus
+  called it a defensible teaching choice; documented the O(B·T·V)
+  redundant-softmax cost in the docstring rather than optimizing (the batched
+  reuse arrives with the GPT).
+- **[Opus Nit — accepted] Sampler test only checked divergence, not that mass ∝
+  probability.** Added a 10k-draw frequency test on `[0.25, 0.75]` (within 3%),
+  the one invariant an in-support-but-skewed inverse-CDF would violate.
+- **[Opus Nit — accepted] Test gaps closed:** `next_probs` temperature path
+  (sum-to-1, T=1 recovers the count probs, high-T flattens, bad-T raises),
+  `next_logits` returns an independent copy (mutating it doesn't touch the
+  table), and `sgd_step`'s own shape-mismatch guard (new `tests/test_optimizer.mojo`).
+
+No findings were rejected. Opus explicitly verified the `return n - 1` in the
+sampler is not dead code (a genuine `[total, 1)` draw clamps there) — still true
+after the fix, now only as a rounding backstop.
