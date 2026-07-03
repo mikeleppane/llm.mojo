@@ -40,8 +40,8 @@ struct Rng(Copyable, Movable):
         return self.state
 
     def next_below(mut self, n: Int) raises -> Int:
-        # Return a value uniform in [0, n). Raises if n <= 0 (an empty range has
-        # no valid draw).
+        # Return a value in [0, n), near-uniform (see the bias note below). Raises
+        # if n <= 0 (an empty range has no valid draw).
         #
         # Uses a plain modulo, which introduces a bias toward smaller results
         # because 2**64 is not an exact multiple of n. The bias magnitude is at
@@ -55,10 +55,11 @@ struct Rng(Copyable, Movable):
 
     def shuffle(mut self, mut items: List[Int]):
         # Shuffle `items` in place with the Fisher-Yates algorithm: walk from the
-        # last index down to 1, swapping each element with a uniformly chosen one
-        # at or before it. This visits every permutation with equal probability
-        # (given a uniform source) and touches each element once. Mutates the
-        # argument; allocates nothing.
+        # last index down to 1, swapping each element with a chosen one at or
+        # before it. With a perfectly uniform bounded draw this visits every
+        # permutation with equal probability; here it inherits next_below's
+        # negligible modulo bias (documented there). Touches each element once;
+        # mutates the argument, allocates nothing.
         for i in range(len(items) - 1, 0, -1):
             # j uniform in [0, i]; next_below(i + 1) cannot raise here since
             # i + 1 >= 2 > 0.
