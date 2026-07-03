@@ -24,8 +24,10 @@ while building the data layer. Not published as-is.
 - **Epoch = seeded permutation of window starts.** Enumerate all starts once,
   Fisher–Yates-shuffle them with `Rng(seed)`, slice groups of B. The three
   properties the roadmap wanted fall out for free and are all exactly testable:
-  same seed → identical batch sequence, every window seen once per epoch, and a
-  real `num_batches()`. A fresh loader iterates in natural (unshuffled) order, so
+  same seed → identical batch sequence, every window *eligible* each epoch (with
+  a seed-dependent remainder of `num_windows % B` dropped — full once-only
+  coverage holds exactly when `B` divides `num_windows`), and a real
+  `num_batches()`. A fresh loader iterates in natural (unshuffled) order, so
   `start_epoch` is only needed when you actually want a shuffle — which is what
   makes `overfit_batch` a trivial "first batch, no shuffle" reuse of the loader.
 - **The shift-by-one lives in the window, not in a later step.** A window at `s`
@@ -73,6 +75,68 @@ recurrence (not from memory): seed 0 → `[1442695040888963407,
 4159066171780167020, 7615522811268512075]`. Everything downstream that is
 "random" is really seeded and replayable, and the loader test asserts two
 same-seed loaders produce byte-identical batches across a full epoch.
+
+## What external review caught
+
+Two independent reviews ran against the branch diff: Codex (GPT-5.5, high
+reasoning) and Claude Opus 4.8 (xhigh).
+
+- **[Codex #1, High — accepted, already fixed] `start_epoch` was not
+  seed-idempotent.** It shuffled `self.order` in place without restoring the
+  natural order first, so a second `start_epoch(seed)` shuffled the previous
+  epoch's permutation — making the order a function of the whole epoch history,
+  not just the seed. I had independently found and fixed this before the reviews
+  returned (extract `_window_starts`, rebuild before each shuffle; regression
+  test re-seeds after a full epoch). Both the reviewer and I landed on the same
+  hole, which is a good sign the test now guards it.
+- **[Codex #2, Medium — accepted as a doc fix] `next_below`/`shuffle` claimed
+  exact uniformity.** The modulo reduction is only exactly uniform when `n`
+  divides 2⁶⁴; the docstrings said "uniform" while also documenting the bias —
+  contradictory. Reworded to "near-uniform" pointing at the bias note. The bias
+  itself is accepted (negligible at our sizes; a rejection loop would clutter
+  teaching code), so this was wording, not behavior.
+- **[Codex #3, Low — accepted] `TokenBatch` accepted non-positive dimensions.**
+  It checked only the flat length, so `batch_size=-2, seq_len=-3` (product 6)
+  passed against a 6-element array, leaving accessors with ranges like `[0, -2)`.
+  `BatchLoader` guards itself, but `TokenBatch` is public and must enforce its
+  own invariant. Added `batch_size >= 1` / `seq_len >= 1` checks + a test.
+- **Clean areas confirmed by Codex:** window bounds and shift-by-one (`s + T`
+  stays in range; inputs `ids[s .. s+T-1]`, targets `ids[s+1 .. s+T]`), the
+  `data → utils` layering direction, and no syntax-contract violations. Codex
+  could not run the suite (its sandbox blocked loopback networking); the review
+  was static against the diff, which is fine — the suite is green locally and in
+  a committed-files-only fresh tree.
+
+### Opus 4.8 (xhigh) — no correctness bugs; 6 Low/Nit findings
+
+Opus hand-verified the seed-42 golden and the windowing math and found **no
+correctness bugs** — windowing, shift-by-one, split arithmetic, determinism,
+layering, and the syntax contract all clean. The six Low/Nit items:
+
+- **[#1 Low, accepted — doc]** The note said "every window seen once per epoch,"
+  which is only true when `B ∣ num_windows`; with remainder-drop an epoch visits
+  `num_batches × B` windows. Tightened the note wording above.
+- **[#2 Low, accepted — doc]** Natural-order iteration permanently drops the same
+  corpus tail every epoch. Added a paragraph to the `BatchLoader` module docstring
+  telling training loops to `start_epoch(seed + epoch)` each epoch (which also
+  reshuffles which windows fall in the dropped remainder).
+- **[#3 Low, accepted — test]** Remainder-drop was only tested in a divisible
+  case, and the remainder test asserted only the batch *count*. Strengthened
+  `test_num_batches_drops_remainder` to collect the window starts and assert
+  exactly 8 *distinct* windows appear (no duplicate, no over-run).
+- **[#4 Nit, rejected]** "`sort` used with no visible import." It is genuinely
+  prelude-provided in 1.0.0b2: the merged Part V `char.mojo` calls `sort(...)`
+  with zero imports and is green. Adding an explicit import only in the new tests
+  would be inconsistent with the shipped codebase, so no change.
+- **[#5 Nit, accepted]** Two goldens exceed 2⁶³−1 and only compile because the
+  `IntLiteral` flows straight into `UInt64(...)`. Added a comment in
+  `test_rng.mojo` warning not to route them through an `Int` intermediate.
+- **[#6 Nit, partially accepted — test]** Added the two useful uncovered edges:
+  empty `ids` into `train_val_split` (raises) and `overfit_batch` on a
+  too-small dataset (raises). The third (`TokenBatch` with a zero dimension) is
+  already covered — the Codex-driven positivity check now makes it raise at
+  construction, so Opus's "constructs, then accessors raise" description was
+  superseded by that fix.
 
 ## Deferred / out of scope (as agreed)
 
