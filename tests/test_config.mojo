@@ -46,6 +46,21 @@ def test_nonpositive_dim_raises() raises:
         cfg.validate()
 
 
+def test_dropout_out_of_range_raises() raises:
+    var negative = GPTConfig(4096, 128, 256, 4, 4, -0.5)
+    with assert_raises(contains="dropout"):
+        negative.validate()
+    var too_large = GPTConfig(4096, 128, 256, 4, 4, 1.5)
+    with assert_raises(contains="dropout"):
+        too_large.validate()
+
+
+def test_dropout_boundary_values() raises:
+    # 0.0 is valid (no dropout); values in [0, 1) pass.
+    GPTConfig(4096, 128, 256, 4, 4, 0.0).validate()
+    GPTConfig(4096, 128, 256, 4, 4, 0.9).validate()
+
+
 def test_writable_summary() raises:
     var cfg = GPTConfig(4096, 128, 256, 4, 4, 0.0)
     var text = String.write(cfg)

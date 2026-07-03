@@ -42,6 +42,8 @@ struct GPTConfig(Copyable, Movable, Writable):
             raise Error("n_heads must be positive")
         if self.d_model % self.n_heads != 0:
             raise Error("d_model must be divisible by n_heads")
+        if self.dropout < 0.0 or self.dropout >= 1.0:
+            raise Error("dropout must be in [0, 1)")
 
     def token_embedding_parameter_count(self) -> Int:
         # Parameters in the token embedding table alone: V * C.
