@@ -6,7 +6,13 @@
 # everything, so the success path is not optional. The derived helpers (d_head,
 # parameter counts) are pinned to hand-computed values.
 
-from std.testing import assert_equal, assert_raises, assert_true, TestSuite
+from std.testing import (
+    assert_almost_equal,
+    assert_equal,
+    assert_raises,
+    assert_true,
+    TestSuite,
+)
 
 from llm.config import GPTConfig, TrainingConfig, check_gpt2_contract
 from llm.tokenizer import GPT2_VOCAB_SIZE
@@ -39,7 +45,7 @@ def test_gpt2_preset_values() raises:
     assert_equal(cfg.n_layers, 12)
     assert_equal(cfg.n_heads, 12)
     # dropout is the only Float64 field; 0.1 is GPT-2's training-time value.
-    assert_true(cfg.dropout == 0.1)
+    assert_almost_equal(cfg.dropout, 0.1)
 
 
 def test_gpt2_preset_validates() raises:
@@ -75,9 +81,12 @@ def test_parameter_count_embedding_share() raises:
     var cfg = GPTConfig.gpt2_124m()
     var embed = cfg.token_embedding_parameter_count()
     assert_equal(embed, 50257 * 768)
-    # The exact count minus the embedding, positional, and per-block/final-norm
-    # terms leaves nothing over: the embedding is genuinely a summand of it.
-    assert_true(cfg.parameter_count() > embed)
+    # The embedding is genuinely a summand of the exact count: reconstruct the
+    # total from its documented parts (token + positional embeddings, L blocks
+    # at 12C^2+13C, final LayerNorm 2C, tied head 0) and it must match exactly.
+    var c = 768
+    var reconstructed = embed + 1024 * c + 12 * (12 * c * c + 13 * c) + 2 * c
+    assert_equal(cfg.parameter_count(), reconstructed)
 
 
 def test_gpt2_vocab_matches_tokenizer() raises:
