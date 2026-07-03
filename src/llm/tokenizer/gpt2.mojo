@@ -55,6 +55,17 @@ def gpt2_byte_to_unicode() -> List[Int]:
     return table^
 
 
+# The byte<->unicode map is a fixed property of GPT-2's file format, known
+# before the program runs, so build it once at compile time. The loop above is
+# evaluated by the compiler and the 256-entry result is frozen into the binary.
+# A List is not ImplicitlyCopyable, so a use site cannot read this comptime
+# value directly (that would silently materialize a copy); from_files calls
+# materialize[BYTE_TO_UNICODE]() to lift the compile-time table into a runtime
+# List explicitly. The runtime function above stays as the readable definition
+# and the tokenizer parity tests exercise it directly.
+comptime BYTE_TO_UNICODE = gpt2_byte_to_unicode()
+
+
 def gpt2_pre_tokenize(
     pattern: PythonObject, text: String
 ) raises -> List[String]:
@@ -120,8 +131,10 @@ struct GPT2Tokenizer(Movable):
                 + String(declared)
             )
 
-        # byte<->unicode table and its inverse (codepoint -> byte value).
-        var byte_to_unicode = gpt2_byte_to_unicode()
+        # byte<->unicode table and its inverse (codepoint -> byte value). The
+        # table is bound at compile time (see BYTE_TO_UNICODE); materialize lifts
+        # that frozen value into a runtime List for the inverse-map build below.
+        var byte_to_unicode = materialize[BYTE_TO_UNICODE]()
         var unicode_to_byte = Dict[Int, Int]()
         for b in range(256):
             unicode_to_byte[byte_to_unicode[b]] = b
