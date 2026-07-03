@@ -14,10 +14,13 @@
 # its low bits are weak; that is fine here, where the only requirement is a
 # reproducible shuffle, never unpredictability.
 #
-# This is the minimal surface the dataset pipeline needs. Gaussian sampling
-# (Box-Muller) and weight-init helpers (Xavier) belong on the same generator and
-# arrive with the model-parameter layer; they will be added here, not in a
-# separate RNG.
+# The dataset pipeline needed only the integer surface (next_u64, next_below,
+# shuffle). The model-parameter layer adds float draws on the *same* generator:
+# uniform() in [0, 1), uniform_range(), and normal() via Box-Muller. These are
+# additive — the seed semantics and integer methods are unchanged, so Part VI's
+# frozen goldens still hold.
+
+from std.math import sqrt, log, cos, pi
 
 comptime LCG_MULTIPLIER: UInt64 = 6364136223846793005  # Knuth MMIX multiplier
 comptime LCG_INCREMENT: UInt64 = 1442695040888963407  # Knuth MMIX increment
@@ -67,3 +70,29 @@ struct Rng(Copyable, Movable):
             var tmp = items[i]
             items[i] = items[j]
             items[j] = tmp
+
+    def uniform(mut self) -> Float64:
+        # A Float64 in [0, 1). Take the top 53 bits of the next state as the
+        # mantissa (2**53 is the largest integer Float64 represents exactly), so
+        # every representable value in [0, 1) is reachable with equal spacing.
+        # The low bits of an LCG are the weak ones, so using the high bits is
+        # deliberate, not incidental.
+        var bits = self.next_u64() >> 11
+        return Float64(bits) * (1.0 / 9007199254740992.0)  # / 2**53
+
+    def uniform_range(mut self, low: Float64, high: Float64) -> Float64:
+        # A Float64 in [low, high) by affine mapping of uniform(). Callers that
+        # need low < high enforce it; a reversed range simply mirrors.
+        return low + (high - low) * self.uniform()
+
+    def normal(mut self, mean: Float64, std: Float64) -> Float64:
+        # One standard-normal draw scaled to (mean, std) via the Box-Muller
+        # transform: two uniforms -> one normal. u1 is clamped away from 0 to
+        # keep log(u1) finite (the u1 = 0 case has probability zero but is not
+        # impossible with a finite generator). Consumes two draws per call.
+        var u1 = self.uniform()
+        var u2 = self.uniform()
+        if u1 < 1e-300:
+            u1 = 1e-300  # guard log(0)
+        var z = sqrt(-2.0 * log(u1)) * cos(2.0 * pi * u2)
+        return mean + std * z
