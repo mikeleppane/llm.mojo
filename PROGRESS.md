@@ -13,7 +13,8 @@ proves the part green on a fresh checkout (`pixi install` first).
 | VI | Dataset pipeline | ✅ green | `pixi run test` | 2026-07-03 |
 | VII | Tiny bigram LM | ✅ green | `pixi run test` | 2026-07-03 |
 | VIII | Architecture family | ✅ green (preset + exact param count + comptime pin) | `pixi run test` | 2026-07-03 |
-| IX+ | GPT model & training | not started | — | — |
+| IX | NN building blocks | ✅ green (Parameter, Linear, Embedding, LayerNorm, GELU, Dropout, MLP — forward only) | `pixi run test` | 2026-07-04 |
+| X+ | Attention & GPT model | not started | — | — |
 
 ## Notes
 
@@ -51,7 +52,17 @@ proves the part green on a fresh checkout (`pixi install` first).
   `tokenizer/gpt2.mojo` (`materialize`d at use). No layers, traits, or new
   packages — those are Part IX. See [notes/part-08-notes.md](notes/part-08-notes.md).
 
-## Test suites (Parts II–VII)
+- **Part IX deliverables:** the `nn/` package — every layer the Transformer is
+  assembled from except attention, forward passes only (backward comes later).
+  `Parameter` (value + zeros grad + `zero_grad`), `Linear` (`x @ W^T + b`,
+  `[out, in]` weight), `Embedding` (range-checked gather, one struct for token
+  and positional use), `LayerNorm` (biased variance, eps 1e-5), `gelu`/`gelu_rows`
+  (tanh approximation), `dropout` (inverted, mode as an argument, eval consumes no
+  rng), and `MLP` (up → gelu → down). Layer factories draw from GPT-2's
+  `normal(0, 0.02)`; `SQRT_2_OVER_PI` is bound at compile time. Goldens are frozen
+  from `tests/oracles/nn_reference.py`. See [notes/part-09-notes.md](notes/part-09-notes.md).
+
+## Test suites (Parts II–IX)
 
 | File | Covers |
 |------|--------|
@@ -78,3 +89,10 @@ proves the part green on a fresh checkout (`pixi install` first).
 | `tests/test_dataset.mojo` | train/val split arithmetic + partition, corpus load + missing-file error |
 | `tests/test_token_batch.mojo` | flat `[B, T]` layout, shape/bounds checks |
 | `tests/test_batch_loader.mojo` | window shapes, shift-by-one, seeded epochs, coverage, remainder drop, end-to-end |
+| `tests/test_parameter.mojo` | grad zeros with value's shape, zero_grad clears grad only, value round trip |
+| `tests/test_linear.mojo` | hand-computed forward (oracle), bias per-row broadcast, shape-mismatch raise, init_random determinism + zero bias |
+| `tests/test_embedding.mojo` | gather returns table rows, repeated/positional ids, negative and ≥V raises, init_random shape/determinism |
+| `tests/test_layernorm.mojo` | biased-variance 3x4 oracle golden (rejects unbiased), mean~0/std~1, per-column weight/bias, constant row → bias |
+| `tests/test_gelu.mojo` | tanh-approx scalar goldens (reject erf), gelu(0)=0, asymptotes, gelu_rows elementwise |
+| `tests/test_dropout.mojo` | eval identity + rng untouched (twin generator), p=0 no-draw, out-of-range raise, seed determinism, survivors 0-or-scaled, keep-rate band |
+| `tests/test_mlp.mojo` | composition oracle golden, equals manual up/gelu/down, hidden width from constructor, shape contract |
