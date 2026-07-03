@@ -111,4 +111,37 @@ the tensor layer's existing "checked on demand" error style.
 
 ## Review triage
 
-<!-- filled after the dual external review -->
+Dual external review, read-only and non-interactive, over `git diff
+main...part-09-nn`: Codex (GPT-5.5, high reasoning) and Claude Opus 4.8 (xhigh).
+Both independently confirmed the load-bearing math — GELU tanh vs erf, LayerNorm
+biased vs unbiased denominator and eps placement, dropout eval-mode rng
+discipline, the `[out, in]` convention, and oracle independence. Opus recomputed
+the goldens from a fresh Python session (not the repo's own oracle) and matched
+every frozen literal. Opus verdict: **approve**. Codex verdict: **request
+changes** on the items below.
+
+Findings triaged (all fixed; each fix got a failing test first):
+
+1. **Dropout accepted NaN `p`** (Codex). The old guard `p < 0.0 or p >= 1.0` let
+   a NaN through (every comparison with NaN is false), which would zero the whole
+   output while still consuming `N·C` rng draws. Rewrote the guard as
+   `not (p >= 0.0 and p < 1.0)`, which raises on NaN. Test: `test_p_nan_raises`.
+2. **`p == 0.0` float `==`** (Codex flagged as a contract violation; Opus judged
+   it a correct, intended sentinel). The behavior was right, but the house rule
+   bans float `==`. Since the range guard already excludes `p < 0`, the no-op
+   sentinel is now written `p <= 0.0` — same behavior, no `==`. Covered by the
+   existing `test_p_zero_in_training_is_identity_and_untouched_rng`.
+3. **Linear didn't validate bias shape** (Codex). A hand-built `Linear` with a
+   bias narrower than `out` read out of bounds at the per-column add. `forward`
+   now validates the bias is `[1, out]` and raises a clear layer error. Test:
+   `test_bias_shape_mismatch_raises`. (Unreachable via `init_random`, which always
+   builds the right shape — a direct-misconstruction hardening.)
+4. **LayerNorm didn't validate bias shape** (both Codex and Opus, the latter as a
+   non-gating nit). Same class as (3): a shorter bias than weight read out of
+   bounds at the per-column shift. `forward` now validates weight and bias are
+   both `[1, C]`. Test: `test_bias_shape_mismatch_raises`.
+
+No findings rejected. The two "consistency check" tests Codex could have flagged
+(MLP manual composition, `gelu_rows` vs scalar) are backed by independent oracle
+goldens elsewhere in the same files, which Opus explicitly confirmed — they
+supplement the oracle, they don't stand in for it.
