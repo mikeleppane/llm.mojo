@@ -28,6 +28,15 @@ def test_target_out_of_range_raises() raises:
         _ = cross_entropy_one([0.0, 1.0], 5)
 
 
+def test_grad_target_out_of_range_raises() raises:
+    # The gradient rejects a bad target symmetrically with the loss, rather than
+    # writing out of bounds.
+    with assert_raises(contains="target out of range"):
+        _ = cross_entropy_grad([0.0, 1.0], 5)
+    with assert_raises(contains="target out of range"):
+        _ = cross_entropy_grad([0.0, 1.0], -1)
+
+
 def test_logsumexp_stable_under_large_values() raises:
     # logsumexp of three equal 1000s is 1000 + log(3); a naive sum of exp(1000)
     # would overflow.

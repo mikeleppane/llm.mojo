@@ -14,7 +14,7 @@ from std.testing import (
 )
 
 from llm.tensor.ops import softmax_row, softmax_rows, softmax_row_temperature
-from llm.tensor.tensor2d import from_rows
+from llm.tensor.tensor2d import from_rows, zeros_2d
 
 
 def test_rows_sum_to_one() raises:
@@ -53,6 +53,16 @@ def test_softmax_rows_each_row_sums_to_one() raises:
     assert_almost_equal(p[1, 2], 1.0, atol=1e-9)
 
 
+def test_softmax_rows_zero_columns() raises:
+    # A zero-column tensor has no logits to normalize; softmax_rows returns it
+    # unchanged instead of reading out of bounds (mirrors softmax_row's empty
+    # handling).
+    var empty = zeros_2d(3, 0)
+    var p = softmax_rows(empty)
+    assert_equal(p.rows, 3)
+    assert_equal(p.cols, 0)
+
+
 def test_high_temperature_approaches_uniform() raises:
     var p = softmax_row_temperature([1.0, 2.0, 3.0], 1e6)
     for i in range(len(p)):
@@ -68,6 +78,21 @@ def test_low_temperature_approaches_argmax() raises:
 def test_temperature_rejects_nonpositive() raises:
     with assert_raises(contains="temperature"):
         _ = softmax_row_temperature([1.0, 2.0], 0.0)
+
+
+def test_extreme_low_temperature_is_stable() raises:
+    # A near-zero temperature scales logits far past Float64's overflow point.
+    # Subtracting the row max *before* dividing keeps the result finite: the
+    # argmax entry -> 1, the rest -> 0. The naive "divide then softmax" form
+    # produces inf/inf = NaN here.
+    var p = softmax_row_temperature([1000.0, 0.0], 1e-307)
+    assert_almost_equal(p[0], 1.0, atol=1e-12)
+    assert_almost_equal(p[1], 0.0, atol=1e-12)
+
+
+def test_temperature_empty_input() raises:
+    var p = softmax_row_temperature(List[Float64](), 0.5)
+    assert_equal(len(p), 0)
 
 
 def main() raises:

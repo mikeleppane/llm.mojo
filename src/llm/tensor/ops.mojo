@@ -130,8 +130,12 @@ def softmax_row(input: List[Float64]) -> List[Float64]:
 
 def softmax_rows(scores: Tensor2D) -> Tensor2D:
     # Row-wise stable softmax over a Tensor2D — the shape attention uses. Each
-    # row is normalized independently. Allocates the result.
+    # row is normalized independently. Allocates the result. A zero-column input
+    # has no logits to normalize, so it returns unchanged (mirrors softmax_row's
+    # empty-input handling) rather than reading scores[r, 0] out of bounds.
     var out = zeros_2d(scores.rows, scores.cols)
+    if scores.cols == 0:
+        return out^
     for r in range(scores.rows):
         var max_value = scores[r, 0]
         for c in range(1, scores.cols):
@@ -150,16 +154,39 @@ def softmax_rows(scores: Tensor2D) -> Tensor2D:
 def softmax_row_temperature(
     input: List[Float64], temperature: Float64
 ) raises -> List[Float64]:
-    # Softmax of input / temperature. T < 1 sharpens, T > 1 flattens. The max
-    # subtraction in softmax_row happens after the divide, so stability carries
-    # over even when a small T scales logits into overflow territory. Raises if
-    # temperature <= 0.
+    # Softmax of input / temperature. T < 1 sharpens, T > 1 flattens. Raises if
+    # temperature <= 0; an empty input yields an empty output.
+    #
+    # Stability note: this does NOT delegate to softmax_row(input / temperature).
+    # Dividing first would overflow — a near-zero T sends a large logit to +inf
+    # before any max subtraction can help, and inf - inf is NaN. Instead we
+    # subtract the row max first and divide the *difference*:
+    #     exp((x_i - max) / T)
+    # which is algebraically identical (exp(m/T) cancels in the ratio) but keeps
+    # every exponent <= 0, so the argmax term is exp(0) = 1 and the rest underflow
+    # safely to 0. The chapter's "thin wrapper" form is subtly wrong at extreme T;
+    # this is the honest stable version.
     if temperature <= 0.0:
         raise Error("temperature must be positive")
-    var scaled = List[Float64]()
-    for i in range(len(input)):
-        scaled.append(input[i] / temperature)
-    return softmax_row(scaled)
+    var n = len(input)
+    var out = List[Float64]()
+    if n == 0:
+        return out^
+
+    var max_value = input[0]
+    for i in range(1, n):
+        if input[i] > max_value:
+            max_value = input[i]
+
+    var denom = 0.0
+    for i in range(n):
+        var e = exp((input[i] - max_value) / temperature)
+        out.append(e)
+        denom += e
+
+    for i in range(n):
+        out[i] = out[i] / denom
+    return out^
 
 
 # --- cross-entropy ---
@@ -188,10 +215,16 @@ def cross_entropy_one(logits: List[Float64], target: Int) raises -> Float64:
     return logsumexp(logits) - logits[target]
 
 
-def cross_entropy_grad(logits: List[Float64], target: Int) -> List[Float64]:
+def cross_entropy_grad(
+    logits: List[Float64], target: Int
+) raises -> List[Float64]:
     # Gradient of cross_entropy_one wrt logits: softmax(logits) - onehot(target),
     # i.e. p_i - y_i. Cheap, bounded, and the backbone of every training step.
-    # Allocates the result. Assumes target is a valid index.
+    # Allocates the result. Raises on an out-of-range target — the same guard
+    # cross_entropy_one uses, so the loss and its gradient reject bad targets
+    # symmetrically instead of silently writing out of bounds.
+    if target < 0 or target >= len(logits):
+        raise Error("target out of range")
     var p = softmax_row(logits)
     p[target] = p[target] - 1.0
     return p^
