@@ -145,12 +145,22 @@ def test_reverse_overfit_and_ablation() raises:
     assert_true(losses[len(losses) - 1] < losses[0])  # decreases
     assert_true(losses[len(losses) - 1] < 0.3)  # ends well below baseline
 
+    # intact == len(srcs) is the load-bearing gate: greedy-decoding EVERY source
+    # to its exact reversal requires a trained decoder that reads the encoder (an
+    # untrained or memory-ignoring model cannot hit 4/4).
     var intact = exact_matches(model, srcs, True)
-    assert_equal(intact, len(srcs))  # every training pair reversed exactly
+    assert_equal(
+        intact, len(srcs)
+    )  # every training pair reversed exactly (4/4)
 
+    # Ablation: zero the memory (one corruption, no retraining). With no source
+    # signal the decode is source-BLIND — one constant sequence — so it can match
+    # at most one of the four DISTINCT reversals whatever the model learned. The
+    # collapse from 4/4 (intact) to <=1 (ablated) is the proof the 4/4 came from
+    # reading the encoder, not from memorized target statistics.
     var ablated = exact_matches_zero_memory(model, srcs, True)
-    assert_true(intact > ablated)  # ablation collapses exact-match
-    assert_true(ablated <= 1)
+    assert_true(intact > ablated)  # exact-match collapses
+    assert_true(ablated <= 1)  # source-blind decode matches at most one target
 
 
 def main() raises:

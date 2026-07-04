@@ -4,6 +4,12 @@
 # it) plus seeded determinism. The teacher-forcing shift is pinned by a
 # hand-computed example — the single off-by-one that would quietly cap a trained
 # model at the uniform-baseline loss.
+#
+# The hand-pinned sequences are built with the s4/s8 helpers rather than inline
+# `[a, b, ...]` List[Int] literals: on the pinned Mojo (1.0.0b2) a handful of
+# `List[Int]` literals in one test module drives the front-end into a
+# multi-minute compile (a minimal module with the same imports but no such
+# literals builds in ~2 s), so the helpers keep this file's compile fast.
 
 from std.testing import assert_true, assert_equal, assert_raises, TestSuite
 
@@ -19,6 +25,32 @@ from llm.lab.tasks import (
     unique_sources,
 )
 from llm.utils.random import Rng
+
+
+def s4(a: Int, b: Int, c: Int, d: Int) -> List[Int]:
+    # A 4-element List[Int] built without a `[...]` literal (see the module note).
+    var o = List[Int]()
+    o.append(a)
+    o.append(b)
+    o.append(c)
+    o.append(d)
+    return o^
+
+
+def s8(
+    a: Int, b: Int, c: Int, d: Int, e: Int, f: Int, g: Int, h: Int
+) -> List[Int]:
+    # An 8-element List[Int] built without a `[...]` literal.
+    var o = List[Int]()
+    o.append(a)
+    o.append(b)
+    o.append(c)
+    o.append(d)
+    o.append(e)
+    o.append(f)
+    o.append(g)
+    o.append(h)
+    return o^
 
 
 def test_bos_is_one_past_the_alphabet() raises:
@@ -59,31 +91,31 @@ def test_random_source_raises_on_degenerate() raises:
 
 
 def test_copy_target_is_the_source() raises:
-    var src = [3, 1, 4, 1, 5, 9, 2, 6]
+    var src = s8(3, 1, 4, 1, 5, 9, 2, 6)
     var tgt = copy_target(src)
     assert_true(sequences_equal(src, tgt))
 
 
 def test_reverse_target_mirrors_positions() raises:
     # target[i] == source[T-1-i], the anti-diagonal alignment reverse demands.
-    var src = [3, 1, 4, 1, 5, 9, 2, 6]
+    var src = s8(3, 1, 4, 1, 5, 9, 2, 6)
     var tgt = reverse_target(src)
     var t = len(src)
     for i in range(t):
         assert_equal(tgt[i], src[t - 1 - i])
     # A concrete pin: [3,1,4,1,5,9,2,6] reversed is [6,2,9,5,1,4,1,3].
-    var expected = [6, 2, 9, 5, 1, 4, 1, 3]
+    var expected = s8(6, 2, 9, 5, 1, 4, 1, 3)
     assert_true(sequences_equal(tgt, expected))
 
 
 def test_make_pair_selects_task() raises:
-    var src = [0, 1, 2, 3]
+    var src = s4(0, 1, 2, 3)
     var cp = make_pair(src, False)
     assert_true(sequences_equal(cp.src, src))
     assert_true(sequences_equal(cp.tgt, src))
     var rv = make_pair(src, True)
     assert_true(sequences_equal(rv.src, src))
-    assert_true(sequences_equal(rv.tgt, [3, 2, 1, 0]))
+    assert_true(sequences_equal(rv.tgt, s4(3, 2, 1, 0)))
 
 
 def test_teacher_forcing_shift_hand_computed() raises:
@@ -93,11 +125,11 @@ def test_teacher_forcing_shift_hand_computed() raises:
     # and must predict tgt[0]=2; position 1 sees tgt[0]=2 and must predict
     # tgt[1]=4; and so on. Same length as tgt; the last target token (3) is only
     # ever a label, never fed back in.
-    var src = [3, 1, 4, 2]
+    var src = s4(3, 1, 4, 2)
     var pair = make_pair(src, True)
-    assert_true(sequences_equal(pair.tgt, [2, 4, 1, 3]))
+    assert_true(sequences_equal(pair.tgt, s4(2, 4, 1, 3)))
     var din = decoder_input(pair.tgt, bos_id(16))
-    assert_true(sequences_equal(din, [16, 2, 4, 1]))
+    assert_true(sequences_equal(din, s4(16, 2, 4, 1)))
     assert_equal(len(din), len(pair.tgt))
 
 
