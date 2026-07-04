@@ -94,8 +94,20 @@ struct Embedding(Copyable, Movable):
         # the classic scatter bug is to overwrite and keep only the last. There is
         # NO gradient with respect to the ids: they are integer indices selecting
         # rows, not differentiable inputs, so backward returns nothing. Mutates
-        # self.table.grad; allocates nothing; raises on a length/width mismatch or
-        # an out-of-range id (guarded before writing, like forward).
+        # self.table.grad; allocates a small per-distinct-id scratch; raises on a
+        # length/width mismatch or an out-of-range id (guarded before writing,
+        # like forward).
+        #
+        # Accumulation order: a repeated id's several cotangent rows are first
+        # summed into a per-id local (`sums`), then that finished row delta is
+        # added to table.grad ONCE. Adding one fully-formed delta per call — not a
+        # running += into table.grad inside the loop — is what makes two backward
+        # passes double the grad bit-for-bit (the second call's partial sums would
+        # otherwise interleave with the first call's stored result and round
+        # differently than 2*grad1). Same discipline as LayerNorm's dγ/dβ. The
+        # scratch is sized to the DISTINCT touched ids (via a linear scan over the
+        # usually-short id list), not the whole vocabulary, so untouched rows cost
+        # nothing.
         var n = len(cache.ids)
         var c = self.table.value.cols
         var vocab_size = self.table.value.rows
@@ -113,6 +125,8 @@ struct Embedding(Copyable, Movable):
                 + " must equal table width "
                 + String(c)
             )
+        var uniq_ids = List[Int]()  # distinct touched ids
+        var sums = List[Float64]()  # flat [len(uniq_ids), c] row-major
         for i in range(n):
             var idx = cache.ids[i]
             if idx < 0 or idx >= vocab_size:
@@ -122,5 +136,23 @@ struct Embedding(Copyable, Movable):
                     + " for vocab size "
                     + String(vocab_size)
                 )
+            var pos = -1
+            for s in range(len(uniq_ids)):
+                if uniq_ids[s] == idx:
+                    pos = s
+                    break
+            if pos == -1:
+                uniq_ids.append(idx)
+                for j in range(c):
+                    sums.append(d_out[i, j])
+            else:
+                var base = pos * c
+                for j in range(c):
+                    sums[base + j] = sums[base + j] + d_out[i, j]
+        for s in range(len(uniq_ids)):
+            var idx = uniq_ids[s]
+            var base = s * c
             for j in range(c):
-                self.table.grad[idx, j] = self.table.grad[idx, j] + d_out[i, j]
+                self.table.grad[idx, j] = (
+                    self.table.grad[idx, j] + sums[base + j]
+                )

@@ -135,5 +135,37 @@ def test_backward_accumulates_across_calls() raises:
             assert_true(emb.table.grad[v, j] == 2.0 * once[v, j])
 
 
+def test_repeated_id_doubling_is_bit_exact() raises:
+    # The exact-doubling contract must hold bit-for-bit for a REPEATED id, whose
+    # several cotangent rows are summed into one table row. If backward sums them
+    # with a running += straight into table.grad, the second call's partial sums
+    # interleave with the first call's stored result and round differently than
+    # 2*grad1 — so exact `==` fails on adversarial values. These three values
+    # (id 0, three positions, C=1) drift by one ulp under the running-+= order;
+    # the fix (sum this call's contribution into a local, add once) makes the
+    # doubling exact for any data, matching LayerNorm.
+    var emb = Embedding(Parameter(from_rows([[0.0]])))  # table [V=1, C=1]
+    var ids = [0, 0, 0]
+    var d_out = from_rows(
+        [
+            [0.6204344719931791],
+            [0.8043319008791654],
+            [-0.37970486136133474],
+        ]
+    )
+    emb.table.zero_grad()
+    var fwd = emb.forward_cached(ids)
+    emb.backward(fwd.cache, d_out)
+    var once = emb.table.grad[0, 0]
+    emb.backward(fwd.cache, d_out)
+    assert_true(
+        emb.table.grad[0, 0] == 2.0 * once,
+        String("repeated-id doubling not bit-exact: ")
+        + String(emb.table.grad[0, 0])
+        + " != "
+        + String(2.0 * once),
+    )
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
