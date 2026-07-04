@@ -19,12 +19,17 @@ from llm.utils.random import Rng
 
 @fieldwise_init
 struct DropoutResult(Copyable, Movable):
-    # dropout_cached's output plus the kept-mask backward needs. mask[i, j] is 1.0
-    # for a kept element and 0.0 for a dropped one — the SAME mask the forward
-    # applied, so backward and forward scale exactly the same elements. In eval
-    # mode (or p == 0) nothing is dropped, so the mask is all ones.
+    # dropout_cached's output plus what backward needs: the kept-mask and the
+    # scale the forward actually applied. mask[i, j] is 1.0 for a kept element and
+    # 0.0 for a dropped one — the SAME mask the forward used. inv_keep is the
+    # scale the forward applied (1/(1-p) in training, 1.0 in eval / p == 0), cached
+    # so backward reproduces the exact forward map rather than recomputing a scale
+    # from a p the caller might get wrong. In eval mode (or p == 0) nothing is
+    # dropped: the mask is all ones and inv_keep is 1.0, so the layer — and its
+    # backward — is the identity.
     var output: Tensor2D  # [N, C]
     var mask: Tensor2D  # [N, C], entries in {0, 1}
+    var inv_keep: Float64  # applied scale: 1/(1-p) training, 1.0 eval / p == 0
 
 
 def dropout(
@@ -75,7 +80,8 @@ def dropout_cached(
     if not (p >= 0.0 and p < 1.0):
         raise Error("dropout_cached: p must be in [0, 1), got " + String(p))
     if not training or p <= 0.0:
-        return DropoutResult(x.copy(), ones_2d(x.rows, x.cols))
+        # Identity: all-ones mask, unit scale, no rng drawn.
+        return DropoutResult(x.copy(), ones_2d(x.rows, x.cols), 1.0)
 
     var keep_prob = 1.0 - p
     var inv_keep = 1.0 / keep_prob
@@ -88,29 +94,27 @@ def dropout_cached(
             if rng.uniform() < keep_prob:
                 mask[r, c] = 1.0
                 output[r, c] = x[r, c] * inv_keep
-    return DropoutResult(output^, mask^)
+    return DropoutResult(output^, mask^, inv_keep)
 
 
 def dropout_backward(
-    mask: Tensor2D, p: Float64, d_out: Tensor2D
+    mask: Tensor2D, inv_keep: Float64, d_out: Tensor2D
 ) raises -> Tensor2D:
-    # VJP of the mask-fixed dropout forward. Given the mask, the forward scales
-    # each kept element by 1/(1-p) and zeros the rest:
-    #     output = (mask * inv_keep) ⊙ x,   inv_keep = 1/(1-p).
-    # That is a diagonal linear map, and the transpose of a diagonal is itself:
+    # VJP of the mask-fixed dropout forward. The forward is a diagonal linear map
+    #     output = (mask * inv_keep) ⊙ x,
+    # so its transpose is the same diagonal:
     #     dL/dx = (mask * inv_keep) ⊙ d_out.
-    # Reusing the SAME mask the forward drew is the whole point — a fresh draw
-    # would scale a different set of elements than the forward kept, so the
-    # gradient would not match the function actually computed. With p == 0 (or an
-    # all-ones eval mask) inv_keep = 1 and this is the identity. This backward
-    # pairs with dropout_cached's training-mode output. Shapes [N, C] and [N, C]
-    # -> [N, C]. Reads its args; allocates the result; raises if p is outside
-    # [0, 1) or the shapes mismatch.
-    if not (p >= 0.0 and p < 1.0):
-        raise Error("dropout_backward: p must be in [0, 1), got " + String(p))
+    # Both `mask` and `inv_keep` come straight from the DropoutResult the paired
+    # forward produced — NOT recomputed from p. That is what keeps forward and
+    # backward exact inverses in every mode: in eval (or p == 0) the forward is
+    # the identity, its cached mask is all ones AND its cached inv_keep is 1.0, so
+    # this backward is the identity too. Recomputing inv_keep from the forward's p
+    # would instead scale an identity forward by 1/(1-p) — a factor-of-(1-p) bug.
+    # Reusing the forward's mask is likewise the point: a fresh draw would scale a
+    # different set of elements than the forward kept. Shapes [N, C] and [N, C] ->
+    # [N, C]. Reads its args; allocates the result; raises on a shape mismatch.
     if mask.rows != d_out.rows or mask.cols != d_out.cols:
         raise Error("dropout_backward shape mismatch")
-    var inv_keep = 1.0 / (1.0 - p)
     var out = zeros_2d(mask.rows, mask.cols)
     for r in range(mask.rows):
         for c in range(mask.cols):

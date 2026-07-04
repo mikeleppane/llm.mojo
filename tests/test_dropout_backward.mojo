@@ -73,7 +73,7 @@ def test_backward_matches_finite_difference_through_cached_mask() raises:
     var cotangent = from_rows(
         [[0.7, -0.2, 1.3, -0.5], [0.1, 0.9, -1.1, 0.4], [-0.6, 0.3, 0.2, -0.8]]
     )
-    var analytic = dropout_backward(res.mask, p, cotangent)
+    var analytic = dropout_backward(res.mask, res.inv_keep, cotangent)
 
     var h = 1e-5
     for i in range(x.rows):
@@ -100,7 +100,7 @@ def test_backward_scales_by_inv_keep() raises:
     var p = 0.25
     var res = dropout_cached(x, p, True, rng)
     var d_out = sample_input()  # any tensor of the right shape
-    var d_x = dropout_backward(res.mask, p, d_out)
+    var d_x = dropout_backward(res.mask, res.inv_keep, d_out)
     var inv_keep = 1.0 / (1.0 - p)
     for r in range(x.rows):
         for c in range(x.cols):
@@ -109,16 +109,33 @@ def test_backward_scales_by_inv_keep() raises:
             )
 
 
-def test_eval_and_p_zero_backward_is_identity() raises:
-    # Eval mode (or p == 0): the mask is all ones and inv_keep = 1, so backward
-    # returns d_out unchanged.
+def test_eval_backward_is_identity_with_cached_scale() raises:
+    # Eval mode forward is the identity (no drop, no scale), so its backward must
+    # be the identity too — using the SAME cached scale the forward recorded, not
+    # a p the caller has to remember to pass as 0. The cache carries inv_keep=1.0
+    # for eval, so backward is d_out unchanged even though the forward was called
+    # with p=0.5.
     var rng = Rng(1)
     var x = sample_input()
-    var res_eval = dropout_cached(x, 0.5, False, rng)  # eval mode
+    var res_eval = dropout_cached(x, 0.5, False, rng)  # eval mode, p=0.5
     var d_out = from_rows(
         [[0.7, -0.2, 1.3, -0.5], [0.1, 0.9, -1.1, 0.4], [-0.6, 0.3, 0.2, -0.8]]
     )
-    var d_x = dropout_backward(res_eval.mask, 0.0, d_out)
+    var d_x = dropout_backward(res_eval.mask, res_eval.inv_keep, d_out)
+    for r in range(x.rows):
+        for c in range(x.cols):
+            assert_almost_equal(d_x[r, c], d_out[r, c], atol=1e-15)
+
+
+def test_p_zero_backward_is_identity() raises:
+    # p == 0 (training or eval): nothing dropped, inv_keep = 1, backward identity.
+    var rng = Rng(2)
+    var x = sample_input()
+    var res = dropout_cached(x, 0.0, True, rng)
+    var d_out = from_rows(
+        [[0.7, -0.2, 1.3, -0.5], [0.1, 0.9, -1.1, 0.4], [-0.6, 0.3, 0.2, -0.8]]
+    )
+    var d_x = dropout_backward(res.mask, res.inv_keep, d_out)
     for r in range(x.rows):
         for c in range(x.cols):
             assert_almost_equal(d_x[r, c], d_out[r, c], atol=1e-15)
@@ -138,7 +155,7 @@ def test_shape_mismatch_raises() raises:
     var mask = zeros_2d(3, 4)
     var d_out = zeros_2d(3, 5)
     with assert_raises(contains="shape mismatch"):
-        _ = dropout_backward(mask, 0.3, d_out)
+        _ = dropout_backward(mask, 2.0, d_out)  # inv_keep value is irrelevant
 
 
 def main() raises:
