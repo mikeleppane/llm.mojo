@@ -139,9 +139,52 @@ pixi run mojo run -I src tests/test_softmax.mojo
 ```
 
 The `-I src` flag puts the `llm` package on the import path so tests and examples
-can `from llm.tensor import matmul`. During development prefer `-I src` against
-the source tree (edits take effect immediately); a compiled `build/llm.mojopkg`
-is a later, optional distribution step.
+can `from llm.tensor import matmul`. During development `-I src` against the
+source tree is convenient (edits take effect immediately), but it is **slow at
+scale**: `mojo run -I src tests/X.mojo` recompiles *and re-optimizes at `-O` the
+whole `llm` source tree, inlined into each test binary*, every run. For a test
+that pulls the whole model into one function (a training loop, an end-to-end
+finite-difference check) LLVM can grind on the giant monomorphized functions for
+**minutes per file** — this is the dominant cost, not your CPU (the compiler is
+single-threaded on that phase; the machine is fine).
+
+**Precompile the package to make the suite fast.** `scripts/test_all.sh` builds
+`build/llm.mojopkg` once (~1 s) and runs every test with `-I build`, so a test
+compiles only its own small file against a *binary* dependency and the library's
+optimizer passes run once, not per test — the suite drops from tens of minutes to
+a couple. When iterating on one test by hand, do the same:
+
+```bash
+pixi run mojo precompile src/llm -o build/llm.mojopkg   # after any src/ change
+pixi run mojo run -I build tests/test_softmax.mojo      # ~seconds, optimized
+```
+
+Rebuild the package after editing anything under `src/`; forget to, and tests run
+against stale library code. Two operational gotchas learned the hard way:
+**never SIGKILL a `mojo` compile mid-flight** (the module cache is only written on
+a clean exit, so the next run pays full cost again), and **don't stack concurrent
+cold compiles** — the editor's LSP already runs a background `mojo` on every save,
+so a couple is fine but five will starve each other.
+
+**The #6554 compile stall, and how to keep the TDD loop fast.** Even against the
+precompiled package a few test files spend *minutes* in the compiler before a
+sub-second run. Root cause is Mojo #6554: `TestSuite`'s comptime `discover_tests`
+builds a thin-function-pointer dispatch table over the module's functions, and
+the compile cost of that table balloons with the function count (list-literal
+initializers make it worse). It is not your machine and not `-O` — it reproduces
+at `-O0` on a precompiled package. Mitigations, in order of preference:
+
+- **Keep a test module's function count low.** This is the real lever. If a file
+  starts stalling, split it into smaller test files (each gets a smaller table)
+  rather than piling more `def test_*` into one module. Prefer append-helper
+  builders over long inline `[a, b, …]` `List[Int]` literals.
+- **Don't run known-slow files in the red/green loop.** `SKIP_SLOW=1 pixi run
+  test` (aka `pixi run test-fast`) skips the files listed in `SLOW_6554` in
+  `scripts/test_all.sh` and still runs everything else; the default `pixi run
+  test` keeps full coverage for CI. Run a skipped file standalone only when you're
+  actually changing it: `pixi run mojo run --no-optimization -I build tests/<file>`.
+- When you add a file that trips the stall, append it to `SLOW_6554` and note the
+  standalone run time, so the loop stays fast for the next part.
 
 ## Layout
 
