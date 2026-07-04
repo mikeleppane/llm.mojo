@@ -14,6 +14,21 @@ from llm.utils.random import Rng
 
 
 @fieldwise_init
+struct EmbeddingCache(Copyable, Movable):
+    # The ids the forward gathered — the only thing backward needs to scatter the
+    # upstream gradient back to the right table rows. Valid only for the forward
+    # call that produced it.
+    var ids: List[Int]  # [N]
+
+
+@fieldwise_init
+struct EmbeddingForward(Copyable, Movable):
+    # forward_cached's output plus the cache its backward consumes.
+    var output: Tensor2D  # [N, C]
+    var cache: EmbeddingCache
+
+
+@fieldwise_init
 struct Embedding(Copyable, Movable):
     var table: Parameter  # [V, C]; public so the LM head can tie to it
 
@@ -60,3 +75,84 @@ struct Embedding(Copyable, Movable):
             for j in range(c):
                 out[i, j] = self.table.value[idx, j]
         return out^
+
+    def forward_cached(self, ids: List[Int]) raises -> EmbeddingForward:
+        # [N] ids -> EmbeddingForward: the same gathered rows as forward, plus the
+        # ids cached for backward. Reads self; allocates the output and a copy of
+        # the ids; raises on any out-of-range id (via forward). The cache is valid
+        # only for this call.
+        var output = self.forward(ids)
+        return EmbeddingForward(output^, EmbeddingCache(ids.copy()))
+
+    def backward(mut self, cache: EmbeddingCache, d_out: Tensor2D) raises:
+        # Reverse of the gather output[i, :] = table[ids[i], :]. The forward copies
+        # table row ids[i] into output row i, so the gradient scatters back the
+        # other way:
+        #     table.grad[ids[i], :] += d_out[i, :].
+        # The += (not =) is essential: when an id appears at several positions each
+        # occurrence contributes, and those gradients must SUM into that one row —
+        # the classic scatter bug is to overwrite and keep only the last. There is
+        # NO gradient with respect to the ids: they are integer indices selecting
+        # rows, not differentiable inputs, so backward returns nothing. Mutates
+        # self.table.grad; allocates a small per-distinct-id scratch; raises on a
+        # length/width mismatch or an out-of-range id (guarded before writing,
+        # like forward).
+        #
+        # Accumulation order: a repeated id's several cotangent rows are first
+        # summed into a per-id local (`sums`), then that finished row delta is
+        # added to table.grad ONCE. Adding one fully-formed delta per call — not a
+        # running += into table.grad inside the loop — is what makes two backward
+        # passes double the grad bit-for-bit (the second call's partial sums would
+        # otherwise interleave with the first call's stored result and round
+        # differently than 2*grad1). Same discipline as LayerNorm's dγ/dβ. The
+        # scratch is sized to the DISTINCT touched ids (via a linear scan over the
+        # usually-short id list), not the whole vocabulary, so untouched rows cost
+        # nothing.
+        var n = len(cache.ids)
+        var c = self.table.value.cols
+        var vocab_size = self.table.value.rows
+        if d_out.rows != n:
+            raise Error(
+                "Embedding.backward: d_out rows "
+                + String(d_out.rows)
+                + " must equal ids length "
+                + String(n)
+            )
+        if d_out.cols != c:
+            raise Error(
+                "Embedding.backward: d_out width "
+                + String(d_out.cols)
+                + " must equal table width "
+                + String(c)
+            )
+        var uniq_ids = List[Int]()  # distinct touched ids
+        var sums = List[Float64]()  # flat [len(uniq_ids), c] row-major
+        for i in range(n):
+            var idx = cache.ids[i]
+            if idx < 0 or idx >= vocab_size:
+                raise Error(
+                    "Embedding.backward: id out of range, got "
+                    + String(idx)
+                    + " for vocab size "
+                    + String(vocab_size)
+                )
+            var pos = -1
+            for s in range(len(uniq_ids)):
+                if uniq_ids[s] == idx:
+                    pos = s
+                    break
+            if pos == -1:
+                uniq_ids.append(idx)
+                for j in range(c):
+                    sums.append(d_out[i, j])
+            else:
+                var base = pos * c
+                for j in range(c):
+                    sums[base + j] = sums[base + j] + d_out[i, j]
+        for s in range(len(uniq_ids)):
+            var idx = uniq_ids[s]
+            var base = s * c
+            for j in range(c):
+                self.table.grad[idx, j] = (
+                    self.table.grad[idx, j] + sums[base + j]
+                )

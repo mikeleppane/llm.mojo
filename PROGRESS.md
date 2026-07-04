@@ -15,7 +15,8 @@ proves the part green on a fresh checkout (`pixi install` first).
 | VIII | Architecture family | ✅ green (preset + exact param count + comptime pin) | `pixi run test` | 2026-07-03 |
 | IX | NN building blocks | ✅ green (Parameter, Linear, Embedding, LayerNorm, GELU, Dropout, MLP — forward only) | `pixi run test` | 2026-07-04 |
 | X | Attention | ✅ green (additive masks, scaled-dot-product core self+cross, fused-QKV multi-head — forward only) | `pixi run test` | 2026-07-04 |
-| XI+ | Backward & GPT model | not started | — | — |
+| XI | Backpropagation by hand | ✅ green (every layer's backward finite-difference-checked; explicit per-layer caches; grads accumulate) | `pixi run test` | 2026-07-04 |
+| XII+ | GPT model & training | not started | — | — |
 
 ## Notes
 
@@ -76,6 +77,25 @@ proves the part green on a fresh checkout (`pixi install` first).
   `tests/oracles/attention_reference.py`. See
   [notes/part-10-notes.md](notes/part-10-notes.md).
 
+- **Part XI deliverables:** a hand-derived, finite-difference-checked backward
+  pass for every layer Parts IX–X built — additive, no `forward` signature
+  changed, no autograd. Each layer gains `forward_cached(x)` returning an
+  explicit `<Layer>Cache` (holding exactly what backward needs, named in a
+  comment) and `backward(cache, d_out)` that ACCUMULATES (`+=`) into
+  `Parameter.grad` — the property later weight tying depends on, pinned by a
+  per-layer exact-doubling test. Tensor layer: `softmax_rows_backward`
+  (`dS = W ⊙ (dW − rowsum(dW ⊙ W))`, on the output W), and the batched
+  `cross_entropy_rows` + `cross_entropy_rows_backward` (`(softmax − onehot)/N`).
+  `nn/`: Linear, Embedding (scatter-add, repeated ids accumulate), LayerNorm
+  (three-term `dx = r(a − mean(a) − x̂·mean(a⊙x̂))`, derived in the docstring),
+  GELU (`gelu_derivative` + rows VJP), Dropout (cached mask), MLP.
+  `transformer/`: the attention core backward (dV/dW/dS then dQ, dK with
+  `1/sqrt(D)` applied once) and MHA backward reversing the fused-QKV plumbing.
+  Every `d_input` and parameter grad is finite-difference checked (central diff
+  h=1e-5, mixed tolerance); the chain test trains a real Embedding→LayerNorm→MLP
+  stack with strictly decreasing loss. See
+  [notes/part-11-notes.md](notes/part-11-notes.md).
+
 ## Test suites (Parts II–X)
 
 | File | Covers |
@@ -114,3 +134,18 @@ proves the part green on a fresh checkout (`pixi install` first).
 | `tests/test_masks.mojo` | causal_mask hand-checked, key_padding blocks False columns, causal+padding composition stays blocked, no_mask zeros |
 | `tests/test_attention_core.mojo` | cross-shaped oracle (T_q≠T_k), hand-worked 2×2, rows sum to 1, causal weights 0 above diagonal, identical-v pass-through, diagonal-only one-hot, fully-blocked finite (tied + non-tied), 1/sqrt(d_head) scale, scale-before-mask order, shape-mismatch raises |
 | `tests/test_multihead_attention.mojo` | shape contract, param count 4C²+4C reconcile, init determinism, invalid-config raises, single-head equivalence, contiguous-split forward oracle (H=2), causal row-0 locality |
+
+### Backward (Part XI)
+
+| File | Covers |
+|------|--------|
+| `tests/test_softmax_backward.mojo` | row-Jacobian VJP finite-diff, uniform-row mean-subtraction form, shape-mismatch raise |
+| `tests/test_cross_entropy_rows.mojo` | agrees with mean of `cross_entropy_one`, backward finite-diff, rows sum to 0, 1/N mean factor (double rows → halve grad), bad-target/length raises |
+| `tests/test_linear_backward.mojo` | dx/dW/db finite-diff (three loops), exact accumulation doubling, zero_grad reset |
+| `tests/test_embedding_backward.mojo` | touched-row finite-diff, repeated-id accumulation, untouched rows exactly zero, cross-call doubling |
+| `tests/test_layernorm_backward.mojo` | dx/dγ/dβ finite-diff, dx⊥ones (exact) and ⊥x̂ (up to eps) projection property, exact doubling |
+| `tests/test_gelu_backward.mojo` | scalar-derivative finite-diff across a grid, 1/0 asymptotes, rows VJP elementwise, shape-mismatch raise |
+| `tests/test_dropout_backward.mojo` | forward uses returned mask, cached-mask VJP finite-diff (exact), inv_keep scaling, eval/p=0 identity, eval draws no rng, shape-mismatch raise |
+| `tests/test_mlp_backward.mojo` | dx and all four parameter grads finite-diff end to end |
+| `tests/test_attention_backward.mojo` | core dq/dk/dv finite-diff under no_mask/causal/cross-shape (T_q≠T_k), no-gradient-leak into a fully-blocked key, MHA dx + qkv/proj parameter grads |
+| `tests/test_backprop_chain.mojo` | Embedding→LayerNorm→MLP→cross_entropy_rows: embedding-table grad finite-diff end to end, 20 SGD steps strictly decreasing loss |

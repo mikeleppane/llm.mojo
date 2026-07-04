@@ -93,6 +93,24 @@ publishable until its code passes these — see *Publishing* below):
   after) uses a destroyed value. This is the ownership shape of every layer
   factory here (`Parameter`, and the `init_random`/`init_default` factories that
   build tensors then hand them to `Parameter`).
+- **A gradient that must accumulate to an *exact* double needs one `+=` per
+  backward call, not a running `+=` inside a loop.** Backward accumulates into
+  `Parameter.grad` (`+=`, never `=`) so two paths through one Parameter sum — and
+  a per-layer test pins that two backward passes yield bit-for-bit `2×` the
+  grads. That exact equality is real only if each call adds a single fully-formed
+  delta: a running `grad[j] += …` *inside* a per-row/element loop interleaves the
+  second call's partial sums with the first call's stored result, which rounds
+  differently than `2·grad1`. So accumulate the call's contribution into locals,
+  then add the finished delta to `grad` once (LayerNorm's `dγ`/`dβ`). Grads formed
+  by one matmul and added once (Linear's `dW`) already satisfy this. A gradient
+  can be numerically *correct* and still fail the doubling test — that is the test
+  earning its keep, since a doubling off by ulps is a future weight-tying bug.
+- **Bind a temporary's non-`ImplicitlyCopyable` field to a local before using
+  it.** `some_call(...).cache` where `cache: AttentionCache` errors ("cannot be
+  implicitly copied … consider transferring with `^`"), because the temporary is
+  destroyed and the field can't be transferred out of it. Bind the whole result
+  first (`var fwd = some_call(...); fwd.cache`), which borrows the field. Same
+  family as the single-field-transfer rule above.
 
 ## Toolchain and the quality floor
 

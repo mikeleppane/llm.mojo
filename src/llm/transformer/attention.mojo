@@ -14,7 +14,7 @@
 
 from std.math import sqrt
 
-from llm.nn.linear import Linear
+from llm.nn.linear import Linear, LinearCache
 from llm.tensor.ops import (
     add,
     concat_cols,
@@ -22,6 +22,7 @@ from llm.tensor.ops import (
     scale,
     slice_cols,
     softmax_rows,
+    softmax_rows_backward,
     transpose,
 )
 from llm.tensor.tensor2d import Tensor2D
@@ -98,6 +99,111 @@ def scaled_dot_product_attention(
     var weights = softmax_rows(biased)  # [T_q, T_k], rows sum to 1
     var output = matmul(weights, v)  # [T_q, D_v]
     return AttentionResult(output^, weights^)
+
+
+@fieldwise_init
+struct AttentionCache(Copyable, Movable):
+    # What the core's backward needs: q, k, v and the post-softmax weights. The
+    # mask is not stored — it is constant additive data with no gradient, and its
+    # effect already lives in `weights` (blocked entries are ~0, so the softmax
+    # backward kills their gradient). Valid only for the forward call that
+    # produced it.
+    var q: Tensor2D  # [T_q, D]
+    var k: Tensor2D  # [T_k, D]
+    var v: Tensor2D  # [T_k, D_v]
+    var weights: Tensor2D  # [T_q, T_k], post-softmax
+
+
+@fieldwise_init
+struct AttentionForward(Copyable, Movable):
+    # scaled_dot_product_attention_cached's output plus the cache its backward
+    # consumes.
+    var output: Tensor2D  # [T_q, D_v]
+    var cache: AttentionCache
+
+
+@fieldwise_init
+struct AttentionGrads(Copyable, Movable):
+    # The core backward's three input gradients, one per differentiable input.
+    var d_q: Tensor2D  # [T_q, D]
+    var d_k: Tensor2D  # [T_k, D]
+    var d_v: Tensor2D  # [T_k, D_v]
+
+
+def scaled_dot_product_attention_cached(
+    q: Tensor2D, k: Tensor2D, v: Tensor2D, mask: Tensor2D
+) raises -> AttentionForward:
+    # Same forward as scaled_dot_product_attention, additionally returning the
+    # cache its backward needs (q, k, v, weights). Reads its args; allocates the
+    # output and the cache; raises on the same shape mismatches the forward does.
+    var result = scaled_dot_product_attention(q, k, v, mask)
+    var cache = AttentionCache(
+        q.copy(), k.copy(), v.copy(), result.weights.copy()
+    )
+    return AttentionForward(result.output.copy(), cache^)
+
+
+def scaled_dot_product_attention_backward(
+    cache: AttentionCache, d_out: Tensor2D
+) raises -> AttentionGrads:
+    # Reverse of the pinned forward order. Let s = 1/sqrt(D), D = q.cols = d_head
+    # (the SAME scale the forward used, applied once). Forward: S = qk^T, scaled
+    # by s, + mask, softmax -> W, output = Wv. So with dO = d_out [T_q, D_v]:
+    #   dV = W^T @ dO                          [T_k, T_q] @ [T_q, D_v] -> [T_k, D_v]
+    #   dW = dO @ V^T                          [T_q, D_v] @ [D_v, T_k] -> [T_q, T_k]
+    #   dScaled = softmax_rows_backward(W, dW)                          -> [T_q, T_k]
+    #   dScores = dScaled                      (mask is constant; add passes dW through)
+    #   dQ = (dScores @ K) * s                 [T_q, T_k] @ [T_k, D]   -> [T_q, D]
+    #   dK = (dScores^T @ Q) * s               [T_k, T_q] @ [T_q, D]   -> [T_k, D]
+    # The scale s folds into dQ/dK once (dScores = s·(qk^T-backward)); it does NOT
+    # apply to dV, which comes off the value matmul, not the scaled scores. The
+    # mask leaks no gradient: softmax_rows_backward multiplies by W, and a blocked
+    # entry's W is ~0. Reads the cache and d_out; allocates the three gradients;
+    # raises on a shape mismatch or a zero feature width.
+    var t_q = cache.q.rows
+    var d = cache.q.cols
+    var t_k = cache.k.rows
+    if d == 0:
+        raise Error(
+            "scaled_dot_product_attention_backward: q has zero feature width D"
+        )
+    if cache.weights.rows != t_q or cache.weights.cols != t_k:
+        raise Error(
+            "scaled_dot_product_attention_backward: weights must be [T_q, T_k]"
+        )
+    if d_out.rows != t_q or d_out.cols != cache.v.cols:
+        raise Error(
+            "scaled_dot_product_attention_backward: d_out must be [T_q, D_v]"
+        )
+    if cache.v.rows != t_k:
+        raise Error(
+            "scaled_dot_product_attention_backward: v/k length mismatch"
+        )
+    var s = 1.0 / sqrt(Float64(d))
+    var d_v = matmul(transpose(cache.weights), d_out)  # [T_k, D_v]
+    var d_w = matmul(d_out, transpose(cache.v))  # [T_q, T_k]
+    var d_scores = softmax_rows_backward(cache.weights, d_w)  # [T_q, T_k]
+    var d_q = scale(matmul(d_scores, cache.k), s)  # [T_q, D]
+    var d_k = scale(matmul(transpose(d_scores), cache.q), s)  # [T_k, D]
+    return AttentionGrads(d_q^, d_k^, d_v^)
+
+
+@fieldwise_init
+struct MHACache(Copyable, Movable):
+    # What MultiHeadAttention.backward needs, mirroring the forward plumbing: the
+    # fused qkv Linear's cache (its input x), one AttentionCache per head, and the
+    # output proj Linear's cache (its input, the concatenated head outputs). Valid
+    # only for the forward call that produced it.
+    var qkv_cache: LinearCache  # holds x                    [T, C]
+    var head_caches: List[AttentionCache]  # per head: q,k,v,weights
+    var proj_cache: LinearCache  # holds concat(head outputs) [T, C]
+
+
+@fieldwise_init
+struct MHAForward(Copyable, Movable):
+    # forward_cached's output plus the cache its backward consumes.
+    var output: Tensor2D  # [T, C]
+    var cache: MHACache
 
 
 @fieldwise_init
@@ -199,3 +305,117 @@ struct MultiHeadAttention(Copyable, Movable):
         var concatenated = concat_cols(head_outputs)  # [T, C]
 
         return self.proj.forward(concatenated)  # [T, C] -> [T, C]
+
+    def forward_cached(self, x: Tensor2D, mask: Tensor2D) raises -> MHAForward:
+        # Self-attention over one sequence with the cache backward needs: [T, C] +
+        # mask [T, T] -> MHAForward. Same computation as forward, capturing the
+        # fused-qkv cache, one AttentionCache per head, and the proj cache. Reads
+        # self; allocates the projections, per-head slices, caches, and result;
+        # raises on a feature-count mismatch or an indivisible width. The cache is
+        # valid only for this call.
+        if self.n_heads <= 0:
+            raise Error(
+                "MultiHeadAttention.forward_cached: n_heads must be positive,"
+                " got "
+                + String(self.n_heads)
+            )
+        var c = self.qkv.weight.value.cols  # in_features of c_attn = C
+        if c % self.n_heads != 0:
+            raise Error(
+                "MultiHeadAttention.forward_cached: C ("
+                + String(c)
+                + ") not divisible by n_heads ("
+                + String(self.n_heads)
+                + ")"
+            )
+        var d_head = c // self.n_heads  # per-head width D = C / H
+
+        var qkv_fwd = self.qkv.forward_cached(x)  # output [T, 3C], cache = x
+        var q_all = slice_cols(qkv_fwd.output, 0, c)  # [T, C]
+        var k_all = slice_cols(qkv_fwd.output, c, 2 * c)  # [T, C]
+        var v_all = slice_cols(qkv_fwd.output, 2 * c, 3 * c)  # [T, C]
+
+        var head_outputs = List[Tensor2D]()
+        var head_caches = List[AttentionCache]()
+        for h in range(self.n_heads):
+            var lo = h * d_head
+            var hi = lo + d_head
+            var q_h = slice_cols(q_all, lo, hi)  # [T, D]
+            var k_h = slice_cols(k_all, lo, hi)  # [T, D]
+            var v_h = slice_cols(v_all, lo, hi)  # [T, D]
+            var head = scaled_dot_product_attention_cached(q_h, k_h, v_h, mask)
+            head_outputs.append(head.output.copy())  # [T, D]
+            head_caches.append(head.cache.copy())
+        var concatenated = concat_cols(head_outputs)  # [T, C]
+        var proj_fwd = self.proj.forward_cached(concatenated)  # [T, C]
+
+        var cache = MHACache(
+            qkv_fwd.cache.copy(), head_caches^, proj_fwd.cache.copy()
+        )
+        return MHAForward(proj_fwd.output.copy(), cache^)
+
+    def backward(mut self, cache: MHACache, d_out: Tensor2D) raises -> Tensor2D:
+        # Reverse the forward plumbing exactly, right to left. [T, C] d_out ->
+        # [T, C] d_x, accumulating the qkv and proj parameter grads (+=).
+        #   1. d_concat = proj.backward(proj_cache, d_out)   [T, C]
+        #   2. split d_concat into H contiguous [T, D] head slices; per head run
+        #      the core backward to get d_q_h, d_k_h, d_v_h.
+        #   3. concat the per-head d_q's (and d_k's, d_v's) back to [T, C] — the
+        #      exact inverse of the forward's head split.
+        #   4. d_qkv = [d_q_all | d_k_all | d_v_all]         [T, 3C] — the inverse
+        #      of the forward's Q/K/V third-split.
+        #   5. d_x = qkv.backward(qkv_cache, d_qkv)          [T, C]
+        # slice_cols and concat_cols are exact inverses (pinned in Part X), so the
+        # column bookkeeping round-trips. Mutates self.proj and self.qkv parameter
+        # grads; allocates and returns d_x; raises on a shape/config mismatch.
+        if self.n_heads <= 0:
+            raise Error(
+                "MultiHeadAttention.backward: n_heads must be positive, got "
+                + String(self.n_heads)
+            )
+        var c = self.qkv.weight.value.cols
+        if c % self.n_heads != 0:
+            raise Error(
+                "MultiHeadAttention.backward: C ("
+                + String(c)
+                + ") not divisible by n_heads ("
+                + String(self.n_heads)
+                + ")"
+            )
+        if len(cache.head_caches) != self.n_heads:
+            raise Error(
+                "MultiHeadAttention.backward: cache has "
+                + String(len(cache.head_caches))
+                + " head caches but n_heads is "
+                + String(self.n_heads)
+            )
+        var d_head = c // self.n_heads
+
+        var d_concat = self.proj.backward(cache.proj_cache, d_out)  # [T, C]
+
+        var dq_heads = List[Tensor2D]()
+        var dk_heads = List[Tensor2D]()
+        var dv_heads = List[Tensor2D]()
+        for h in range(self.n_heads):
+            var lo = h * d_head
+            var hi = lo + d_head
+            var d_head_out = slice_cols(d_concat, lo, hi)  # [T, D]
+            var grads = scaled_dot_product_attention_backward(
+                cache.head_caches[h], d_head_out
+            )
+            dq_heads.append(grads.d_q.copy())  # [T, D]
+            dk_heads.append(grads.d_k.copy())
+            dv_heads.append(grads.d_v.copy())
+        var d_q_all = concat_cols(dq_heads)  # [T, C]
+        var d_k_all = concat_cols(dk_heads)  # [T, C]
+        var d_v_all = concat_cols(dv_heads)  # [T, C]
+
+        # Reassemble the fused-qkv gradient in the same Q|K|V column order the
+        # forward's projection produced.
+        var qkv_parts = List[Tensor2D]()
+        qkv_parts.append(d_q_all^)
+        qkv_parts.append(d_k_all^)
+        qkv_parts.append(d_v_all^)
+        var d_qkv = concat_cols(qkv_parts)  # [T, 3C]
+
+        return self.qkv.backward(cache.qkv_cache, d_qkv)  # [T, C]
