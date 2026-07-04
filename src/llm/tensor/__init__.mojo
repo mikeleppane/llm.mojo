@@ -4,6 +4,8 @@ from .ops import (
     add,
     scale,
     transpose,
+    slice_cols,
+    concat_cols,
     matmul,
     matmul_ikj,
     matvec,

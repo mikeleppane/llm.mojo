@@ -51,6 +51,64 @@ def transpose(a: Tensor2D) -> Tensor2D:
     return out^
 
 
+# --- column slice / concat ---
+
+
+def slice_cols(a: Tensor2D, start: Int, end: Int) raises -> Tensor2D:
+    # Extract the contiguous column band [start, end) from every row:
+    # [R, C] -> [R, end - start]. This is the head-split primitive — one
+    # projection [T, 3C] carved into contiguous [T, D] slices. Raises unless
+    # 0 <= start < end <= C (an empty or reversed range is a caller bug, not a
+    # silent zero-width result). Allocates the result.
+    if not (0 <= start and start < end and end <= a.cols):
+        raise Error(
+            "slice_cols: need 0 <= start < end <= cols, got start="
+            + String(start)
+            + " end="
+            + String(end)
+            + " cols="
+            + String(a.cols)
+        )
+    var width = end - start
+    var out = zeros_2d(a.rows, width)
+    for r in range(a.rows):
+        for c in range(width):
+            out[r, c] = a[r, start + c]
+    return out^
+
+
+def concat_cols(parts: List[Tensor2D]) raises -> Tensor2D:
+    # Join tensors side by side along columns, in list order:
+    # k tensors [R, C_i] -> [R, sum(C_i)]. The head-merge primitive — H head
+    # outputs [T, D] concatenated back to [T, C]. Raises on an empty list (no
+    # row count to adopt) or any row-count mismatch (a ragged concat is a caller
+    # bug). Allocates the result.
+    if len(parts) == 0:
+        raise Error("concat_cols: parts is empty")
+    var rows = parts[0].rows
+    var total_cols = 0
+    for i in range(len(parts)):
+        if parts[i].rows != rows:
+            raise Error(
+                "concat_cols: row-count mismatch, part 0 has "
+                + String(rows)
+                + " rows but part "
+                + String(i)
+                + " has "
+                + String(parts[i].rows)
+            )
+        total_cols += parts[i].cols
+    var out = zeros_2d(rows, total_cols)
+    var col_offset = 0
+    for i in range(len(parts)):
+        var part_cols = parts[i].cols
+        for r in range(rows):
+            for c in range(part_cols):
+                out[r, col_offset + c] = parts[i][r, c]
+        col_offset += part_cols
+    return out^
+
+
 # --- matmul family ---
 
 

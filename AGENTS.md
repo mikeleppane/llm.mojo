@@ -52,6 +52,13 @@ publishable until its code passes these — see *Publishing* below):
   `s.field^` fails with "destroyed out of the middle of a value". `.copy()` the
   field (or move the whole `s`). Owned (`var`) args likewise need `^`/`.copy()`
   at the call site — `List`/`Dict`/user structs are not `ImplicitlyCopyable`.
+  This includes a returned struct's field: `list.append(result.output^)` on an
+  `AttentionResult` fails; use `result.output.copy()`.
+- **Binding a `List[T]` element to a local copies it** when `T` is `Copyable`
+  but not `ImplicitlyCopyable` (`Tensor2D`, user structs): `var part = parts[i]`
+  fails with "cannot be implicitly copied". Read the scalar fields you need off
+  `parts[i]` and subscript `parts[i][...]` directly, or `.copy()` when you truly
+  need to own the element.
 - **`Dict` subscript (`d[key]`) raises** on the pinned Mojo, so any function
   that indexes a `Dict` must itself be `raises` — even a lookup guarded by
   `if key in d` that can never actually miss. (Pretrained code and the chapter
