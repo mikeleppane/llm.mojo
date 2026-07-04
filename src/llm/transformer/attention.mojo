@@ -158,6 +158,14 @@ struct MultiHeadAttention(Copyable, Movable):
         # per-head slices, and the result; raises on a feature-count mismatch
         # (via the qkv Linear) or an indivisible width. The caller's mask is
         # applied unchanged to every head.
+        # @fieldwise_init lets a caller build this struct directly, bypassing
+        # init_random's guard, so re-check n_heads here rather than trap on a
+        # modulo-by-zero below.
+        if self.n_heads <= 0:
+            raise Error(
+                "MultiHeadAttention.forward: n_heads must be positive, got "
+                + String(self.n_heads)
+            )
         var c = self.qkv.weight.value.cols  # in_features of c_attn = C
         if c % self.n_heads != 0:
             raise Error(

@@ -14,6 +14,8 @@ from std.testing import (
     TestSuite,
 )
 
+from llm.nn.linear import Linear
+from llm.nn.parameter import Parameter
 from llm.tensor.ops import slice_cols
 from llm.tensor.tensor2d import Tensor2D, from_rows
 from llm.transformer.attention import (
@@ -113,6 +115,84 @@ def test_single_head_equals_manual_composition() raises:
     for r in range(3):
         for col in range(c):
             assert_almost_equal(y[r, col], manual[r, col], atol=1e-12)
+
+
+def test_multihead_forward_contiguous_split_oracle() raises:
+    # The single-head test (H=1) can't distinguish a contiguous head split from
+    # an interleaved one, and causal locality is split-invariant at row 0 — so
+    # without this case an interleaved split or a swapped head order would pass
+    # green. Here H=2, C=4, D=2, causal, with hand-built qkv/proj weights so the
+    # Mojo layer rebuilds the exact Linears the NumPy oracle used. The expected
+    # output (Case E in tests/oracles/attention_reference.py) is computed with a
+    # CONTIGUOUS split ([0:2], [2:4]); an interleaved split ([0,2]/[1,3]) or
+    # swapped heads yields different columns (E_output_INTERLEAVED in the
+    # oracle), so this frozen output pins both the split axis and head ordering.
+    var w_qkv = from_rows(
+        [
+            [0.10, -0.20, 0.30, 0.05],
+            [0.40, 0.10, -0.10, 0.20],
+            [-0.30, 0.20, 0.10, 0.15],
+            [0.05, 0.25, -0.15, 0.30],
+            [0.20, -0.10, 0.35, -0.05],
+            [0.15, 0.30, 0.10, -0.20],
+            [-0.25, 0.05, 0.20, 0.10],
+            [0.30, -0.15, 0.05, 0.25],
+            [0.10, 0.20, -0.30, 0.15],
+            [-0.05, 0.35, 0.15, -0.10],
+            [0.25, -0.20, 0.10, 0.30],
+            [0.20, 0.10, -0.25, 0.05],
+        ]
+    )  # [3C=12, C=4]
+    var b_qkv = from_rows(
+        [
+            [
+                0.01,
+                -0.02,
+                0.03,
+                0.00,
+                0.02,
+                -0.01,
+                0.00,
+                0.04,
+                -0.03,
+                0.01,
+                0.02,
+                -0.04,
+            ]
+        ]
+    )  # [1, 12]
+    var w_proj = from_rows(
+        [
+            [0.20, -0.10, 0.30, 0.05],
+            [0.15, 0.25, -0.20, 0.10],
+            [-0.05, 0.30, 0.10, -0.15],
+            [0.25, -0.20, 0.05, 0.30],
+        ]
+    )  # [C=4, C=4]
+    var b_proj = from_rows([[0.05, -0.05, 0.10, 0.00]])  # [1, 4]
+    var mha = MultiHeadAttention(
+        Linear(Parameter(w_qkv^), Parameter(b_qkv^)),
+        Linear(Parameter(w_proj^), Parameter(b_proj^)),
+        2,
+    )
+    var x = from_rows([[1.0, 2.0, -1.0, 0.5], [0.0, 1.0, 2.0, -3.0]])  # [2, 4]
+    var y = mha.forward(x, causal_mask(2))
+    # E_output, contiguous split, frozen from the oracle
+    var expected = [
+        0.18075000000000002,
+        0.27125,
+        0.09249999999999996,
+        0.30575,
+        -0.2027460178243602,
+        0.2308733158146542,
+        0.2728490081523048,
+        -0.21152733293607015,
+    ]
+    assert_equal(y.rows, 2)
+    assert_equal(y.cols, 4)
+    for r in range(2):
+        for col in range(4):
+            assert_almost_equal(y[r, col], expected[r * 4 + col], atol=1e-12)
 
 
 def test_causal_row0_ignores_later_positions() raises:

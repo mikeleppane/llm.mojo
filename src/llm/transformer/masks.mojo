@@ -15,11 +15,17 @@ from llm.tensor.tensor2d import Tensor2D, zeros_2d
 # The additive "blocked" score. Finite on purpose (not -inf): a fully-blocked
 # query row — every key masked — would, with -inf, make the stable softmax
 # compute exp(-inf - (-inf)) = exp(NaN) = NaN and poison everything downstream.
-# With a large finite value the row instead degrades to (near-)uniform weights —
-# wrong, but finite and harmless, since a fully-blocked query is itself padding
-# whose output is never read. -1e9 dwarfs any real score (attention logits here
-# are O(sqrt(d_head) * unit variance)), so an unblocked key always wins the
-# softmax by an astronomical margin; the exact magnitude is not load-bearing.
+# With a large finite value the row instead stays finite and its weights still
+# sum to 1 — the load-bearing guarantee. (Because softmax is shift-invariant,
+# adding the same MASKED_SCORE to every key leaves the row equal to
+# softmax(unmasked scores); that is uniform only when the underlying scores tie,
+# and with composed masks — one cell MASKED_SCORE, another 2*MASKED_SCORE — the
+# row can even lean toward the least-masked key. "Uniform" is the tied-score
+# special case, not the general rule.) None of this matters in practice: a
+# fully-blocked query is itself padding whose output is never read; only the
+# finiteness is. -1e9 also dwarfs any real score (attention logits here are
+# O(sqrt(d_head) * unit variance)), so a partially-blocked row drives every
+# masked key to ~0 weight; the exact magnitude is not load-bearing.
 comptime MASKED_SCORE = -1e9
 
 

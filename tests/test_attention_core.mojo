@@ -203,6 +203,31 @@ def test_fully_blocked_row_is_finite_no_nan() raises:
         assert_true(not isnan(r.output[0, j]) and not isinf(r.output[0, j]))
 
 
+def test_fully_blocked_nontied_row_stays_finite_not_uniform() raises:
+    # Companion to the tied case: when a fully-blocked row's underlying scores do
+    # NOT tie, the row does not go uniform — additive masking is shift-invariant,
+    # so it degrades to softmax(unmasked scores). The guarantee that still holds
+    # is finiteness and rows summing to 1. Here query 0 has distinct dot products
+    # against the keys, so its blocked-row weights are unequal but finite.
+    var q = from_rows([[2.0, 1.0]])  # [1, 2]; non-degenerate query
+    var k = from_rows([[3.0, 0.0], [0.0, 3.0], [1.0, 1.0]])  # distinct dots
+    var v = from_rows([[1.0, 0.0], [0.0, 1.0], [2.0, 2.0]])  # [3, 2]
+    var mask = zeros_2d(1, 3)
+    for j in range(3):
+        mask[0, j] = MASKED_SCORE  # fully block query 0
+    var r = scaled_dot_product_attention(q, k, v, mask)
+    var s = 0.0
+    var all_equal = True
+    for j in range(3):
+        assert_true(not isnan(r.weights[0, j]) and not isinf(r.weights[0, j]))
+        s += r.weights[0, j]
+        if abs(r.weights[0, j] - 1.0 / 3.0) > 1e-9:
+            all_equal = False
+    assert_almost_equal(s, 1.0, atol=1e-12)
+    # explicitly NOT uniform — the weights track the unmasked score differences
+    assert_true(not all_equal)
+
+
 def test_scale_is_inv_sqrt_dhead() raises:
     # Golden from Case B: q has a single 1 in column 0, so dot(q, k_row) is
     # k_row[0] regardless of D. The two dot products stay fixed at 8 and 2 while

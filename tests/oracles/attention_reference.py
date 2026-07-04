@@ -111,6 +111,70 @@ def main() -> None:
     print("# Case D: hand-worked 2x2, D=1")
     dump("D_weights", wd)  # [2, 2]
     dump("D_output", od)  # [2, 1]
+    print()
+
+    # --- Case E: full MultiHeadAttention forward, H=2, pins the CONTIGUOUS
+    # head split (and head-output ordering). ---
+    # Hand-built qkv/proj weights (not rng, so the Mojo test can rebuild the
+    # exact same Linears via from_rows). C=4, H=2, D=2, T=2, causal mask. The
+    # reference splits Q/K/V into contiguous head bands [0:2] and [2:4]; an
+    # INTERLEAVED split ([0,2] / [1,3]) or a swapped head order produces
+    # different columns, so this single frozen output pins the layout. The
+    # expected output is computed with NumPy slicing, independent of the Mojo
+    # slice_cols/concat_cols under test.
+    c, h_heads, t = 4, 2, 2
+    d = c // h_heads
+    # Linear weight convention is [out, in]; forward is x @ W^T + b.
+    w_qkv = np.array(
+        [
+            [0.10, -0.20, 0.30, 0.05],  # 3C=12 rows, C=4 cols
+            [0.40, 0.10, -0.10, 0.20],
+            [-0.30, 0.20, 0.10, 0.15],
+            [0.05, 0.25, -0.15, 0.30],
+            [0.20, -0.10, 0.35, -0.05],
+            [0.15, 0.30, 0.10, -0.20],
+            [-0.25, 0.05, 0.20, 0.10],
+            [0.30, -0.15, 0.05, 0.25],
+            [0.10, 0.20, -0.30, 0.15],
+            [-0.05, 0.35, 0.15, -0.10],
+            [0.25, -0.20, 0.10, 0.30],
+            [0.20, 0.10, -0.25, 0.05],
+        ]
+    )
+    b_qkv = np.array(
+        [0.01, -0.02, 0.03, 0.00, 0.02, -0.01, 0.00, 0.04, -0.03, 0.01, 0.02, -0.04]
+    )
+    w_proj = np.array(
+        [
+            [0.20, -0.10, 0.30, 0.05],  # C=4 rows, C=4 cols
+            [0.15, 0.25, -0.20, 0.10],
+            [-0.05, 0.30, 0.10, -0.15],
+            [0.25, -0.20, 0.05, 0.30],
+        ]
+    )
+    b_proj = np.array([0.05, -0.05, 0.10, 0.00])
+    x_e = np.array([[1.0, 2.0, -1.0, 0.5], [0.0, 1.0, 2.0, -3.0]])  # [T=2, C=4]
+
+    qkv = x_e @ w_qkv.T + b_qkv  # [2, 12]
+    q_all, k_all, v_all = qkv[:, 0:c], qkv[:, c : 2 * c], qkv[:, 2 * c : 3 * c]
+    causal = np.array([[0.0, -1e9], [0.0, 0.0]])  # causal_mask(2)
+
+    def mha_forward(split_starts):
+        heads = []
+        for lo in split_starts:
+            qh = q_all[:, lo : lo + d]
+            kh = k_all[:, lo : lo + d]
+            vh = v_all[:, lo : lo + d]
+            _, oh = sdpa(qh, kh, vh, causal)
+            heads.append(oh)
+        concat = np.concatenate(heads, axis=1)  # [T, C]
+        return concat @ w_proj.T + b_proj
+
+    contiguous = mha_forward([0, 2])  # heads own [0:2] and [2:4]
+    interleaved = mha_forward([0, 1])  # a WRONG split, for contrast only
+    print("# Case E: MultiHeadAttention forward, H=2, contiguous split, causal")
+    dump("E_output", contiguous)  # [2, 4] — frozen into the Mojo test
+    dump("E_output_INTERLEAVED_do_not_match", interleaved)  # must differ
 
 
 if __name__ == "__main__":
