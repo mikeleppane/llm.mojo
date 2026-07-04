@@ -139,9 +139,32 @@ pixi run mojo run -I src tests/test_softmax.mojo
 ```
 
 The `-I src` flag puts the `llm` package on the import path so tests and examples
-can `from llm.tensor import matmul`. During development prefer `-I src` against
-the source tree (edits take effect immediately); a compiled `build/llm.mojopkg`
-is a later, optional distribution step.
+can `from llm.tensor import matmul`. During development `-I src` against the
+source tree is convenient (edits take effect immediately), but it is **slow at
+scale**: `mojo run -I src tests/X.mojo` recompiles *and re-optimizes at `-O` the
+whole `llm` source tree, inlined into each test binary*, every run. For a test
+that pulls the whole model into one function (a training loop, an end-to-end
+finite-difference check) LLVM can grind on the giant monomorphized functions for
+**minutes per file** — this is the dominant cost, not your CPU (the compiler is
+single-threaded on that phase; the machine is fine).
+
+**Precompile the package to make the suite fast.** `scripts/test_all.sh` builds
+`build/llm.mojopkg` once (~1 s) and runs every test with `-I build`, so a test
+compiles only its own small file against a *binary* dependency and the library's
+optimizer passes run once, not per test — the suite drops from tens of minutes to
+a couple. When iterating on one test by hand, do the same:
+
+```bash
+pixi run mojo precompile src/llm -o build/llm.mojopkg   # after any src/ change
+pixi run mojo run -I build tests/test_softmax.mojo      # ~seconds, optimized
+```
+
+Rebuild the package after editing anything under `src/`; forget to, and tests run
+against stale library code. Two operational gotchas learned the hard way:
+**never SIGKILL a `mojo` compile mid-flight** (the module cache is only written on
+a clean exit, so the next run pays full cost again), and **don't stack concurrent
+cold compiles** — the editor's LSP already runs a background `mojo` on every save,
+so a couple is fine but five will starve each other.
 
 ## Layout
 

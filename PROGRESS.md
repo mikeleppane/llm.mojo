@@ -16,7 +16,8 @@ proves the part green on a fresh checkout (`pixi install` first).
 | IX | NN building blocks | ✅ green (Parameter, Linear, Embedding, LayerNorm, GELU, Dropout, MLP — forward only) | `pixi run test` | 2026-07-04 |
 | X | Attention | ✅ green (additive masks, scaled-dot-product core self+cross, fused-QKV multi-head — forward only) | `pixi run test` | 2026-07-04 |
 | XI | Backpropagation by hand | ✅ green (every layer's backward finite-difference-checked; explicit per-layer caches; grads accumulate) | `pixi run test` | 2026-07-04 |
-| XII+ | GPT model & training | not started | — | — |
+| XII | Encoder-decoder lab | ✅ green (cross-attention + pre-LN blocks assembled into a seq2seq model in `src/llm/lab/`; trains copy/reverse to exact-match with a memory ablation; all lab code quarantined off the main line) | `pixi run test` | 2026-07-04 |
+| XIII+ | GPT model & training | not started | — | — |
 
 ## Notes
 
@@ -95,6 +96,36 @@ proves the part green on a fresh checkout (`pixi install` first).
   h=1e-5, mixed tolerance); the chain test trains a real Embedding→LayerNorm→MLP
   stack with strictly decreasing loss. See
   [notes/part-11-notes.md](notes/part-11-notes.md).
+
+- **Part XII deliverables:** a small encoder-decoder Transformer ASSEMBLED from
+  the Parts IX–XI layers, quarantined in a new `src/llm/lab/` package (the main
+  line is decoder-only, so none of this joins it; nothing under `tensor/`, `nn/`,
+  `transformer/`, `training/`, `generation/` changed). `CrossMultiHeadAttention`
+  (separate `q` Linear(C→C) + FUSED `kv` Linear(C→2C) + `proj`, cost 4C²+4C,
+  reusing the Part X core and its backward; backward returns {d_x, d_memory}).
+  Pre-LN `EncoderBlock`/`DecoderBlock` (x + sublayer(ln(x)); the residual backward
+  `d_x = d_out + branch_backward(d_out)` is the one new gradient rule). `EncDec`
+  seq2seq model: separate src/tgt token + positional embeddings, encoder stack +
+  final LN → memory, decoder stack + final LN, untied head; teacher forcing with
+  BOS; explicit `zero_grad`/`apply_sgd` enumerating every Parameter;
+  `greedy_decode`. Toy copy/reverse tasks. The capstone trains to EXACT greedy
+  decode (copy + reverse overfit) and a corrupted-memory ablation collapses it,
+  proving cross-attention is load-bearing; held-out generalization + the
+  anti-diagonal alignment map are in `examples/encdec_reverse.mojo`. NumPy oracle
+  `tests/oracles/encdec_reference.py`. `scripts/test_all.sh` now precompiles the
+  `llm` package (`build/llm.mojopkg`) so the suite runs in minutes not tens of
+  minutes. See [notes/part-12-notes.md](notes/part-12-notes.md).
+
+### Encoder-decoder lab (Part XII)
+
+| File | Covers |
+|------|--------|
+| `tests/test_seq_tasks.mojo` | copy/reverse correctness, seeded determinism, values in [0,V_data), BOS one past the alphabet, teacher-forcing shift hand-pinned, unique-source distinctness |
+| `tests/test_cross_attention.mojo` | cross-MHA forward oracle (T_q≠T_k), shape contract, param count 4C²+4C, init determinism, invalid-config raises, single-head=core+proj, finite-diff d_x/d_memory/all six param grads, exact doubling |
+| `tests/test_encoder_block.mojo` | pre-LN forward oracle (a post-LN wiring fails it), zeroed-sublayer identity (skip carries x), finite-diff d_x + all 12 parameter grads |
+| `tests/test_decoder_block.mojo` | pre-LN forward oracle (causal+cross), causality (perturb x@j ⇒ rows<j unchanged), memory-is-read, finite-diff d_x/d_memory/all 20 parameter grads |
+| `tests/test_encdec_model.mojo` | logits [T,V], init loss≈log V, model causality in tgt_in, source-token-embedding grad finite-diff (longest path), n_dec=2 d_memory summing, zero_grad/apply_sgd touch every Parameter |
+| `tests/test_encdec_training.mojo` | capstone: copy + reverse overfit to exact greedy-decode, corrupted-memory ablation collapses reverse exact-match, loss far below log V |
 
 ## Test suites (Parts II–X)
 
