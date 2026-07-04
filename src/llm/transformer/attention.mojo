@@ -14,8 +14,18 @@
 
 from std.math import sqrt
 
-from llm.tensor.ops import add, matmul, scale, softmax_rows, transpose
+from llm.nn.linear import Linear
+from llm.tensor.ops import (
+    add,
+    concat_cols,
+    matmul,
+    scale,
+    slice_cols,
+    softmax_rows,
+    transpose,
+)
 from llm.tensor.tensor2d import Tensor2D
+from llm.utils.random import Rng
 
 
 struct AttentionResult(Copyable, Movable):
@@ -88,3 +98,96 @@ def scaled_dot_product_attention(
     var weights = softmax_rows(biased)  # [T_q, T_k], rows sum to 1
     var output = matmul(weights, v)  # [T_q, D_v]
     return AttentionResult(output^, weights^)
+
+
+@fieldwise_init
+struct MultiHeadAttention(Copyable, Movable):
+    # GPT-2's multi-head self-attention with the FUSED QKV projection.
+    #
+    # One Linear(C -> 3C) (GPT-2's `c_attn`) produces Q, K, V for every head in a
+    # single matmul; one Linear(C -> C) (`c_proj`) mixes the concatenated head
+    # outputs. This is the checkpoint layout weight loading will fill, and its
+    # parameter cost (3C^2 + 3C for qkv, C^2 + C for proj) is exactly the
+    # attention arithmetic the architecture's parameter count already commits to.
+    #
+    # Head layout is CONTIGUOUS, matching GPT-2: the [T, 3C] projection splits
+    # into three [T, C] thirds (Q, K, V), and each third splits into H contiguous
+    # [T, D] head slices with D = C / H — head h owns columns [h*D, (h+1)*D), not
+    # an interleaved stride. The [B, H, T, D] shape you see in framework code is
+    # loop discipline here: B is the block's batch loop (a later part), H is the
+    # loop below, and the tile each head works on is [T, D].
+    var qkv: Linear  # C -> 3C, fused c_attn
+    var proj: Linear  # C -> C, c_proj
+    var n_heads: Int
+
+    @staticmethod
+    def init_random(
+        mut rng: Rng, d_model: Int, n_heads: Int
+    ) raises -> MultiHeadAttention:
+        # An MHA with both Linears drawn from GPT-2's normal(0, 0.02) scheme and
+        # zero biases (qkv weights are drawn first, then proj). Mutates rng
+        # (advances its state); allocates both layers; deterministic given the
+        # generator's state. Raises unless n_heads > 0 and d_model is a positive
+        # multiple of n_heads — otherwise the head width D = C / H is undefined
+        # or degenerate.
+        if n_heads <= 0:
+            raise Error(
+                "MultiHeadAttention.init_random: n_heads must be positive, got "
+                + String(n_heads)
+            )
+        if d_model <= 0:
+            raise Error(
+                "MultiHeadAttention.init_random: d_model must be positive, got "
+                + String(d_model)
+            )
+        if d_model % n_heads != 0:
+            raise Error(
+                "MultiHeadAttention.init_random: d_model ("
+                + String(d_model)
+                + ") must be divisible by n_heads ("
+                + String(n_heads)
+                + ")"
+            )
+        var qkv = Linear.init_random(rng, d_model, 3 * d_model)  # C -> 3C
+        var proj = Linear.init_random(rng, d_model, d_model)  # C -> C
+        return MultiHeadAttention(qkv^, proj^, n_heads)
+
+    def forward(self, x: Tensor2D, mask: Tensor2D) raises -> Tensor2D:
+        # Self-attention over one sequence: [T, C] + mask [T, T] -> [T, C]. Q, K,
+        # V all derive from x. Reads self only; allocates the projections, the
+        # per-head slices, and the result; raises on a feature-count mismatch
+        # (via the qkv Linear) or an indivisible width. The caller's mask is
+        # applied unchanged to every head.
+        var c = self.qkv.weight.value.cols  # in_features of c_attn = C
+        if c % self.n_heads != 0:
+            raise Error(
+                "MultiHeadAttention.forward: C ("
+                + String(c)
+                + ") not divisible by n_heads ("
+                + String(self.n_heads)
+                + ")"
+            )
+        var d_head = c // self.n_heads  # per-head width D = C / H
+
+        var qkv = self.qkv.forward(x)  # [T, C] -> [T, 3C]
+        # Split the fused projection into the Q, K, V thirds (each [T, C]).
+        var q_all = slice_cols(qkv, 0, c)  # [T, C]
+        var k_all = slice_cols(qkv, c, 2 * c)  # [T, C]
+        var v_all = slice_cols(qkv, 2 * c, 3 * c)  # [T, C]
+
+        # Run the core once per head over its contiguous [T, D] slice, then
+        # concatenate the head outputs back to [T, C].
+        var head_outputs = List[Tensor2D]()
+        for h in range(self.n_heads):
+            var lo = h * d_head
+            var hi = lo + d_head
+            var q_h = slice_cols(q_all, lo, hi)  # [T, D]
+            var k_h = slice_cols(k_all, lo, hi)  # [T, D]
+            var v_h = slice_cols(v_all, lo, hi)  # [T, D]
+            var result = scaled_dot_product_attention(q_h, k_h, v_h, mask)
+            # Copy the field out: a single struct field cannot be transferred
+            # (`^`) from a live value ("destroyed out of the middle of a value").
+            head_outputs.append(result.output.copy())  # [T, D]
+        var concatenated = concat_cols(head_outputs)  # [T, C]
+
+        return self.proj.forward(concatenated)  # [T, C] -> [T, C]
