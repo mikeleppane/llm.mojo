@@ -14,6 +14,7 @@
 
 from std.math import sqrt
 
+from llm.nn.dropout import DropoutResult, dropout_backward, dropout_cached
 from llm.nn.linear import Linear, LinearCache
 from llm.tensor.ops import (
     add,
@@ -188,6 +189,118 @@ def scaled_dot_product_attention_backward(
     return AttentionGrads(d_q^, d_k^, d_v^)
 
 
+# ===================== Attention-weight dropout (train path) =====================
+#
+# GPT-2 drops the post-softmax attention weights before they weight the values:
+# `output = dropout(W) @ v`. This is an ADDITIVE path over the frozen core above —
+# the existing forward/backward are untouched, so every earlier caller keeps
+# compiling against them. With training = False (or p = 0) `dropout_cached` returns
+# an all-ones mask, unit scale, and consumes NO rng, so this path degenerates to
+# the proven one exactly — a test pins output and gradient equality.
+
+
+@fieldwise_init
+struct AttentionTrainCache(Copyable, Movable):
+    # What the train-path backward needs: the core cache (q, k, v, the PRE-dropout
+    # post-softmax weights) plus the dropout mask actually applied to those weights
+    # and the scale the forward used. `weights` is the pre-dropout W — what the
+    # softmax produced, and what softmax_rows_backward must be fed; `drop_mask` and
+    # `inv_keep` reconstruct the DROPPED weights the value-matmul saw. Valid only
+    # for the forward call that produced it.
+    var q: Tensor2D  # [T_q, D]
+    var k: Tensor2D  # [T_k, D]
+    var v: Tensor2D  # [T_k, D_v]
+    var weights: Tensor2D  # [T_q, T_k], PRE-dropout post-softmax
+    var drop_mask: Tensor2D  # [T_q, T_k], entries in {0, 1}
+    var inv_keep: Float64  # applied dropout scale: 1/(1-p) train, 1.0 eval/p==0
+
+
+@fieldwise_init
+struct AttentionTrainForward(Copyable, Movable):
+    # scaled_dot_product_attention_train's output plus the cache its backward
+    # consumes.
+    var output: Tensor2D  # [T_q, D_v]
+    var cache: AttentionTrainCache
+
+
+def scaled_dot_product_attention_train(
+    q: Tensor2D,
+    k: Tensor2D,
+    v: Tensor2D,
+    mask: Tensor2D,
+    p: Float64,
+    training: Bool,
+    mut rng: Rng,
+) raises -> AttentionTrainForward:
+    # The core forward with GPT-2's attention-weight dropout spliced into the
+    # pinned order:
+    #   scores -> scale -> + mask -> softmax -> W -> dropout_cached(W) -> dropped_W
+    #   output = dropped_W @ v
+    # Shapes exactly as scaled_dot_product_attention (q [T_q, D], k [T_k, D],
+    # v [T_k, D_v], mask [T_q, T_k] -> output [T_q, D_v]). Reads its args; allocates
+    # the weights, the mask, and the output; mutates rng only in the training/p>0
+    # branch (one uniform per weight entry, row-major); raises on the same shape
+    # mismatches the core does or an out-of-range p.
+    #
+    # The base call recomputes the un-dropped W @ v and discards it — a deliberate
+    # simplicity-over-speed choice that keeps the pinned order in ONE place (the
+    # core) rather than re-spelling scores->softmax here; a later performance pass
+    # can fold the throwaway matmul away. Only `base.weights` is used.
+    var base = scaled_dot_product_attention(q, k, v, mask)  # base.weights = W
+    var drop = dropout_cached(base.weights, p, training, rng)  # dropped_W, mask
+    var output = matmul(drop.output, v)  # dropped_W @ v -> [T_q, D_v]
+    var cache = AttentionTrainCache(
+        q.copy(),
+        k.copy(),
+        v.copy(),
+        base.weights.copy(),  # PRE-dropout W, for softmax_rows_backward
+        drop.mask.copy(),
+        drop.inv_keep,
+    )
+    return AttentionTrainForward(output^, cache^)
+
+
+def scaled_dot_product_attention_train_backward(
+    cache: AttentionTrainCache, d_out: Tensor2D
+) raises -> AttentionGrads:
+    # Reverse of the train forward — composition of the frozen core backward with
+    # the dropout backward, no new math. Let dropped_W = W ⊙ mask · inv_keep be the
+    # weights the value-matmul actually used. With dO = d_out [T_q, D_v]:
+    #   dV        = dropped_W^T @ dO              (the value matmul saw the DROPPED W)
+    #   d_droppedW = dO @ V^T
+    #   dW        = dropout_backward(mask, inv_keep, d_droppedW)   (undo the drop)
+    #   dS        = softmax_rows_backward(W, dW)   (on the PRE-dropout W — what softmax made)
+    #   dQ = (dS @ K)·s,  dK = (dS^T @ Q)·s,  s = 1/sqrt(D)   (exactly as the core)
+    # The two weight tensors are distinct on purpose: dV is fed the DROPPED weights
+    # (that is what multiplied v in the forward), while softmax_rows_backward is fed
+    # the PRE-dropout W (that is what the softmax produced). Swapping them is the
+    # classic attention-dropout backward bug the finite-diff catches. Reads the
+    # cache and d_out; allocates the three gradients; raises on a shape mismatch or
+    # a zero feature width.
+    var d = cache.q.cols
+    if d == 0:
+        raise Error(
+            "scaled_dot_product_attention_train_backward: q has zero feature"
+            " width D"
+        )
+    # dropout_backward applies the diagonal (mask · inv_keep) map, which is its own
+    # transpose — so feeding it the pre-dropout weights reproduces exactly the
+    # dropped weights the forward's value-matmul consumed.
+    var dropped_w = dropout_backward(
+        cache.drop_mask, cache.inv_keep, cache.weights
+    )  # [T_q, T_k]
+    var d_v = matmul(transpose(dropped_w), d_out)  # [T_k, D_v]
+    var d_dropped_w = matmul(d_out, transpose(cache.v))  # [T_q, T_k]
+    var d_w = dropout_backward(
+        cache.drop_mask, cache.inv_keep, d_dropped_w
+    )  # [T_q, T_k]
+    var d_scores = softmax_rows_backward(cache.weights, d_w)  # PRE-dropout W
+    var s = 1.0 / sqrt(Float64(d))
+    var d_q = scale(matmul(d_scores, cache.k), s)  # [T_q, D]
+    var d_k = scale(matmul(transpose(d_scores), cache.q), s)  # [T_k, D]
+    return AttentionGrads(d_q^, d_k^, d_v^)
+
+
 @fieldwise_init
 struct MHACache(Copyable, Movable):
     # What MultiHeadAttention.backward needs, mirroring the forward plumbing: the
@@ -204,6 +317,26 @@ struct MHAForward(Copyable, Movable):
     # forward_cached's output plus the cache its backward consumes.
     var output: Tensor2D  # [T, C]
     var cache: MHACache
+
+
+@fieldwise_init
+struct MHATrainCache(Copyable, Movable):
+    # What MultiHeadAttention.backward_train needs — the train-path twin of
+    # MHACache: the fused qkv Linear's cache (its input x), one AttentionTrainCache
+    # per head (each carrying that head's attention-weight dropout mask), and the
+    # output proj Linear's cache. Valid only for the forward call that produced it.
+    var qkv_cache: LinearCache  # holds x                          [T, C]
+    var head_caches: List[
+        AttentionTrainCache
+    ]  # per head: q,k,v,W,mask,inv_keep
+    var proj_cache: LinearCache  # holds concat(head outputs)      [T, C]
+
+
+@fieldwise_init
+struct MHATrainForward(Copyable, Movable):
+    # forward_cached_train's output plus the cache its backward consumes.
+    var output: Tensor2D  # [T, C]
+    var cache: MHATrainCache
 
 
 @fieldwise_init
@@ -412,6 +545,127 @@ struct MultiHeadAttention(Copyable, Movable):
 
         # Reassemble the fused-qkv gradient in the same Q|K|V column order the
         # forward's projection produced.
+        var qkv_parts = List[Tensor2D]()
+        qkv_parts.append(d_q_all^)
+        qkv_parts.append(d_k_all^)
+        qkv_parts.append(d_v_all^)
+        var d_qkv = concat_cols(qkv_parts)  # [T, 3C]
+
+        return self.qkv.backward(cache.qkv_cache, d_qkv)  # [T, C]
+
+    def forward_cached_train(
+        self,
+        x: Tensor2D,
+        mask: Tensor2D,
+        p: Float64,
+        training: Bool,
+        mut rng: Rng,
+    ) raises -> MHATrainForward:
+        # The train-path twin of forward_cached: identical plumbing (fused qkv,
+        # per-head split, concat, proj), but each head runs the attention-weight
+        # dropout core. [T, C] + mask [T, T] -> MHATrainForward. rng is threaded
+        # through the heads in order, so each head draws its own [T, T] weight mask;
+        # with training = False (or p = 0) no head draws and the result equals
+        # forward_cached exactly. Reads self; allocates the projections, per-head
+        # slices, caches, and result; mutates rng only in the training/p>0 branch;
+        # raises on a feature-count mismatch, an indivisible width, or an
+        # out-of-range p. The cache is valid only for this call.
+        if self.n_heads <= 0:
+            raise Error(
+                "MultiHeadAttention.forward_cached_train: n_heads must be"
+                " positive, got "
+                + String(self.n_heads)
+            )
+        var c = self.qkv.weight.value.cols  # in_features of c_attn = C
+        if c % self.n_heads != 0:
+            raise Error(
+                "MultiHeadAttention.forward_cached_train: C ("
+                + String(c)
+                + ") not divisible by n_heads ("
+                + String(self.n_heads)
+                + ")"
+            )
+        var d_head = c // self.n_heads  # per-head width D = C / H
+
+        var qkv_fwd = self.qkv.forward_cached(x)  # output [T, 3C], cache = x
+        var q_all = slice_cols(qkv_fwd.output, 0, c)  # [T, C]
+        var k_all = slice_cols(qkv_fwd.output, c, 2 * c)  # [T, C]
+        var v_all = slice_cols(qkv_fwd.output, 2 * c, 3 * c)  # [T, C]
+
+        var head_outputs = List[Tensor2D]()
+        var head_caches = List[AttentionTrainCache]()
+        for h in range(self.n_heads):
+            var lo = h * d_head
+            var hi = lo + d_head
+            var q_h = slice_cols(q_all, lo, hi)  # [T, D]
+            var k_h = slice_cols(k_all, lo, hi)  # [T, D]
+            var v_h = slice_cols(v_all, lo, hi)  # [T, D]
+            var head = scaled_dot_product_attention_train(
+                q_h, k_h, v_h, mask, p, training, rng
+            )
+            head_outputs.append(head.output.copy())  # [T, D]
+            head_caches.append(head.cache.copy())
+        var concatenated = concat_cols(head_outputs)  # [T, C]
+        var proj_fwd = self.proj.forward_cached(concatenated)  # [T, C]
+
+        var cache = MHATrainCache(
+            qkv_fwd.cache.copy(), head_caches^, proj_fwd.cache.copy()
+        )
+        return MHATrainForward(proj_fwd.output.copy(), cache^)
+
+    def backward_train(
+        mut self, cache: MHATrainCache, d_out: Tensor2D
+    ) raises -> Tensor2D:
+        # The train-path twin of backward: reverse the same plumbing right to left,
+        # but each head runs the attention-weight-dropout core backward. [T, C]
+        # d_out -> [T, C] d_x, accumulating qkv and proj parameter grads (+=). With
+        # training = False (or p = 0) each head cache carries an all-ones mask and
+        # unit scale, so this returns exactly what backward returns — a test pins
+        # the equality. Mutates self.proj and self.qkv parameter grads; allocates
+        # and returns d_x; raises on a shape/config mismatch.
+        if self.n_heads <= 0:
+            raise Error(
+                "MultiHeadAttention.backward_train: n_heads must be positive,"
+                " got "
+                + String(self.n_heads)
+            )
+        var c = self.qkv.weight.value.cols
+        if c % self.n_heads != 0:
+            raise Error(
+                "MultiHeadAttention.backward_train: C ("
+                + String(c)
+                + ") not divisible by n_heads ("
+                + String(self.n_heads)
+                + ")"
+            )
+        if len(cache.head_caches) != self.n_heads:
+            raise Error(
+                "MultiHeadAttention.backward_train: cache has "
+                + String(len(cache.head_caches))
+                + " head caches but n_heads is "
+                + String(self.n_heads)
+            )
+        var d_head = c // self.n_heads
+
+        var d_concat = self.proj.backward(cache.proj_cache, d_out)  # [T, C]
+
+        var dq_heads = List[Tensor2D]()
+        var dk_heads = List[Tensor2D]()
+        var dv_heads = List[Tensor2D]()
+        for h in range(self.n_heads):
+            var lo = h * d_head
+            var hi = lo + d_head
+            var d_head_out = slice_cols(d_concat, lo, hi)  # [T, D]
+            var grads = scaled_dot_product_attention_train_backward(
+                cache.head_caches[h], d_head_out
+            )
+            dq_heads.append(grads.d_q.copy())  # [T, D]
+            dk_heads.append(grads.d_k.copy())
+            dv_heads.append(grads.d_v.copy())
+        var d_q_all = concat_cols(dq_heads)  # [T, C]
+        var d_k_all = concat_cols(dk_heads)  # [T, C]
+        var d_v_all = concat_cols(dv_heads)  # [T, C]
+
         var qkv_parts = List[Tensor2D]()
         qkv_parts.append(d_q_all^)
         qkv_parts.append(d_k_all^)

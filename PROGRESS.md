@@ -17,7 +17,8 @@ proves the part green on a fresh checkout (`pixi install` first).
 | X | Attention | ✅ green (additive masks, scaled-dot-product core self+cross, fused-QKV multi-head — forward only) | `pixi run test` | 2026-07-04 |
 | XI | Backpropagation by hand | ✅ green (every layer's backward finite-difference-checked; explicit per-layer caches; grads accumulate) | `pixi run test` | 2026-07-04 |
 | XII | Encoder-decoder lab | ✅ green (cross-attention + pre-LN blocks assembled into a seq2seq model in `src/llm/lab/`; trains copy/reverse to exact-match with a memory ablation; all lab code quarantined off the main line) | `pixi run test` | 2026-07-04 |
-| XIII+ | GPT model & training | not started | — | — |
+| XIII | The GPT-2 model | ✅ green (pre-LN `TransformerBlock` + weight-tied `GPT`; three-site dropout; residual-init scaling; walk reconciles with the 124,439,808 formula) | `pixi run test` | 2026-07-04 |
+| XIV+ | Training & generation | not started | — | — |
 
 ## Notes
 
@@ -115,6 +116,37 @@ proves the part green on a fresh checkout (`pixi install` first).
   `tests/oracles/encdec_reference.py`. `scripts/test_all.sh` now precompiles the
   `llm` package (`build/llm.mojopkg`) so the suite runs in minutes not tens of
   minutes. See [notes/part-12-notes.md](notes/part-12-notes.md).
+
+- **Part XIII deliverables:** the decoder-only GPT, ASSEMBLED on the main line
+  from the Parts IX–XI layers (nothing under `tensor/`, `nn/`, `lab/`,
+  `training/`, `generation/`, or `config.mojo` changed). `TransformerBlock`
+  (GPT-2's pre-LN block, self-attention only: `x + dropout(attn(ln1(x)))` then
+  `a + dropout(mlp(ln2(a)))`). `GPT` = token + learned positional embeddings → L
+  blocks under a shared `causal_mask` → final LayerNorm → WEIGHT-TIED head
+  (`logits = h @ wte^T`, no bias). The tied token table gets gradient through two
+  paths — the head matmul (every row) and the embedding gather (used rows) —
+  combined into one delta and added once so the grad doubles bit-exactly.
+  GPT-2's three dropout sites, all on `cfg.dropout`: embedding, attention-weight
+  (an additive train path over the frozen attention core:
+  `scaled_dot_product_attention_train` + `forward_cached_train`/`backward_train`),
+  and residual (on each sublayer branch, never the skip). Inference `forward`
+  takes no rng — dropout is unrepresentable there. `init_random` applies GPT-2's
+  residual-init scaling (proj/down weights ×1/√(2L)). `parameter_count_actual`
+  walks every Parameter (wte once) and reconciles with
+  `GPTConfig.parameter_count()`; `examples/gpt2_inventory.mojo` builds the real
+  124M preset and asserts the walked total is 124,439,808. NumPy oracle
+  `tests/oracles/gpt_reference.py`. See
+  [notes/part-13-notes.md](notes/part-13-notes.md).
+
+### The GPT-2 model (Part XIII)
+
+| File | Covers |
+|------|--------|
+| `tests/test_attention_train.mojo` | attention-weight dropout train path: eval/p=0 == the cached path (outputs + all grads) and consume no rng (twin-generator); dropped entries 0, survivors ×inv_keep; dq/dk/dv finite-diff through the dropped core (re-seeded-rng convention); MHA `backward_train` grads double exactly |
+| `tests/test_block.mojo` | pre-LN forward oracle golden (post-LN / LN-on-sum fails it), causality under `causal_mask`, `forward_cached(eval) == forward` (no rng), finite-diff d_x + all 12 parameter grads, exact doubling, residual-dropout placement (skip preserved exactly at p=0.9; branch demonstrably dropped) |
+| `tests/test_gpt.mojo` | logits [T,V], named length errors (T=0, T>ctx), tied head == manual h@wte^T (no bias), tiny-model forward golden, model causality, positions used, init loss≈log V, same-seed determinism, residual-init std bands (proj/down 0.02/√(2L), qkv/up 0.02), walk==formula on 2 tiny configs (wte once), zero_grad/apply_sgd reach every Parameter |
+| `tests/test_gpt_backward.mojo` | the capstone: model-level finite-diff of the wte-table grad (both tied paths summing), plus wpe, a mid-block qkv weight, and ln_f; exact model-level doubling (tied wte included); mismatched-cache raise |
+| `tests/test_gpt_training.mojo` | overfit-one-batch smoke: dropout=0 deterministic, loss below log V and decreasing across checkpoints; dropout=0.1/training=True loss below init |
 
 ### Encoder-decoder lab (Part XII)
 

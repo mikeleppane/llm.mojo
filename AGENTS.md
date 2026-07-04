@@ -105,6 +105,21 @@ publishable until its code passes these — see *Publishing* below):
   by one matmul and added once (Linear's `dW`) already satisfy this. A gradient
   can be numerically *correct* and still fail the doubling test — that is the test
   earning its keep, since a doubling off by ulps is a future weight-tying bug.
+- **A Parameter fed by *two* paths in one backward call must sum them into one
+  delta before the single `+=`.** The weight-tying case the rule above warned
+  about: `GPT`'s tied token table gets gradient from the head matmul *and* the
+  embedding gather in the same `backward`. Adding them as two separate `+=` makes
+  two calls accumulate as `((h+g)+h)+g`, which is not bit-identical to `2·(h+g)`
+  (float addition is not associative), so the exact-doubling test fails. Combine
+  the paths into one `[V, C]` delta, then add it to `grad` once — one fully-formed
+  `+=` per call, per the rule above. The gradient *value* is the same either way;
+  only the doubling distinguishes them, which is why the doubling test is separate
+  from the finite-diff.
+- **A temporary cannot bind to a `mut` argument.** `f(mut rng: Rng)` called as
+  `f(Rng(0))` fails — an rvalue has no mutable storage to borrow. Bind a named
+  `var rng = Rng(0)` and pass that, even when the callee will not actually mutate
+  it on this path (e.g. an eval-mode `forward_cached` that draws no rng but whose
+  signature still takes `mut rng`).
 - **Bind a temporary's non-`ImplicitlyCopyable` field to a local before using
   it.** `some_call(...).cache` where `cache: AttentionCache` errors ("cannot be
   implicitly copied … consider transferring with `^`"), because the temporary is

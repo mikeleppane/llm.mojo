@@ -7,7 +7,25 @@ from .attention import (
     scaled_dot_product_attention,
     scaled_dot_product_attention_cached,
     scaled_dot_product_attention_backward,
+    AttentionTrainCache,
+    AttentionTrainForward,
+    scaled_dot_product_attention_train,
+    scaled_dot_product_attention_train_backward,
     MultiHeadAttention,
     MHACache,
     MHAForward,
+    MHATrainCache,
+    MHATrainForward,
+)
+from .block import (
+    TransformerBlock,
+    BlockCache,
+    BlockForward,
+    sgd_parameter,
+)
+from .gpt import (
+    GPT,
+    GPTCache,
+    GPTForward,
+    position_ids,
 )
