@@ -366,36 +366,75 @@ def test_tied_wte_counted_once() raises:
     )
 
 
+def assert_all_moved(
+    before: Tensor2D, after: Tensor2D, lr: Float64, name: String
+) raises:
+    # Every entry must have moved by exactly -lr (grad was 1.0 everywhere). A
+    # Parameter that apply_sgd skipped keeps its old value and fails here — the
+    # whole point of the coverage test.
+    for r in range(before.rows):
+        for c in range(before.cols):
+            assert_almost_equal(after[r, c], before[r, c] - lr, atol=1e-12)
+
+
+def snapshot_params(gpt: GPT) raises -> List[Tensor2D]:
+    # Every Parameter's value tensor, in a fixed order matching zero_grad /
+    # apply_sgd: wte, wpe, then per block (ln1 w/b, qkv w/b, proj w/b, ln2 w/b,
+    # up w/b, down w/b), then ln_f w/b.
+    var out = List[Tensor2D]()
+    out.append(gpt.wte.table.value.copy())
+    out.append(gpt.wpe.table.value.copy())
+    for i in range(len(gpt.blocks)):
+        out.append(gpt.blocks[i].ln1.weight.value.copy())
+        out.append(gpt.blocks[i].ln1.bias.value.copy())
+        out.append(gpt.blocks[i].attn.qkv.weight.value.copy())
+        out.append(gpt.blocks[i].attn.qkv.bias.value.copy())
+        out.append(gpt.blocks[i].attn.proj.weight.value.copy())
+        out.append(gpt.blocks[i].attn.proj.bias.value.copy())
+        out.append(gpt.blocks[i].ln2.weight.value.copy())
+        out.append(gpt.blocks[i].ln2.bias.value.copy())
+        out.append(gpt.blocks[i].mlp.up.weight.value.copy())
+        out.append(gpt.blocks[i].mlp.up.bias.value.copy())
+        out.append(gpt.blocks[i].mlp.down.weight.value.copy())
+        out.append(gpt.blocks[i].mlp.down.bias.value.copy())
+    out.append(gpt.ln_f.weight.value.copy())
+    out.append(gpt.ln_f.bias.value.copy())
+    return out^
+
+
 def test_zero_grad_and_apply_sgd_reach_every_parameter() raises:
-    # After a backward every grad is nonzero; zero_grad clears them all; a step
-    # with a set-to-one grad moves every value. Exercises the full walk.
+    # After zero_grad every grad is exactly zero; after a step with every grad set
+    # to 1.0 EVERY parameter value moves by exactly -lr. Checking all 26 tensors
+    # (weights AND biases) is the point: a dropped sgd_parameter call — e.g.
+    # forgetting ln_f.bias — leaves that tensor unmoved and fails here.
     var cfg = GPTConfig(8, 6, 8, 2, 2, 0.0)
     var rng = Rng(5)
     var gpt = GPT.init_random(cfg, rng)
 
-    # zero_grad clears any residue.
+    # zero_grad clears every grad tensor to exactly zero.
+    _set_all_grads_one(gpt)  # dirty them first
     gpt.zero_grad()
-    assert_true(gpt.wte.table.grad[0, 0] == 0.0, "wte grad not zeroed")
-    assert_true(gpt.wpe.table.grad[0, 0] == 0.0, "wpe grad not zeroed")
-    assert_true(gpt.ln_f.weight.grad[0, 0] == 0.0, "ln_f grad not zeroed")
-    assert_true(
-        gpt.blocks[0].attn.qkv.weight.grad[0, 0] == 0.0, "block grad not zeroed"
-    )
-
-    # Set every grad to 1.0 via direct fill, snapshot values, step, check moved.
-    _set_all_grads_one(gpt)
-    var wte0 = gpt.wte.table.value[0, 0]
-    var wpe0 = gpt.wpe.table.value[0, 0]
-    var lnf0 = gpt.ln_f.weight.value[0, 0]
-    var blk0 = gpt.blocks[1].mlp.down.weight.value[0, 0]
+    var zeros = snapshot_params(gpt)  # values unchanged by zero_grad
+    # Grad-side check: every grad is now zero (fill a fresh snapshot via a step of
+    # lr=0 would be a no-op; instead check the grads directly on a representative
+    # of each tensor by asserting a step with the CURRENT (zeroed) grads moves
+    # nothing).
     gpt.apply_sgd(0.1)
-    assert_true(gpt.wte.table.value[0, 0] != wte0, "wte value did not move")
-    assert_true(gpt.wpe.table.value[0, 0] != wpe0, "wpe value did not move")
-    assert_true(gpt.ln_f.weight.value[0, 0] != lnf0, "ln_f value did not move")
-    assert_true(
-        gpt.blocks[1].mlp.down.weight.value[0, 0] != blk0,
-        "block value did not move",
-    )
+    var after_zero_step = snapshot_params(gpt)
+    for i in range(len(zeros)):
+        for r in range(zeros[i].rows):
+            for c in range(zeros[i].cols):
+                assert_almost_equal(
+                    after_zero_step[i][r, c], zeros[i][r, c], atol=1e-12
+                )
+
+    # Now set every grad to 1.0 and step: every parameter must move by exactly -lr.
+    _set_all_grads_one(gpt)
+    var before = snapshot_params(gpt)
+    gpt.apply_sgd(0.1)
+    var after = snapshot_params(gpt)
+    for i in range(len(before)):
+        assert_all_moved(before[i], after[i], 0.1, "param " + String(i))
 
 
 def _set_all_grads_one(mut gpt: GPT):

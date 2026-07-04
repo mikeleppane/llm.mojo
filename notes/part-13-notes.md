@@ -266,4 +266,47 @@ reason these checks exist).
 
 ## Review triage
 
-TODO_REVIEW_TRIAGE
+Dual external review over `git diff main...part-13-gpt2-model`, both read-only,
+both asked to VERIFY THE ASSEMBLY AND THE TYING by re-deriving the math (tied
+two-path gradient, attention-dropout backward, dropout placement, the walk, the
+frozen-layer rule), not just reading it.
+
+- **Codex (GPT-5.5, high): no blocking defects, zero findings to fix.** Eight
+  ranked *confirm-correct* items, each re-derived with the concrete failure it
+  avoids: the tied `wte` gradient combines both paths into one `[V,C]` delta
+  before a single `+=` (so two backward passes double bit-exactly, not
+  `((h+g)+h)+g`); the attention-dropout backward feeds the reconstructed *dropped*
+  weights to `dV` and the *pre-dropout* `W` to `softmax_rows_backward`; dropout
+  wraps each branch with the skip entering `add` raw; `wpe` sized
+  `context_length` with positions from row 0; the walk reaches every Parameter
+  and counts tied `wte` once; residual-init scaling hits exactly `attn.proj` and
+  `mlp.down`; named `T=0`/`T>ctx` errors; and the oracle is independent NumPy math
+  (shared only the deterministic `fill` values). Full text:
+  `docs/plans/part-13-review-codex.md` (gitignored).
+- **Claude Opus 4.8 (xhigh): 0 blocker, 0 should-fix, 1 nit.** It re-derived the
+  three adversarial targets and *refuted* each (i.e. confirmed correct): the tied
+  doubling (`d_table` is a deterministic function of `(cache, d_logits)`, so two
+  calls give `D ⊕ D = 2D` in IEEE), the attention-dropout weight routing (a swap
+  would fail the independent finite-diff), and dropout placement (inference
+  `forward` takes no rng and calls only the non-`_train` cores, so dropout is
+  *structurally* unreachable at inference). Also confirmed the walk/reconciliation,
+  residual scaling, named errors, the frozen-layer rule and the inline-SGD
+  upward-import justification, and no syntax drift. Full text:
+  `docs/plans/part-13-review-opus.md` (gitignored).
+
+Nit triage (the only actionable finding from either reviewer):
+
+- **NIT-1 — the `zero_grad`/`apply_sgd` coverage test spot-checked only 4 of 26
+  Parameters (Opus). FIXED.** `test_zero_grad_and_apply_sgd_reach_every_parameter`
+  filled all 26 grads to 1.0 but asserted only four values moved (no bias among
+  them), so a future edit dropping e.g. `sgd_parameter(self.ln_f.bias, lr)` from
+  `apply_sgd` would slip through — defeating the purpose of a coverage test. Not a
+  current defect (all three walks are complete, verified by both reviewers).
+  Strengthened: the test now snapshots *every* Parameter tensor (weights and
+  biases, in the walk order), and after a step with all grads at 1.0 asserts every
+  entry moved by exactly `-lr`. A skipped `sgd_parameter` call now leaves its
+  tensor unmoved and fails. Re-ran green.
+
+Both reviewers independently confirmed the two genuinely-new pieces (the tied
+two-path gradient and the attention-dropout backward composition) correct by
+re-derivation. No math was wrong; the single fix hardened a test.
