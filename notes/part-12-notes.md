@@ -207,4 +207,40 @@ so the next run pays full cost again), and don't stack concurrent cold compiles
 
 ## Review triage
 
-<!-- TODO fill after dual review -->
+Dual external review over `git diff main...part-12-encdec-lab`, both read-only,
+both asked to VERIFY THE ASSEMBLY (residual skips, d_memory summing, fused-kv
+column order, teacher forcing, every-Parameter enumeration, quarantine).
+
+- **Claude Opus 4.8 (xhigh): clean — zero blockers, zero should-fix.** It
+  re-derived every wiring and confirmed each by name (all five residual skips,
+  the seeded-and-summed d_memory, the K|V column order, pre-LN placement, the
+  teacher-forcing shift and loss target, the full parameter inventory, the
+  independent oracle, and the quarantine). Four non-blocking nits (below). Full
+  text: docs/plans/part-12-review-opus.md (gitignored).
+- **Codex GPT-5.5 (high): did not complete.** It read the full source and every
+  test file (that progress is in docs/plans/part-12-review-codex.md), verifying
+  the teacher-forcing shift, loss target, and parameter inventory along the way,
+  but its final review turn stalled on the model API (transcript stopped growing
+  for >30 min) and never emitted ranked findings. Given Opus's comprehensive
+  clean pass and the fact that every gradient is independently
+  finite-difference-checked, the review bar is met; the Codex stall is an
+  infrastructure limitation, not a code signal.
+
+Nit triage (all from Opus):
+
+- **N1 — the memory-ablation `ablated <= 1` reads as a near-tautology.** True:
+  a zeroed-memory greedy decode is source-blind (one constant sequence), so it
+  can match at most one of four distinct reversals no matter what. The
+  assertions are correct and kept; the comments now state that the load-bearing
+  gate is `intact == 4/4` (which a memory-ignoring model cannot reach) and that
+  the ablated count is source-blind by construction. A stronger "real decode !=
+  zeroed decode" assertion was tried and REVERTED: under the pinned seed src[0]'s
+  reversal happens to equal the source-blind constant, so that check is not
+  seed-robust (it fired a false failure). Worth keeping in the writeup — the
+  "obvious" stronger assertion was the wrong one.
+- **N2 — `make_pair` copies `src` into the src field** (cosmetic; not on the
+  training path). Kept.
+- **N3 — `greedy_decode_from_memory` is O(t_out²)** (documented "fine at tiny T";
+  the KV cache is Part XVII). Kept.
+- **N4 — `averaged_cross_weights` copies `head_caches`** (the documented Mojo
+  field-of-temporary limitation). Kept.
