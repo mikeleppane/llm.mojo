@@ -23,3 +23,9 @@ from .block import (
     BlockForward,
     sgd_parameter,
 )
+from .gpt import (
+    GPT,
+    GPTCache,
+    GPTForward,
+    position_ids,
+)

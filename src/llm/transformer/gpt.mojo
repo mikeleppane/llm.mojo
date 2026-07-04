@@ -1,0 +1,341 @@
+# GPT — the decoder-only Transformer this whole project has been converging on.
+#
+#   x      = wte(ids) + wpe([0..T-1])        # token + learned positional embeddings
+#   x      = block_i(x, causal_mask(T))      # L pre-LN blocks, self-attention only
+#   h      = ln_f(x)                         # final LayerNorm (GPT-2's ln_f)
+#   logits = h @ wte.table^T                 # WEIGHT-TIED head — no separate matrix
+#
+# Everything is [T, C]; a batch is the caller's loop over sequences (loop
+# discipline, matching every other layer here), so there is no batch tensor.
+#
+# Two things are genuinely new here; the rest is assembly of proven layers.
+#
+# 1. Weight tying. The language-model head has NO Parameter of its own: the
+#    logits are h @ wte.table^T, reusing the token-embedding matrix transposed
+#    (GPT-2's head, which also has no bias). In backward the token table receives
+#    gradient through TWO paths that SUM into its one Parameter.grad: the head
+#    matmul at the top (d_table += d_logits^T @ h) and the embedding gather at
+#    the bottom (scatter-add of the embedding gradient). This is exactly what the
+#    += accumulation contract every layer's backward follows was built for; a
+#    model-level finite-difference of the table grad pins that BOTH paths are
+#    present (a missing path, or `=` for `+=`, is off by a whole term).
+#
+# 2. Dropout in GPT-2's three places, all driven by the single cfg.dropout:
+#    embedding dropout on wte(ids)+wpe(pos) here at the model level; attention-
+#    weight dropout inside each block's self-attention core; residual dropout on
+#    each sublayer branch inside each block. The cached path IS the training path
+#    (dropout lives only there); the plain forward is the inference path and
+#    never sees an rng — applying dropout at inference is unrepresentable. With
+#    training = False (or cfg.dropout = 0) every site is the identity with an
+#    all-ones mask and NO rng consumed, so forward_cached equals forward exactly.
+#
+# GPT.apply_sgd performs the in-place p -= lr*grad update via the block's
+# sgd_parameter helper rather than training.optimizer.sgd_step: transformer/
+# sits BELOW training/ in the dependency layering, so it must not import upward.
+
+from std.math import sqrt
+
+from llm.config import GPTConfig
+from llm.nn.dropout import dropout_backward, dropout_cached
+from llm.nn.embedding import Embedding, EmbeddingCache
+from llm.nn.layernorm import LayerNorm, LayerNormCache
+from llm.tensor.ops import add, cross_entropy_rows, matmul, transpose
+from llm.tensor.tensor2d import Tensor2D, zeros_2d
+from llm.transformer.block import (
+    BlockCache,
+    TransformerBlock,
+    sgd_parameter,
+)
+from llm.transformer.masks import causal_mask
+from llm.utils.random import Rng
+
+
+def position_ids(t: Int) -> List[Int]:
+    # The positional ids [0, 1, ..., t-1] the learned positional Embedding gathers.
+    # Position p sits at row p of wpe, so this is the identity range, NOT a shuffle.
+    # Reads nothing; allocates the result; cannot fail.
+    var out = List[Int]()
+    for i in range(t):
+        out.append(i)
+    return out^
+
+
+@fieldwise_init
+struct GPTCache(Copyable, Movable):
+    # Everything GPT.backward needs, mirroring the forward flow: the two embedding
+    # caches (token, positional), the embedding-dropout mask and scale, one cache
+    # per block, the final-LN cache, and the head input h. The head is a matmul,
+    # so its backward needs its input h just as a LinearCache holds x. Valid only
+    # for the forward call that produced it.
+    var wte_cache: EmbeddingCache
+    var wpe_cache: EmbeddingCache
+    var emb_drop_mask: Tensor2D  # [T, C], embedding dropout mask
+    var emb_drop_inv_keep: Float64
+    var block_caches: List[BlockCache]
+    var ln_f_cache: LayerNormCache
+    var h: Tensor2D  # [T, C], ln_f output = the tied head's input
+
+
+@fieldwise_init
+struct GPTForward(Copyable, Movable):
+    # forward_cached's output (the logits) plus the cache its backward consumes.
+    var logits: Tensor2D  # [T, V]
+    var cache: GPTCache
+
+
+@fieldwise_init
+struct GPT(Copyable, Movable):
+    var cfg: GPTConfig
+    var wte: Embedding  # [V, C]  token embedding — the tied head reuses this table
+    var wpe: Embedding  # [context_length, C]  learned positional embedding
+    var blocks: List[TransformerBlock]
+    var ln_f: LayerNorm  # final LayerNorm, GPT-2's ln_f
+
+    @staticmethod
+    def init_random(cfg: GPTConfig, mut rng: Rng) raises -> GPT:
+        # Build a seeded GPT from a validated config. cfg.validate() runs FIRST so
+        # a bad shape fails at the edge. Draw order (fixed and documented, so a
+        # seed reproduces the model): wte, wpe, then each block in layer order
+        # (inside a block: qkv, proj, then mlp up, down — the LayerNorms are
+        # parameter-free at init and draw nothing). The MLP hidden width is 4C,
+        # GPT-2's ratio.
+        #
+        # Residual init scaling (GPT-2's published recipe): the weights of the
+        # residual-FEEDING projections — each block's attention proj and MLP down —
+        # are scaled in place by 1/sqrt(N), N = 2*n_layers = the number of residual
+        # additions, so the residual stream's variance does not grow with depth
+        # (std 0.02 -> 0.02/sqrt(2L), ~0.00408 at L=12). qkv and mlp up stay at
+        # 0.02. Scaling AFTER drawing keeps the rng draw stream identical to the
+        # unscaled layout and every layer factory signature untouched. Mutates rng;
+        # allocates every layer; raises on an invalid config or dims.
+        cfg.validate()
+        var wte = Embedding.init_random(rng, cfg.vocab_size, cfg.d_model)
+        var wpe = Embedding.init_random(rng, cfg.context_length, cfg.d_model)
+        var d_hidden = 4 * cfg.d_model  # GPT-2's 4x feed-forward ratio
+        var blocks = List[TransformerBlock]()
+        for _ in range(cfg.n_layers):
+            blocks.append(
+                TransformerBlock.init_random(
+                    rng, cfg.d_model, cfg.n_heads, d_hidden
+                )
+            )
+
+        # Residual scaling: multiply proj and down weights in place by 1/sqrt(2L).
+        var residual_scale = 1.0 / sqrt(2.0 * Float64(cfg.n_layers))
+        for i in range(len(blocks)):
+            var pw_rows = blocks[i].attn.proj.weight.value.rows
+            var pw_cols = blocks[i].attn.proj.weight.value.cols
+            for r in range(pw_rows):
+                for c in range(pw_cols):
+                    blocks[i].attn.proj.weight.value[r, c] = (
+                        blocks[i].attn.proj.weight.value[r, c] * residual_scale
+                    )
+            var dw_rows = blocks[i].mlp.down.weight.value.rows
+            var dw_cols = blocks[i].mlp.down.weight.value.cols
+            for r in range(dw_rows):
+                for c in range(dw_cols):
+                    blocks[i].mlp.down.weight.value[r, c] = (
+                        blocks[i].mlp.down.weight.value[r, c] * residual_scale
+                    )
+
+        var ln_f = LayerNorm.init_default(cfg.d_model)
+        return GPT(cfg.copy(), wte^, wpe^, blocks^, ln_f^)
+
+    def _check_length(self, t: Int) raises:
+        # Guard the sequence length at the edge with a NAMED error, before any
+        # embedding gather runs — a T of 0 or one past the learned positions would
+        # otherwise surface as an opaque range error deep inside wpe. Reads self;
+        # allocates nothing.
+        if t <= 0:
+            raise Error(
+                "GPT.forward: sequence length T must be positive, got "
+                + String(t)
+            )
+        if t > self.cfg.context_length:
+            raise Error(
+                "GPT.forward: sequence length T="
+                + String(t)
+                + " exceeds context_length="
+                + String(self.cfg.context_length)
+            )
+
+    def forward(self, ids: List[Int]) raises -> Tensor2D:
+        # Inference path: token ids [T] -> logits [T, V], no dropout, no rng.
+        # Raises (named) unless 0 < T <= context_length. Builds the causal mask
+        # ONCE and shares it across all blocks. The head is the tied matmul
+        # h @ wte.table^T. Reads self only; allocates the intermediates and logits;
+        # raises on a bad length or a bad id (via the embeddings).
+        var t = len(ids)
+        self._check_length(t)
+        var x = add(
+            self.wte.forward(ids),
+            self.wpe.forward(position_ids(t)),
+        )  # [T, C]
+        var mask = causal_mask(t)  # [T, T], built once, shared by every block
+        for i in range(len(self.blocks)):
+            x = self.blocks[i].forward(x, mask)
+        var h = self.ln_f.forward(x)  # [T, C]
+        # Tied head: logits = h @ wte.table^T. transpose(table) is [C, V].
+        return matmul(h, transpose(self.wte.table.value))  # [T, V]
+
+    def loss(self, ids: List[Int], targets: List[Int]) raises -> Float64:
+        # Mean cross-entropy of the inference-path logits against the targets:
+        # cross_entropy_rows(forward(ids), targets). targets has length T (the
+        # next-token id per position). Reads self; allocates; raises on a bad
+        # length, id, or target range (surfaced by forward / cross_entropy_rows).
+        return cross_entropy_rows(self.forward(ids), targets)
+
+    def forward_cached(
+        self, ids: List[Int], training: Bool, mut rng: Rng
+    ) raises -> GPTForward:
+        # Training path: the same computation as forward, capturing every layer's
+        # cache and applying GPT-2's dropout (all three sites driven by
+        # cfg.dropout). rng is threaded embedding-dropout-first, then through the
+        # blocks in order (each block draws its attention-core masks, then its two
+        # residual masks) — the fixed order a seed replays. With training = False
+        # (or cfg.dropout = 0) nothing draws and the logits equal forward's.
+        # Reads self; allocates the intermediates, caches, and logits; mutates rng
+        # only when training and cfg.dropout > 0; raises on a bad length or id. The
+        # cache is valid only for this call.
+        var t = len(ids)
+        self._check_length(t)
+        var p = self.cfg.dropout
+
+        var wte_fwd = self.wte.forward_cached(ids)
+        var wpe_fwd = self.wpe.forward_cached(position_ids(t))
+        var emb = add(wte_fwd.output, wpe_fwd.output)  # [T, C]
+        var emb_drop = dropout_cached(
+            emb, p, training, rng
+        )  # embedding dropout
+        var x = emb_drop.output.copy()  # [T, C]
+
+        var mask = causal_mask(t)  # [T, T], shared by every block
+        var block_caches = List[BlockCache]()
+        for i in range(len(self.blocks)):
+            var blk = self.blocks[i].forward_cached(x, mask, p, training, rng)
+            x = blk.output.copy()
+            block_caches.append(blk.cache.copy())
+
+        var ln_f_fwd = self.ln_f.forward_cached(x)  # output h [T, C]
+        var h = ln_f_fwd.output.copy()
+        var logits = matmul(h, transpose(self.wte.table.value))  # [T, V]
+
+        var cache = GPTCache(
+            wte_fwd.cache.copy(),
+            wpe_fwd.cache.copy(),
+            emb_drop.mask.copy(),
+            emb_drop.inv_keep,
+            block_caches^,
+            ln_f_fwd.cache.copy(),
+            h^,
+        )
+        return GPTForward(logits^, cache^)
+
+    def backward(mut self, cache: GPTCache, d_logits: Tensor2D) raises:
+        # Thread d_logits [T, V] back through the whole model, accumulating every
+        # parameter grad (+=). No d_input is returned: the model's inputs are
+        # integer token ids, which are not differentiable (same rule as
+        # Embedding.backward). Order (reverse of forward):
+        #
+        #   Tied head (a bias-free matmul logits = h @ table^T):
+        #     d_table (head path)  = d_logits^T @ h      [V, T] @ [T, C] -> [V, C]
+        #     d_h = d_logits @ table                     [T, V] @ [V, C] -> [T, C]
+        #   ln_f -> each block (reverse) -> embedding dropout ->
+        #     the token gather (bottom path) and the positional gather, both fed
+        #     the same embedding gradient d_emb (token + position were ADDED to
+        #     form the stream).
+        #
+        # The tied weight wte receives gradient through BOTH paths. They are summed
+        # into ONE [V, C] delta (d_table = head delta, then the bottom path's
+        # scatter-add is folded into that same tensor) which is added to
+        # wte.table.grad exactly ONCE. Adding one fully-formed delta per call — not
+        # a head `+=` and a separate gather `+=` — is what makes two backward passes
+        # double the grad bit-for-bit: two separately-rounded additions per call
+        # would accumulate as ((h+g)+h)+g, which is not bit-identical to 2*(h+g)
+        # (float addition is not associative). This is Part XI's accumulation rule
+        # applied to the tied weight, the reason the doubling test exists. The
+        # scatter mirrors Embedding.backward (repeated ids sum); wpe, reached by a
+        # single path, uses Embedding.backward directly.
+        #
+        # Mutates every parameter grad; allocates the intermediate gradients;
+        # raises on a shape mismatch.
+        var v = self.wte.table.value.rows
+        var c = self.wte.table.value.cols
+
+        # Head path into a fresh [V, C] delta; d_h flows on down the stack.
+        var d_table = matmul(transpose(d_logits), cache.h)  # [V, C]
+        var d_h = matmul(d_logits, self.wte.table.value)  # [T, C]
+
+        # ln_f and the block stack.
+        var d_x = self.ln_f.backward(cache.ln_f_cache, d_h)  # [T, C]
+        for i in range(len(self.blocks) - 1, -1, -1):
+            d_x = self.blocks[i].backward(cache.block_caches[i], d_x)
+
+        # Embedding dropout, then the two gathers off the same d_emb.
+        var d_emb = dropout_backward(
+            cache.emb_drop_mask, cache.emb_drop_inv_keep, d_x
+        )  # [T, C]
+
+        # Bottom path (token gather): scatter-add d_emb rows into the SAME d_table
+        # by token id, so repeats sum and the head + gather paths combine into one
+        # delta before it touches the grad.
+        for i in range(len(cache.wte_cache.ids)):
+            var idx = cache.wte_cache.ids[i]
+            for col in range(c):
+                d_table[idx, col] = d_table[idx, col] + d_emb[i, col]
+        # Add the combined tied-weight delta to wte.table.grad ONCE (exact doubling).
+        for row in range(v):
+            for col in range(c):
+                self.wte.table.grad[row, col] = (
+                    self.wte.table.grad[row, col] + d_table[row, col]
+                )
+
+        # Positional gather: single path, the proven Embedding.backward.
+        self.wpe.backward(cache.wpe_cache, d_emb)
+
+    def zero_grad(mut self):
+        # Reset every parameter gradient to zero — the model's full inventory.
+        # wte appears ONCE (tying means one Parameter, walked once). Mutates in
+        # place; cannot raise.
+        self.wte.table.zero_grad()
+        self.wpe.table.zero_grad()
+        for i in range(len(self.blocks)):
+            self.blocks[i].zero_grad()
+        self.ln_f.weight.zero_grad()
+        self.ln_f.bias.zero_grad()
+
+    def apply_sgd(mut self, lr: Float64):
+        # One plain-SGD step (p -= lr*grad) on every parameter — the same
+        # inventory zero_grad walks, wte updated ONCE. Mutates parameter values in
+        # place; allocates nothing; cannot raise.
+        sgd_parameter(self.wte.table, lr)
+        sgd_parameter(self.wpe.table, lr)
+        for i in range(len(self.blocks)):
+            self.blocks[i].apply_sgd(lr)
+        sgd_parameter(self.ln_f.weight, lr)
+        sgd_parameter(self.ln_f.bias, lr)
+
+    def parameter_count_actual(self) -> Int:
+        # Walk every Parameter and sum value.size() — the count of ACTUAL floats
+        # the model allocates. wte is summed ONCE (the tied head owns no
+        # Parameter), so this must reconcile with cfg.parameter_count(), which also
+        # counts the head as 0. Reads self; allocates nothing; cannot raise.
+        var total = 0
+        total += self.wte.table.value.size()  # V*C, counted once (tied head)
+        total += self.wpe.table.value.size()  # context_length * C
+        for i in range(len(self.blocks)):
+            total += self.blocks[i].ln1.weight.value.size()
+            total += self.blocks[i].ln1.bias.value.size()
+            total += self.blocks[i].attn.qkv.weight.value.size()
+            total += self.blocks[i].attn.qkv.bias.value.size()
+            total += self.blocks[i].attn.proj.weight.value.size()
+            total += self.blocks[i].attn.proj.bias.value.size()
+            total += self.blocks[i].ln2.weight.value.size()
+            total += self.blocks[i].ln2.bias.value.size()
+            total += self.blocks[i].mlp.up.weight.value.size()
+            total += self.blocks[i].mlp.up.bias.value.size()
+            total += self.blocks[i].mlp.down.weight.value.size()
+            total += self.blocks[i].mlp.down.bias.value.size()
+        total += self.ln_f.weight.value.size()
+        total += self.ln_f.bias.value.size()
+        return total
