@@ -17,3 +17,9 @@ from .attention import (
     MHATrainCache,
     MHATrainForward,
 )
+from .block import (
+    TransformerBlock,
+    BlockCache,
+    BlockForward,
+    sgd_parameter,
+)
