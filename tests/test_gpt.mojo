@@ -156,6 +156,24 @@ def test_tied_head_is_manual_matmul_no_bias() raises:
             assert_almost_equal(logits[r, c], manual[r, c], atol=1e-12)
 
 
+def test_forward_cached_eval_equals_forward() raises:
+    # Model-level train-equals-eval: forward_cached(training=False) reproduces the
+    # inference forward EXACTLY and consumes no rng (dropout is the identity with
+    # no draw). Completes the three-level equivalence (attention, block, model).
+    var gpt = build_tiny_gpt()
+    var ids = ids345()
+    var y_inf = gpt.forward(ids)
+    var rng = Rng(9)
+    var rng_ref = Rng(9)
+    var fwd = gpt.forward_cached(ids, False, rng)
+    for r in range(y_inf.rows):
+        for c in range(y_inf.cols):
+            assert_almost_equal(fwd.logits[r, c], y_inf[r, c], atol=1e-12)
+    assert_true(
+        rng.state == rng_ref.state, "eval forward_cached consumed rng draws"
+    )
+
+
 def test_length_zero_raises() raises:
     var gpt = build_tiny_gpt()
     var empty = List[Int]()
