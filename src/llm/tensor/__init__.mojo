@@ -11,10 +11,13 @@ from .ops import (
     matvec,
     softmax_row,
     softmax_rows,
+    softmax_rows_backward,
     softmax_row_temperature,
     logsumexp,
     cross_entropy_one,
     cross_entropy_grad,
+    cross_entropy_rows,
+    cross_entropy_rows_backward,
     argmax,
 )
 from .init_weights import xavier_2d

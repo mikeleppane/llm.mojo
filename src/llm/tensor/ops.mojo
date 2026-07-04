@@ -209,6 +209,34 @@ def softmax_rows(scores: Tensor2D) -> Tensor2D:
     return out^
 
 
+def softmax_rows_backward(
+    weights: Tensor2D, d_weights: Tensor2D
+) raises -> Tensor2D:
+    # VJP of softmax_rows. Given W = softmax_rows(scores) — the *output* W, not
+    # the input scores — and d_weights = dL/dW, return dL/dscores.
+    #
+    # Row Jacobian: for one row p = softmax(s), dp_i/ds_j = p_i (delta_ij - p_j).
+    # The VJP contracts the upstream dW against it, column by column:
+    #     dS_j = sum_i dW_i * p_i (delta_ij - p_j)
+    #          = p_j dW_j - p_j sum_i dW_i p_i
+    #          = p_j (dW_j - sum_i dW_i p_i).
+    # So per row  dS = W * (dW - rowsum(dW * W)). The subtracted rowsum is one
+    # scalar shared across the row, so a blocked entry (W ~ 0) both contributes
+    # ~0 to it and receives ~0 back — this is why masked positions leak no
+    # gradient through attention. Shapes [R, C] -> [R, C]. Reads its args;
+    # allocates the result; raises on a shape mismatch (a caller error).
+    if weights.rows != d_weights.rows or weights.cols != d_weights.cols:
+        raise Error("softmax_rows_backward shape mismatch")
+    var out = zeros_2d(weights.rows, weights.cols)
+    for r in range(weights.rows):
+        var dot = 0.0
+        for c in range(weights.cols):
+            dot += d_weights[r, c] * weights[r, c]
+        for c in range(weights.cols):
+            out[r, c] = weights[r, c] * (d_weights[r, c] - dot)
+    return out^
+
+
 def softmax_row_temperature(
     input: List[Float64], temperature: Float64
 ) raises -> List[Float64]:
@@ -286,6 +314,66 @@ def cross_entropy_grad(
     var p = softmax_row(logits)
     p[target] = p[target] - 1.0
     return p^
+
+
+def cross_entropy_rows(logits: Tensor2D, targets: List[Int]) raises -> Float64:
+    # Mean cross-entropy over N rows:
+    #     (1/N) * sum_i cross_entropy_one(logits[i, :], targets[i]).
+    # logits [N, V]; targets has length N (one target id per row). This is the
+    # batched training loss the backward chain differentiates — the mean, not the
+    # sum, so the gradient scale is independent of batch size. Reads its args;
+    # allocates one scratch row per position; raises on a length mismatch, an
+    # empty batch (no mean is defined), or an out-of-range target (surfaced by
+    # cross_entropy_one).
+    var n = logits.rows
+    if len(targets) != n:
+        raise Error(
+            "cross_entropy_rows: targets length "
+            + String(len(targets))
+            + " must equal logits rows "
+            + String(n)
+        )
+    if n == 0:
+        raise Error("cross_entropy_rows: empty batch has no mean loss")
+    var total = 0.0
+    for i in range(n):
+        var row = List[Float64]()
+        for j in range(logits.cols):
+            row.append(logits[i, j])
+        total += cross_entropy_one(row, targets[i])
+    return total / Float64(n)
+
+
+def cross_entropy_rows_backward(
+    logits: Tensor2D, targets: List[Int]
+) raises -> Tensor2D:
+    # Gradient of cross_entropy_rows wrt logits: (softmax(logits) - onehot) / N,
+    # row by row. logits [N, V] -> [N, V]. Each row is cross_entropy_grad
+    # (softmax - onehot, which sums to 0) scaled by 1/N — the mean's factor — so
+    # every row still sums to 0 after scaling. Reads its args; allocates the
+    # result; raises on a length mismatch, empty batch, or out-of-range target —
+    # the same guards as the loss, so loss and gradient reject bad input
+    # symmetrically instead of one writing out of bounds.
+    var n = logits.rows
+    if len(targets) != n:
+        raise Error(
+            "cross_entropy_rows_backward: targets length "
+            + String(len(targets))
+            + " must equal logits rows "
+            + String(n)
+        )
+    if n == 0:
+        raise Error("cross_entropy_rows_backward: empty batch has no gradient")
+    var inv_n = 1.0 / Float64(n)
+    var out = zeros_2d(n, logits.cols)
+    for i in range(n):
+        var row = List[Float64]()
+        for j in range(logits.cols):
+            row.append(logits[i, j])
+        var g = cross_entropy_grad(row, targets[i])  # softmax - onehot
+        for j in range(logits.cols):
+            out[i, j] = g[j] * inv_n
+    return out^
 
 
 # --- argmax ---
