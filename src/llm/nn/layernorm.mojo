@@ -166,7 +166,7 @@ struct LayerNorm(Copyable, Movable):
         # depend on every x_k, so x̂ must be differentiated through them:
         #   ∂μ/∂x_k = 1/C
         #   ∂v/∂x_k = (2/C)(x_k - μ)                [Σ_j (x_j - μ) = 0 kills the μ term]
-        #   ∂r/∂x_k = -1/2 (v+eps)^{-3/2} ∂v/∂x_k = -(r/C) x̂_k
+        #   ∂r/∂x_k = -1/2 (v+eps)^{-3/2} ∂v/∂x_k = -(r^2/C) x̂_k
         #   ∂x̂_i/∂x_k = (δ_ik - 1/C) r + (x_i - μ) ∂r/∂x_k
         #             = r[ δ_ik - 1/C - (1/C) x̂_i x̂_k ].
         # Contracting a against this Jacobian gives the three-term result:
