@@ -14,7 +14,8 @@ proves the part green on a fresh checkout (`pixi install` first).
 | VII | Tiny bigram LM | ✅ green | `pixi run test` | 2026-07-03 |
 | VIII | Architecture family | ✅ green (preset + exact param count + comptime pin) | `pixi run test` | 2026-07-03 |
 | IX | NN building blocks | ✅ green (Parameter, Linear, Embedding, LayerNorm, GELU, Dropout, MLP — forward only) | `pixi run test` | 2026-07-04 |
-| X+ | Attention & GPT model | not started | — | — |
+| X | Attention | ✅ green (additive masks, scaled-dot-product core self+cross, fused-QKV multi-head — forward only) | `pixi run test` | 2026-07-04 |
+| XI+ | Backward & GPT model | not started | — | — |
 
 ## Notes
 
@@ -62,7 +63,20 @@ proves the part green on a fresh checkout (`pixi install` first).
   `normal(0, 0.02)`; `SQRT_2_OVER_PI` is bound at compile time. Goldens are frozen
   from `tests/oracles/nn_reference.py`. See [notes/part-09-notes.md](notes/part-09-notes.md).
 
-## Test suites (Parts II–IX)
+- **Part X deliverables:** the `transformer/` package — attention, forward passes
+  only. Two column ops at the tensor layer (`slice_cols`, `concat_cols`) for the
+  head split/merge. Additive masks (`MASKED_SCORE = -1e9` finite on purpose,
+  `no_mask`, `causal_mask`, `key_padding_mask`; compose by tensor add).
+  `scaled_dot_product_attention` — one core serving self- AND cross-attention
+  (separate q vs k/v lengths, tested with `T_q != T_k`), returning
+  `AttentionResult{output, weights}` so causality is proven on the weights
+  directly; order pinned scores → `1/sqrt(d_head)` → mask → softmax → `@v`.
+  `MultiHeadAttention` with GPT-2's fused QKV (`Linear(C→3C)` + `Linear(C→C)`),
+  contiguous head split `D=C/H`, parameter cost `4C^2+4C`. Goldens frozen from
+  `tests/oracles/attention_reference.py`. See
+  [notes/part-10-notes.md](notes/part-10-notes.md).
+
+## Test suites (Parts II–X)
 
 | File | Covers |
 |------|--------|
@@ -96,3 +110,7 @@ proves the part green on a fresh checkout (`pixi install` first).
 | `tests/test_gelu.mojo` | tanh-approx scalar goldens (reject erf), gelu(0)=0, asymptotes, gelu_rows elementwise |
 | `tests/test_dropout.mojo` | eval identity + rng untouched (twin generator), p=0 no-draw, out-of-range raise, seed determinism, survivors 0-or-scaled, keep-rate band |
 | `tests/test_mlp.mojo` | composition oracle golden, equals manual up/gelu/down, hidden width from constructor, shape contract |
+| `tests/test_slicing.mojo` | slice_cols hand-checked + full-width identity, split→concat round trip, widths add, bad-range/empty-list/row-mismatch raises |
+| `tests/test_masks.mojo` | causal_mask hand-checked, key_padding blocks False columns, causal+padding composition stays blocked, no_mask zeros |
+| `tests/test_attention_core.mojo` | cross-shaped oracle (T_q≠T_k), hand-worked 2×2, rows sum to 1, causal weights 0 above diagonal, identical-v pass-through, diagonal-only one-hot, fully-blocked finite (tied + non-tied), 1/sqrt(d_head) scale, scale-before-mask order, shape-mismatch raises |
+| `tests/test_multihead_attention.mojo` | shape contract, param count 4C²+4C reconcile, init determinism, invalid-config raises, single-head equivalence, contiguous-split forward oracle (H=2), causal row-0 locality |
