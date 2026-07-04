@@ -166,6 +166,26 @@ a clean exit, so the next run pays full cost again), and **don't stack concurren
 cold compiles** — the editor's LSP already runs a background `mojo` on every save,
 so a couple is fine but five will starve each other.
 
+**The #6554 compile stall, and how to keep the TDD loop fast.** Even against the
+precompiled package a few test files spend *minutes* in the compiler before a
+sub-second run. Root cause is Mojo #6554: `TestSuite`'s comptime `discover_tests`
+builds a thin-function-pointer dispatch table over the module's functions, and
+the compile cost of that table balloons with the function count (list-literal
+initializers make it worse). It is not your machine and not `-O` — it reproduces
+at `-O0` on a precompiled package. Mitigations, in order of preference:
+
+- **Keep a test module's function count low.** This is the real lever. If a file
+  starts stalling, split it into smaller test files (each gets a smaller table)
+  rather than piling more `def test_*` into one module. Prefer append-helper
+  builders over long inline `[a, b, …]` `List[Int]` literals.
+- **Don't run known-slow files in the red/green loop.** `SKIP_SLOW=1 pixi run
+  test` (aka `pixi run test-fast`) skips the files listed in `SLOW_6554` in
+  `scripts/test_all.sh` and still runs everything else; the default `pixi run
+  test` keeps full coverage for CI. Run a skipped file standalone only when you're
+  actually changing it: `pixi run mojo run --no-optimization -I build tests/<file>`.
+- When you add a file that trips the stall, append it to `SLOW_6554` and note the
+  standalone run time, so the loop stays fast for the next part.
+
 ## Layout
 
 ```text

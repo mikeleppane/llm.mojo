@@ -16,11 +16,32 @@
 # build) fails fast. The remaining tests run in a glob loop so new tests are
 # picked up automatically — no hand-maintained list to drift.
 #
-# Usage:  pixi run test      (preferred, see pixi.toml)
+# Usage:  pixi run test               (preferred, see pixi.toml)
 #         bash scripts/test_all.sh
+#         SKIP_SLOW=1 pixi run test    (skip known #6554-slow files for the TDD loop)
+#
+# A handful of test files trip Mojo #6554: TestSuite's comptime `discover_tests`
+# builds a thin-function-pointer dispatch table whose compile cost balloons with
+# the module's function count, so the file spends *minutes* in the compiler
+# before a sub-second run. That is intolerable in a red/green TDD loop. Set
+# SKIP_SLOW=1 to skip those files here and run them standalone only when you're
+# actually changing them:  pixi run mojo run --no-optimization -I build tests/<file>
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+
+# Files known to hit the Mojo #6554 compile stall (multi-minute compile, trivial
+# run). Skipped only when SKIP_SLOW=1; the default run still covers them. Keep
+# this list short — the real fix is to keep a test module's function count low
+# and split a file if it starts stalling.
+SLOW_6554=(test_seq_tasks.mojo)
+SKIP_SLOW="${SKIP_SLOW:-0}"
+
+is_slow() {
+    local base="${1##*/}"
+    for s in "${SLOW_6554[@]}"; do [[ "$base" == "$s" ]] && return 0; done
+    return 1
+}
 
 # Precompile src/llm -> build/llm.mojopkg. The build/ dir is gitignored; the
 # package must be named llm.mojopkg so `-I build` resolves `from llm... import`.
@@ -45,14 +66,25 @@ fi
 # Every other test file, sorted for a stable run order.
 shopt -s nullglob
 failed=0
+skipped=()
 for test_file in $(printf '%s\n' tests/test_*.mojo | sort); do
     [[ "$test_file" == "tests/test_smoke.mojo" ]] && continue
+    if [[ "$SKIP_SLOW" == "1" ]] && is_slow "$test_file"; then
+        echo "==> $test_file  (SKIPPED: Mojo #6554 compile stall; run standalone)"
+        skipped+=("$test_file")
+        continue
+    fi
     echo "==> $test_file"
     if ! pixi run mojo run "${INCLUDE[@]}" "$test_file"; then
         echo "FAILED: $test_file" >&2
         failed=1
     fi
 done
+
+if [[ "${#skipped[@]}" -ne 0 ]]; then
+    echo "Skipped ${#skipped[@]} #6554-slow file(s): ${skipped[*]}" >&2
+    echo "  run standalone: pixi run mojo run --no-optimization -I build tests/<file>" >&2
+fi
 
 if [[ "$failed" -ne 0 ]]; then
     echo "Some tests failed." >&2

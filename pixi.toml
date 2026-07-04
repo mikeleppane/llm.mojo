@@ -23,4 +23,7 @@ fmt = "mojo format src tests examples benchmarks"
 fmt-check = "mojo format src tests examples benchmarks && git diff --exit-code"
 # Run the whole test suite (smoke test first, then everything else).
 test = "bash scripts/test_all.sh"
+# TDD-loop variant: skip files that trip the Mojo #6554 compile stall (run those
+# standalone when you touch them). Same coverage otherwise.
+test-fast = "SKIP_SLOW=1 bash scripts/test_all.sh"
 test-smoke = "mojo run -I src tests/test_smoke.mojo"
