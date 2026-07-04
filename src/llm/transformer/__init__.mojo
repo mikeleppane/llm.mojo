@@ -7,7 +7,13 @@ from .attention import (
     scaled_dot_product_attention,
     scaled_dot_product_attention_cached,
     scaled_dot_product_attention_backward,
+    AttentionTrainCache,
+    AttentionTrainForward,
+    scaled_dot_product_attention_train,
+    scaled_dot_product_attention_train_backward,
     MultiHeadAttention,
     MHACache,
     MHAForward,
+    MHATrainCache,
+    MHATrainForward,
 )
