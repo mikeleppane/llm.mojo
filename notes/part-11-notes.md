@@ -103,7 +103,7 @@ depend on *every* `x_k`, so `x̂` has to be differentiated through them:
 ```
 ∂μ/∂x_k = 1/C
 ∂v/∂x_k = (2/C)(x_k − μ)                 [Σ_j(x_j − μ) = 0 kills the μ term]
-∂r/∂x_k = −½(v+eps)^{-3/2} ∂v/∂x_k = −(r/C) x̂_k
+∂r/∂x_k = −½(v+eps)^{-3/2} ∂v/∂x_k = −(r²/C) x̂_k
 ∂x̂_i/∂x_k = (δ_ik − 1/C) r + (x_i − μ) ∂r/∂x_k
           = r[ δ_ik − 1/C − (1/C) x̂_i x̂_k ].
 ```
@@ -223,4 +223,60 @@ Minor additive choices the plan left implicit:
 
 ## Review triage
 
-<!-- filled after the dual external review -->
+Dual external review over `git diff main...part-11-backprop`, both reviewers
+asked to re-derive the math, not just read it. Both **independently confirmed
+all four hard derivations correct** (LayerNorm three-term dx, softmax VJP,
+attention core scale/transpose placement, MHA fused-QKV plumbing) plus Linear,
+Embedding scatter, GELU, MLP, and cross-entropy — no swapped Q/K/V block, no
+stray transpose, no misplaced `1/√D`, no `=`-instead-of-`+=`, no stale cache.
+Codex (GPT-5.5, high) raised 1 finding; Opus (4.8) raised 2 SHOULD-FIX + 3 NIT.
+The two SHOULD-FIX items were real and are fixed; triage below.
+
+- **SF-1 — dropout backward is not the VJP of the eval forward (both reviewers).
+  FIXED.** Eval-mode forward is the identity (all-ones mask, no scale), but
+  `dropout_backward(mask, p, d_out)` recomputed `1/(1-p)` from the passed `p`, so
+  pairing the eval cache with the forward's own `p` gave `d_out/(1-p)`, not
+  `d_out`. My `test_eval_and_p_zero_backward_is_identity` had dodged it by passing
+  `p=0.0` to backward — a *different* `p` than the forward. Fix: cache the applied
+  scale. `DropoutResult` now carries `inv_keep` (1.0 in eval / p=0, `1/(1-p)` in
+  training) and `dropout_backward(mask, inv_keep, d_out)` consumes it — no `p` to
+  get wrong, forward and backward are exact inverses in every mode. New tests pin
+  eval-identity using the *cached* scale (`test_eval_backward_is_identity_with_
+  cached_scale`) and p=0 identity.
+- **SF-2 — Embedding scatter used a running `+=` inside the loop (Opus). FIXED.**
+  The exact anti-pattern the LayerNorm fix (and the new AGENTS.md rule) warns
+  against — and I'd missed applying the lesson to Embedding. For a repeated id the
+  per-element `table.grad[idx,j] += …` interleaves the second backward call's
+  partial sums with the first call's stored result, so the exact-`==` doubling
+  drifts by a ulp on adversarial data (Opus measured ~22% of random repeated-id
+  deltas). My original doubling test passed only by luck of its values. A quick
+  search found a deterministic 3-value case that drifts by 1 ulp; I pinned it as
+  `test_repeated_id_doubling_is_bit_exact` (**confirmed failing before the fix**),
+  then fixed backward to sum each distinct id's contribution into a per-id local
+  and add the finished delta to `table.grad` once — bit-exact doubling for any
+  data, mirroring LayerNorm. The scratch is sized to the distinct touched ids
+  (linear scan over the short id list), not the whole vocabulary, so untouched
+  rows cost nothing.
+- **N-1 — LayerNorm derivation typo `∂r/∂x_k = -(r/C)x̂_k` (Opus). FIXED.** Missing
+  a factor of `r`: the correct intermediate is `-(r²/C)x̂_k` (the final Jacobian
+  and the code were already right — only this one line was off). Fixed in both
+  `layernorm.mojo` and this file. This is exactly why the review brief asked both
+  reviewers to re-derive: a teaching derivation with a wrong intermediate step
+  mis-teaches even when the code is correct.
+- **N-2 — `gelu_rows_backward` test mirrors the implementation (Opus). ACCEPTED
+  AS-IS.** The rows test asserts `got == d_out ⊙ gelu_derivative(x)`, which is what
+  the function computes. Kept deliberately: `gelu_derivative` is independently
+  finite-difference checked against `gelu` in the same file, and the plan's design
+  for GELU is precisely "the scalar derivative is the verified unit; rows is the
+  elementwise map." So the elementwise wiring and the scalar derivative are both
+  covered without redundancy. Noted so the mirror pattern is not copied where the
+  scalar isn't separately validated.
+- **N-3 — copy churn in the `_cached` wrappers (Opus). ACCEPTED AS-IS.** The
+  caches must outlive the forward temporaries, so the copies are deliberate;
+  correctness-before-speed means the inference `forward` stays copy-free and a
+  `^`-transfer pass for caller-owned inputs is a later perf concern, not a Part XI
+  change.
+
+Both fixes were TDD: the failing test came first (dropout eval-identity with the
+cached scale; the deterministic embedding-doubling drift), then the fix, then
+green. Gates re-run clean after triage.
