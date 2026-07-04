@@ -141,6 +141,26 @@ few seconds of wall time at C=8.
   Nothing under `tensor/`, `nn/`, `transformer/`, `training/`, `generation/`, or
   `config.mojo` changed (D1 honored) — verified with `git diff main --stat`.
 
+## A trivial test file that compiles for minutes (Mojo #6554)
+
+`tests/test_seq_tasks.mojo` — the simplest file in the part — was the slowest to
+compile: **~10 minutes**, even at `-O0` against the prebuilt package, while
+heavier lab tests build in ~3 s. Diagnosed: a minimal module with the same
+imports but one trivial test and no list literals builds in **~2 s**; adding a
+handful of inline `[a, b, ...]` `List[Int]` literals makes it crawl. Replacing
+those literals with `s4`/`s8` append-helpers cut it to **~3.5 min**.
+
+The residual ~3.5 min is the deeper cause: `TestSuite.discover_tests[
+__functions_in_module()]()` builds a **comptime thin-function-pointer dispatch
+table** (one entry per test function), and Mojo 1.0.0b2's optimizer stalls
+analyzing it — upstream bug **modular/modular#6554** ("Compilation with recursive
+Variant type and comptime thin-function dispatch table times out"). The
+documented workaround (swap the function-pointer table for direct branches) lives
+inside `TestSuite`, not our code, so this is a toolchain issue to track, not a
+lab fix. The list-literal reduction is the part we *can* do; the file's module
+docstring records why. It only slows compilation of a passing test — no
+correctness impact.
+
 ## Potential concerns / follow-ups
 
 - **`forward_cached` is a performance liability at width.** ~15 ms/step at C=8 but
