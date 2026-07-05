@@ -49,3 +49,37 @@ def clip_grad_norm(mut gpt: GPT, max_norm: Float64) raises -> Float64:
     if norm > max_norm:
         gpt.scale_grads(max_norm / norm)
     return norm
+
+
+@fieldwise_init
+struct AdamWConfig(Copyable, Movable):
+    # The AdamW hyperparameters a run holds, separate from TrainingConfig (which
+    # keeps batch_size, the peak learning_rate, max_steps, and seed). Kept as its
+    # own struct so config.mojo — a model-shape concern whose GPT-2 preset never
+    # carried optimizer knobs — stays untouched.
+    var beta1: Float64  # first-moment decay
+    var beta2: Float64  # second-moment decay
+    var eps: Float64  # denominator floor
+    var weight_decay: Float64  # decoupled decay coefficient
+    var grad_clip: Float64  # global gradient-norm clip threshold
+
+    @staticmethod
+    def gpt2_defaults() -> AdamWConfig:
+        # The GPT-training preset. beta2 is 0.95 — the GPT-family value, NOT Adam's
+        # 0.999 habit — which is why this is pinned by a test. eps 1e-8, weight
+        # decay 0.1, grad clip 1.0. Non-raising (constant fields).
+        return AdamWConfig(0.9, 0.95, 1e-8, 0.1, 1.0)
+
+    def validate(self) raises:
+        # Raise on the first invalid field, naming it. Betas live in [0, 1); eps
+        # and grad_clip must be positive; weight_decay must be non-negative.
+        if self.beta1 < 0.0 or self.beta1 >= 1.0:
+            raise Error("AdamWConfig: beta1 must be in [0, 1)")
+        if self.beta2 < 0.0 or self.beta2 >= 1.0:
+            raise Error("AdamWConfig: beta2 must be in [0, 1)")
+        if self.eps <= 0.0:
+            raise Error("AdamWConfig: eps must be positive")
+        if self.weight_decay < 0.0:
+            raise Error("AdamWConfig: weight_decay must be >= 0")
+        if self.grad_clip <= 0.0:
+            raise Error("AdamWConfig: grad_clip must be positive")
