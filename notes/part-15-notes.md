@@ -183,4 +183,52 @@ pipeline order and per-stage renormalization, the greedy-zero-draw / sampled-one
 draw invariant, the context crop, the stop semantics, the O(V log V) sort, the
 example config match + discarded optimizer state, and the ids-only reuse contract).
 
-<!-- filled in after the review round -->
+Both reviewers independently re-derived the top-p nucleus rule, the shared tie
+rule, the pipeline order, the greedy-zero / sampled-one draw contract, the context
+crop, the stop semantics, the O(V log V) sort, the example config parity + discarded
+optimizer state, and the ids-only `GPT` binding — and confirmed every one CORRECT.
+Neither found a correctness bug in the generation code.
+
+- **Codex (GPT-5.5, high): 0 code findings.** Its only flagged item was a
+  "blocker" claiming the `AGENTS.md` / `PROGRESS.md` / `notes/` edits violate the
+  frozen-layer rule. **Rejected:** those are documentation, and the frozen-layer
+  rule (and the review header's allowed set `{generation/, tests, examples, docs}`)
+  is about the code layers below `generation/` — `tensor/`, `nn/`, `transformer/`,
+  `training/`, `config.mojo`, `models/`, `lab/`. Updating the progress ledger, the
+  build notes, and recording the #6554 lesson are explicit deliverables of this
+  part, not scope creep. Full text: `docs/plans/part-15-review-codex.md`.
+- **Opus 4.8 (xhigh): 0 blockers, 1 should-fix, 3 nits.** Full text:
+  `docs/plans/part-15-review-opus.md`.
+
+Triage of the Opus findings:
+
+- **S1 (should-fix) — FIXED.** The `p = 0.9` golden's *comment* in
+  `test_sampling_filters.mojo` said both tied 0.05 tokens (i0 and i7) are dropped,
+  but the (correct) golden keeps i0. The cause is a floating-point subtlety worth
+  teaching: the descending-order running sum after i6 is
+  `0.30+0.20+0.15+0.10+0.08+0.07 = 0.8999999999999999`, one ULP *under* 0.9, so the
+  `>= p` test does not fire there and i0 is admitted (kept sum 0.95); only i7 is
+  dropped. The implementation and golden were always right — only the prose lied.
+  Rewrote the comment to explain the exact-FP-comparison point. (Exactly the
+  "indict your comment, never the oracle" discipline: the number was correct.)
+- **N1 (nit) — FIXED.** `test_context_crop_equivalence` built its oracle window
+  with the same `start = len - context_length` arithmetic `generate` uses, so a
+  shared off-by-one in that formula would be mirrored on both sides and pass.
+  Rewrote the oracle crop to DROP from the front until the window fits — a
+  genuinely different expression of "the last context_length tokens" — so the test
+  now measures the crop rather than restating it.
+- **N2 (nit) — rejected (documented).** The greedy path (`argmax(logits)`) assumes
+  a non-empty row, where the sampled path would raise "empty distribution" on an
+  empty one — an asymmetry. Not reachable: `generate` only ever feeds a full `[V]`
+  row from `forward`, and `V >= 1` always (a zero-vocab model cannot be built). A
+  guard here would be untestable dead code; `argmax`'s own docstring already
+  documents the non-empty precondition. Left as-is.
+- **N3 (nit) — rejected (documented).** `_renormalize` re-sums the kept vector that
+  `filter_top_p` already accumulated while walking its prefix, one extra O(V) sweep
+  per filter. It stays O(V) overall (dominated by the O(V log V) sort), and a single
+  shared renormalize is more legible than threading a running sum out of each
+  filter. Correctness before speed; the reviewer agreed it should not change unless
+  generation latency ever matters. Left as-is.
+
+After the two fixes, `pixi run fmt-check` is a no-op and the full `pixi run
+test-fast` suite (test_seq_tasks excluded per #6554) is green.

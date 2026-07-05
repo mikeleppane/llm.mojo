@@ -198,16 +198,19 @@ def test_context_crop_equivalence() raises:
     var rng = _rng()
     var out = generate(gpt, prompt, 4, SamplerConfig.greedy(), List[Int](), rng)
 
-    # Independent manual replay of the crop + greedy argmax.
+    # Independent manual replay of the crop + greedy argmax. The oracle window is
+    # built by DROPPING from the front until it fits — deliberately NOT the
+    # `start = len - context_length` arithmetic generate.mojo uses — so an
+    # off-by-one in that formula cannot be mirrored on both sides and pass.
     var seq = prompt.copy()
     var manual = List[Int]()
     for _ in range(4):
-        var start = len(seq) - TINY_C
-        if start < 0:
-            start = 0
-        var ctx = List[Int]()
-        for i in range(start, len(seq)):
-            ctx.append(seq[i])
+        var ctx = seq.copy()
+        while len(ctx) > TINY_C:
+            var trimmed = List[Int]()
+            for i in range(1, len(ctx)):
+                trimmed.append(ctx[i])
+            ctx = trimmed^
         var logits = gpt.forward(ctx)
         var last = logits.rows - 1
         var row = List[Float64]()

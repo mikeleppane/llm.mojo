@@ -143,8 +143,12 @@ def test_top_p_goldens() raises:
         filter_top_p(a8, 0.5),
         [0.0, 0.0, 0.6, 0.4, 0.0, 0.0, 0.0, 0.0],
     )
-    # p = 0.9: prefix reaches 0.90 after {i2,i3,i4,i1,i5,i6}; i0,i7 (the tied
-    # 0.05s) are dropped.
+    # p = 0.9: the descending order is [2,3,4,1,5,6,0,7]. The running sum after
+    # i6 is 0.30+0.20+0.15+0.10+0.08+0.07 = 0.8999999999999999 — one ULP UNDER 0.9
+    # in IEEE-754 — so the `>= p` test does NOT fire there. i0 is admitted too
+    # (sum 0.95) and only i7 (the second tied 0.05) is dropped. A reminder that a
+    # cumulative-sum threshold is an exact floating-point comparison, not the
+    # rounded decimal it looks like.
     _assert_dist_equal(
         filter_top_p(a8, 0.9),
         [
