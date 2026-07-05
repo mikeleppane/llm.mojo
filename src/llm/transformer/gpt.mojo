@@ -29,9 +29,10 @@
 #    training = False (or cfg.dropout = 0) every site is the identity with an
 #    all-ones mask and NO rng consumed, so forward_cached equals forward exactly.
 #
-# GPT.apply_sgd performs the in-place p -= lr*grad update via the block's
-# sgd_parameter helper rather than training.optimizer.sgd_step: transformer/
-# sits BELOW training/ in the dependency layering, so it must not import upward.
+# GPT.apply_sgd performs the in-place p -= lr*grad update via nn.optim.sgd_update
+# rather than training.optimizer.sgd_step: transformer/ sits BELOW training/ in
+# the dependency layering (nn -> transformer -> training), so it must not import
+# upward; nn/ owns the Parameter-level update math and transformer/ may import it.
 
 from std.math import sqrt
 
@@ -39,12 +40,12 @@ from llm.config import GPTConfig
 from llm.nn.dropout import dropout_backward, dropout_cached
 from llm.nn.embedding import Embedding, EmbeddingCache
 from llm.nn.layernorm import LayerNorm, LayerNormCache
+from llm.nn.optim import sgd_update
 from llm.tensor.ops import add, cross_entropy_rows, matmul, transpose
 from llm.tensor.tensor2d import Tensor2D, zeros_2d
 from llm.transformer.block import (
     BlockCache,
     TransformerBlock,
-    sgd_parameter,
 )
 from llm.transformer.masks import causal_mask
 from llm.utils.random import Rng
@@ -306,14 +307,15 @@ struct GPT(Copyable, Movable):
 
     def apply_sgd(mut self, lr: Float64):
         # One plain-SGD step (p -= lr*grad) on every parameter — the same
-        # inventory zero_grad walks, wte updated ONCE. Mutates parameter values in
-        # place; allocates nothing; cannot raise.
-        sgd_parameter(self.wte.table, lr)
-        sgd_parameter(self.wpe.table, lr)
+        # inventory zero_grad walks, in the same order, wte updated ONCE.
+        # Delegates to nn.optim.sgd_update. Mutates parameter values in place;
+        # allocates nothing; cannot raise.
+        sgd_update(self.wte.table, lr)
+        sgd_update(self.wpe.table, lr)
         for i in range(len(self.blocks)):
             self.blocks[i].apply_sgd(lr)
-        sgd_parameter(self.ln_f.weight, lr)
-        sgd_parameter(self.ln_f.bias, lr)
+        sgd_update(self.ln_f.weight, lr)
+        sgd_update(self.ln_f.bias, lr)
 
     def parameter_count_actual(self) -> Int:
         # Walk every Parameter and sum value.size() — the count of ACTUAL floats

@@ -33,6 +33,7 @@
 from llm.nn.dropout import dropout_backward, dropout_cached
 from llm.nn.layernorm import LayerNorm, LayerNormCache
 from llm.nn.mlp import MLP, MLPCache
+from llm.nn.optim import sgd_update
 from llm.nn.parameter import Parameter
 from llm.tensor.ops import add
 from llm.tensor.tensor2d import Tensor2D
@@ -41,18 +42,6 @@ from llm.transformer.attention import (
     MultiHeadAttention,
 )
 from llm.utils.random import Rng
-
-
-def sgd_parameter(mut p: Parameter, lr: Float64):
-    # In-place plain-SGD update p.value -= lr * p.grad. Inlined here rather than
-    # importing training.optimizer.sgd_step because transformer/ sits BELOW
-    # training/ in the dependency layering (nn -> transformer -> {training,
-    # generation}) and a lower layer must never import a higher one — the update
-    # itself is a one-liner. Mutates p.value in place; allocates nothing; cannot
-    # raise (value and grad always share a shape, allocated together in Parameter).
-    for i in range(p.value.rows):
-        for j in range(p.value.cols):
-            p.value[i, j] = p.value[i, j] - lr * p.grad[i, j]
 
 
 @fieldwise_init
@@ -207,16 +196,18 @@ struct TransformerBlock(Copyable, Movable):
 
     def apply_sgd(mut self, lr: Float64):
         # One plain-SGD step on every Parameter — the same inventory zero_grad
-        # walks. Mutates parameter values in place; allocates nothing; cannot raise.
-        sgd_parameter(self.ln1.weight, lr)
-        sgd_parameter(self.ln1.bias, lr)
-        sgd_parameter(self.attn.qkv.weight, lr)
-        sgd_parameter(self.attn.qkv.bias, lr)
-        sgd_parameter(self.attn.proj.weight, lr)
-        sgd_parameter(self.attn.proj.bias, lr)
-        sgd_parameter(self.ln2.weight, lr)
-        sgd_parameter(self.ln2.bias, lr)
-        sgd_parameter(self.mlp.up.weight, lr)
-        sgd_parameter(self.mlp.up.bias, lr)
-        sgd_parameter(self.mlp.down.weight, lr)
-        sgd_parameter(self.mlp.down.bias, lr)
+        # walks, in the same order. Delegates to nn.optim.sgd_update (transformer/
+        # may import nn/, which owns the Parameter-level update math). Mutates
+        # parameter values in place; allocates nothing; cannot raise.
+        sgd_update(self.ln1.weight, lr)
+        sgd_update(self.ln1.bias, lr)
+        sgd_update(self.attn.qkv.weight, lr)
+        sgd_update(self.attn.qkv.bias, lr)
+        sgd_update(self.attn.proj.weight, lr)
+        sgd_update(self.attn.proj.bias, lr)
+        sgd_update(self.ln2.weight, lr)
+        sgd_update(self.ln2.bias, lr)
+        sgd_update(self.mlp.up.weight, lr)
+        sgd_update(self.mlp.up.bias, lr)
+        sgd_update(self.mlp.down.weight, lr)
+        sgd_update(self.mlp.down.bias, lr)

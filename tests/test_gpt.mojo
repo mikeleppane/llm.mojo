@@ -405,7 +405,7 @@ def snapshot_params(gpt: GPT) raises -> List[Tensor2D]:
 def test_zero_grad_and_apply_sgd_reach_every_parameter() raises:
     # After zero_grad every grad is exactly zero; after a step with every grad set
     # to 1.0 EVERY parameter value moves by exactly -lr. Checking all 26 tensors
-    # (weights AND biases) is the point: a dropped sgd_parameter call — e.g.
+    # (weights AND biases) is the point: a dropped sgd_update call — e.g.
     # forgetting ln_f.bias — leaves that tensor unmoved and fails here.
     var cfg = GPTConfig(8, 6, 8, 2, 2, 0.0)
     var rng = Rng(5)
