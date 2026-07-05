@@ -224,6 +224,14 @@ at `-O0` on a precompiled package. Mitigations, in order of preference:
 - When you add a file that trips the stall, append it to `SLOW_6554` and note the
   standalone run time, so the loop stays fast for the next part.
 
+The standing `SLOW_6554` member is **`tests/test_seq_tasks.mojo`** (a Part XII lab
+test), and its #6554 stall is severe enough to effectively **hang** a run, not just
+cost a slow minute — so in practice **never invoke it**, and take the pre-merge
+green gate with `pixi run test-fast` (`SKIP_SLOW=1`), which runs the whole suite
+except that one file. "The suite is green" always means green with
+`test_seq_tasks` excluded; do not try to fix, delete, or wait it out (it is a
+frozen lab layer anyway).
+
 ## Layout
 
 ```text
