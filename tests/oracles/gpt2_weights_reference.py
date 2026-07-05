@@ -203,6 +203,25 @@ def write_trailing(path: str) -> None:
     _write(path, valid_header(), payload + struct.pack("<f", 1.0))
 
 
+def write_no_newline(path: str) -> None:
+    """A file with no newline at all -> 'not a GPT2W file (no header line)'."""
+    with open(path, "wb") as f:
+        f.write(f"{MAGIC} {V} {T} {C} {L} {H} {param_count()}".encode("ascii"))
+
+
+def write_wrong_token_count(path: str) -> None:
+    """A header missing the count field (7 tokens, not 8) -> 'malformed header'."""
+    header = f"{MAGIC} {V} {T} {C} {L} {H}\n"  # dropped the count
+    _write(path, header, _payload_bytes(build_tensors()))
+
+
+def write_count_mismatch(path: str) -> None:
+    """A header whose declared count disagrees with the dims -> count mismatch.
+    Validation fails before the payload is read, so a minimal one is written."""
+    header = f"{MAGIC} {V} {T} {C} {L} {H} {param_count() + 1}\n"
+    _write(path, header, b"")
+
+
 # u64 bit pattern of float32(0.1) widened to float64, for the exact-widening pin.
 WIDEN_PROBE_VALUE = 0.1
 WIDEN_PROBE_BITS = struct.unpack(

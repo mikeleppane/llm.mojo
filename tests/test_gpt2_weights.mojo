@@ -160,6 +160,19 @@ def test_header_errors_are_named() raises:
         _ = load_gpt2(_write_and_path("write_truncated", "gpt2w_trunc.bin"))
     with assert_raises():
         _ = load_gpt2(_write_and_path("write_trailing", "gpt2w_trail.bin"))
+    # Also: a file with no newline (no header line), a header missing the count
+    # field (7 tokens, not 8), and a header whose declared count disagrees with
+    # the dims it carries.
+    with assert_raises():
+        _ = load_gpt2(_write_and_path("write_no_newline", "gpt2w_nonl.bin"))
+    with assert_raises():
+        _ = load_gpt2(
+            _write_and_path("write_wrong_token_count", "gpt2w_toks.bin")
+        )
+    with assert_raises():
+        _ = load_gpt2(
+            _write_and_path("write_count_mismatch", "gpt2w_count.bin")
+        )
 
 
 def _reference_logits() raises -> List[Float64]:

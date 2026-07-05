@@ -10,7 +10,7 @@ mask buffer — all of which shape-check fine and emit plausible-looking token s
 
 ## The byte-IO spike (day one, before building anything)
 
-The one unverified assumption in the plan was Mojo-side binary file reading. The
+The one unverified assumption going in was Mojo-side binary file reading. The
 spike: Python writes an ASCII header line then raw little-endian float32 with
 `struct.pack("<f", …)`; Mojo reads it back and reconstructs the floats.
 
@@ -53,8 +53,8 @@ jobs, two formats.
 
 ## The walk order, reconciled against Part XIV as LANDED
 
-The plan's representative walk (qkv → proj → ln1 → ln2 → up → down) was NOT what
-Part XIV shipped. The LANDED per-block order (authored once in
+An earlier draft walk (qkv → proj → ln1 → ln2 → up → down) was NOT what Part XIV
+shipped. The LANDED per-block order (authored once in
 `transformer/block.mojo`, and the order every walk method uses) is:
 
 ```
@@ -63,11 +63,10 @@ ln1.w, ln1.b, qkv.w, qkv.b, proj.w, proj.b, ln2.w, ln2.b, up.w, up.b, down.w, do
 
 with wte (once — tied head), wpe before the blocks and ln_f.w, ln_f.b after. The
 converter, the Mojo loader, and both reference forwards all use this landed
-order. This is exactly the reconciliation the plan's precondition demanded; the
-file order IS the model's walk order, so getting it from the code (not the plan's
-sketch) was load-bearing.
+order. Reconciling against the landed code (not an earlier draft ordering) was
+load-bearing; the file order IS the model's walk order.
 
-## The D2 layout fixes as shipped (the silent-garbage list)
+## The layout fixes as shipped (the silent-garbage list)
 
 All in the converter (`scripts/convert_gpt2_weights.py`), the ONE place with
 GPT-2 layout knowledge. The Mojo loader is deliberately dumb.
@@ -140,7 +139,7 @@ during development, our f64 reference was checked against HuggingFace's OWN
   ids `[15496, 11, 314, 1101, 257, 3303, 2746, 11]`.
 - **Observed gap**: max abs difference **6.02e-05** on the last-row logits (our
   f64 vs HF f32) — the expected cost of HF computing in float32, tighter than the
-  ~1e-3 the plan budgeted. Both argmax id = 407 (" not"); our logit[407]
+  the ~1e-3 expected for f32 vs f64. Both argmax id = 407 (" not"); our logit[407]
   −94.68738997956149 vs HF −94.68739318847656. The port is exact; the only
   difference is f32 rounding.
 
@@ -197,15 +196,15 @@ there is no KV cache. That is the deliberate cost this part documents as the
 opening argument for the next parts (KV cache, then performance). The remedy when
 wall-clock is too long is to shrink the token budget, never the model.
 
-## Deviations from plan
+## Deviations from the original design
 
 - **Walk order**: used Part XIV's LANDED order (ln1, qkv, proj, ln2, up, down),
-  not the plan's representative sketch (qkv, proj, ln1, ...). Reconciled against
+  not an earlier draft sketch (qkv, proj, ln1, ...). Reconciled against
   the code as the precondition required.
 - **Header has no separate integer version field**: the version lives in the
   magic's `v1` tag. The loader checks the family token (`GPT2W`) for "bad magic"
   and the version tag (`v1`) for "unsupported version" as two distinct named
-  errors — the plan's two error cases — without a redundant field.
+  errors — two distinct named errors — without a redundant field.
 - **lm_head / masked_bias absent** in this particular safetensors; the converter
   handles them if present (assert-tied-and-drop; skip) but here there was nothing
   to do. Documented so a future size that DOES carry them is covered.
@@ -222,4 +221,62 @@ wall-clock is too long is to shrink the token budget, never the model.
 
 ## Review triage
 
-<!-- REVIEW_PLACEHOLDER -->
+Dual external review over `git diff main...part-16-gpt2-weights`, both read-only,
+both asked to VERIFY THE PORT (walk the layout-fix list item by item, not just
+read). Neither found a correctness blocker; all four Conv1D transposes (including
+the square proj), the walk order against Part XIV's landed order, the buffer
+skips, the pull-by-inventory, the truncation/trailing header checks, and the
+exact f32→f64 widening all held under re-derivation.
+
+- **Claude Opus 4.8 (xhigh): 0 blocker, 1 should-fix, 6 nits, all 13 checklist
+  items confirmed correct.** Full text: `docs/plans/part-16-review-opus.md`
+  (gitignored).
+- **Codex (GPT-5.5, high): 0 blocker, 1 P3.** Full text:
+  `docs/plans/part-16-review-codex.md` (gitignored).
+
+Triage, fix/reject per finding:
+
+- **Opus S1 — FIXED.** The converter (where every silent-garbage risk lives) had
+  no in-suite automated test — the doll-house fixture writes the GPT2W file
+  directly and bypassed the converter entirely. Added a `--self-test` mode to
+  `scripts/convert_gpt2_weights.py`: it synthesizes a doll-house safetensors in
+  HF's Conv1D convention (kernels [in, out], biases/LN 1-D, a `transformer.`
+  prefix, an lm_head tied to wte, an attn.bias buffer), runs the FULL converter,
+  and asserts the emitted bytes are IDENTICAL to the independently-written test
+  fixture. Byte-equality pins all four transposes, the reshapes, the buffer skip,
+  the tied-lm_head drop, and the prefix strip in one assertion. Runs without the
+  500 MB download; `pixi run python scripts/convert_gpt2_weights.py --self-test`
+  passes. (It is a manual gate — the automated `pixi run test` suite is Mojo-only
+  and the converter is Python — documented alongside the other manual gates.)
+- **Codex P3 / Opus N5 — FIXED.** The notes referenced the internal plan (label
+  `D2`, "Deviations from plan", "the plan's sketch"); AGENTS.md bans internal-plan
+  references in committed docs. Rephrased to state the reasoning directly without
+  the plan labels; the docs commit message was likewise scrubbed.
+- **Opus N1 — FIXED.** Three loader header branches (no newline / no header line,
+  wrong token count, declared-count-vs-dims mismatch) were correct but untested.
+  Added three fixture writers and three `assert_raises` cases to
+  `test_header_errors_are_named`.
+- **Opus N3 — FIXED.** The converter's surprise-tensor classifier used
+  `endswith("attn.bias")`, which also matches `c_attn.bias`; harmless today
+  (c_attn.bias is always pulled) but tightened to `endswith(".attn.bias")` so a
+  future unpulled real bias would surface as a surprise, not be reclassified as a
+  mask buffer.
+
+Rejected / left as-is, with justification:
+
+- **Opus N2 (doll-house sentinels give near-position-invariant logits, inter-row
+  deltas ~1.3e-10).** The e2e forward test pins weight PLACEMENT strongly and the
+  positional/causal path weakly, but that path is finite-difference- and
+  oracle-tested in `test_gpt.mojo` / `test_block.mojo` (the forward is frozen this
+  part), and the 124M parity gate exercises a real 8-position causal context.
+  Adding a nonlinear sentinel would churn every frozen golden for coverage that
+  already exists a layer down. Left.
+- **Opus N4 (loader header parse is single-space/newline-brittle).** The GPT2W
+  format is ours and we control both ends (the converter and the fixture writer
+  both emit single-space-separated fields + one newline); a malformed file still
+  fails safely via the token-count / dim / count / length checks. A tolerant
+  whitespace parser would add surface for no real input. Left.
+- **Opus N6 (surprise tensors → stderr warning, not a hard error).** Deliberate:
+  an unexpected-but-unused extra tensor should be VISIBLE without aborting a
+  conversion that is otherwise correct (the parameters we need were all pulled by
+  name). A missing REQUIRED tensor already raises. Left.

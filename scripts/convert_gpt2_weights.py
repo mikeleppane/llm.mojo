@@ -245,20 +245,10 @@ def write_gpt2w(
             f.write(np.ascontiguousarray(arr, dtype="<f4").tobytes())
 
 
-def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("safetensors", type=Path, help="path to GPT-2 model.safetensors")
-    parser.add_argument(
-        "-o", "--output", type=Path, default=Path(DEFAULT_OUTPUT),
-        help=f"output GPT2W v1 path (default: {DEFAULT_OUTPUT})",
-    )
-    parser.add_argument(
-        "--n-heads", type=int, default=12,
-        help="attention heads — 12 for GPT-2 124M (the generalization point)",
-    )
-    args = parser.parse_args(argv)
-
-    tensors = strip_prefix(read_safetensors(args.safetensors))
+def convert(safetensors_path: Path, output: Path, n_heads: int) -> tuple[int, int]:
+    """The whole pipeline: read → strip prefix → drop tied lm_head → pull the walk
+    → write. Returns (param_count, mask_buffers_skipped)."""
+    tensors = strip_prefix(read_safetensors(safetensors_path))
 
     # Tied head paranoia: if lm_head.weight is present it must equal wte, and we
     # drop it (our model has no head Parameter). Paranoia is free at convert time.
@@ -281,7 +271,7 @@ def main(argv: list[str]) -> int:
     expected_skips = {
         name
         for name in unpulled
-        if name.endswith("attn.bias") or name.endswith("attn.masked_bias")
+        if name.endswith(".attn.bias") or name.endswith(".attn.masked_bias")
     }
     surprises = [n for n in unpulled if n not in expected_skips]
     if surprises:
@@ -291,11 +281,127 @@ def main(argv: list[str]) -> int:
             file=sys.stderr,
         )
 
-    write_gpt2w(args.output, walk, v, t, c, n_layers, args.n_heads)
-    count = parameter_count(v, t, c, n_layers)
+    write_gpt2w(output, walk, v, t, c, n_layers, n_heads)
+    return parameter_count(v, t, c, n_layers), len(expected_skips)
+
+
+def _pack_safetensors(named: dict[str, np.ndarray]) -> bytes:
+    """Serialize {name: f32 ndarray} into a .safetensors byte string (the inverse
+    of read_safetensors) — used only by the self-test to synthesize a fake file."""
+    header: dict[str, dict] = {}
+    buf = bytearray()
+    for name, arr in named.items():
+        a = np.ascontiguousarray(arr, dtype="<f4")
+        b = a.tobytes()
+        header[name] = {
+            "dtype": "F32",
+            "shape": list(a.shape),
+            "data_offsets": [len(buf), len(buf) + len(b)],
+        }
+        buf += b
+    hjson = json.dumps(header).encode("utf-8")
+    return struct.pack("<Q", len(hjson)) + hjson + bytes(buf)
+
+
+def self_test() -> int:
+    """Round-trip test WITHOUT the 500 MB download: synthesize a doll-house
+    safetensors in HF's Conv1D convention (kernels [in, out], biases/LN 1-D, with
+    a `transformer.` prefix, an lm_head tied to wte, and an attn.bias buffer), run
+    the FULL converter over it, and assert the emitted GPT2W bytes are IDENTICAL
+    to the independently-written test fixture. Byte-equality pins all four
+    transposes (including the square proj), the 1-D→row reshapes, the buffer skip,
+    the tied-lm_head drop, and the prefix strip in ONE assertion — the converter's
+    entire silent-garbage surface. Imports the test fixture writer.
+    """
+    import importlib.util
+    import tempfile
+
+    here = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location(
+        "gpt2_weights_reference",
+        here / "tests" / "oracles" / "gpt2_weights_reference.py",
+    )
+    ref = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ref)
+
+    # The fixture's tensors are in OUR convention, in walk order.
+    (wte, wpe, ln1_w, ln1_b, qkv_w, qkv_b, proj_w, proj_b, ln2_w, ln2_b,
+     up_w, up_b, down_w, down_b, lnf_w, lnf_b) = ref.build_tensors()
+
+    # Invert the converter's fixes to build HF-convention tensors: kernels
+    # transposed to [in, out], biases/LN flattened to 1-D. A wrong converter
+    # transpose would then NOT round-trip back to the fixture bytes.
+    fake = {
+        "transformer.wte.weight": wte,
+        "transformer.wpe.weight": wpe,
+        "transformer.h.0.ln_1.weight": ln1_w.ravel(),
+        "transformer.h.0.ln_1.bias": ln1_b.ravel(),
+        "transformer.h.0.attn.c_attn.weight": qkv_w.T,
+        "transformer.h.0.attn.c_attn.bias": qkv_b.ravel(),
+        "transformer.h.0.attn.c_proj.weight": proj_w.T,
+        "transformer.h.0.attn.c_proj.bias": proj_b.ravel(),
+        "transformer.h.0.ln_2.weight": ln2_w.ravel(),
+        "transformer.h.0.ln_2.bias": ln2_b.ravel(),
+        "transformer.h.0.mlp.c_fc.weight": up_w.T,
+        "transformer.h.0.mlp.c_fc.bias": up_b.ravel(),
+        "transformer.h.0.mlp.c_proj.weight": down_w.T,
+        "transformer.h.0.mlp.c_proj.bias": down_b.ravel(),
+        "transformer.ln_f.weight": lnf_w.ravel(),
+        "transformer.ln_f.bias": lnf_b.ravel(),
+        # A tied head and a mask buffer, to exercise the drop and the skip.
+        "lm_head.weight": wte,
+        "transformer.h.0.attn.bias": np.zeros((1, 1, ref.T, ref.T), dtype="f4"),
+    }
+
+    with tempfile.TemporaryDirectory() as d:
+        st_path = Path(d) / "fake.safetensors"
+        out_path = Path(d) / "out.bin"
+        expected_path = Path(d) / "expected.bin"
+        st_path.write_bytes(_pack_safetensors(fake))
+        count, skipped = convert(st_path, out_path, ref.H)
+        ref.write_fixture(str(expected_path))
+
+        got = out_path.read_bytes()
+        want = expected_path.read_bytes()
+        assert count == ref.param_count(), (count, ref.param_count())
+        assert skipped == 1, skipped
+        assert got == want, (
+            f"converter output ({len(got)} bytes) != fixture "
+            f"({len(want)} bytes) — a transpose/reshape/skip is wrong"
+        )
+    print("self-test OK: converter round-trips the doll-house fixture byte-for-byte")
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "safetensors", type=Path, nargs="?",
+        help="path to GPT-2 model.safetensors",
+    )
+    parser.add_argument(
+        "-o", "--output", type=Path, default=Path(DEFAULT_OUTPUT),
+        help=f"output GPT2W v1 path (default: {DEFAULT_OUTPUT})",
+    )
+    parser.add_argument(
+        "--n-heads", type=int, default=12,
+        help="attention heads — 12 for GPT-2 124M (the generalization point)",
+    )
+    parser.add_argument(
+        "--self-test", action="store_true",
+        help="run the fake-safetensors round-trip check and exit (no download)",
+    )
+    args = parser.parse_args(argv)
+
+    if args.self_test:
+        return self_test()
+    if args.safetensors is None:
+        parser.error("the safetensors path is required (or pass --self-test)")
+
+    count, skipped = convert(args.safetensors, args.output, args.n_heads)
     print(
-        f"wrote {args.output}: V={v} T={t} C={c} L={n_layers} H={args.n_heads} "
-        f"params={count} (skipped {len(expected_skips)} mask buffers)"
+        f"wrote {args.output}: params={count} H={args.n_heads} "
+        f"(skipped {skipped} mask buffers)"
     )
     return 0
 
