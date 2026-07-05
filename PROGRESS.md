@@ -19,7 +19,8 @@ proves the part green on a fresh checkout (`pixi install` first).
 | XII | Encoder-decoder lab | ✅ green (cross-attention + pre-LN blocks assembled into a seq2seq model in `src/llm/lab/`; trains copy/reverse to exact-match with a memory ablation; all lab code quarantined off the main line) | `pixi run test` | 2026-07-04 |
 | XIII | The GPT-2 model | ✅ green (pre-LN `TransformerBlock` + weight-tied `GPT`; three-site dropout; residual-init scaling; walk reconciles with the 124,439,808 formula) | `pixi run test` | 2026-07-04 |
 | XIV | Training | ✅ green (AdamW with decoupled decay + selective weight decay; warmup/cosine schedule; global-norm clipping; bit-exact checkpoints with a proven resume gate; `train_gpt` over `BatchLoader`; the parameter walk promoted to a load-bearing registry) | `pixi run test` | 2026-07-05 |
-| XV+ | Generation | not started | — | — |
+| XV | Generation | ✅ green (top-k + top-p distribution filters in probability space; one `SamplerConfig` policy — greedy/temperature/top-k/top-p — with temperature 0 = argmax drawing zero rng; the autoregressive `generate` loop with sliding-window crop and append-then-halt stop tokens; LCG-replay sampled goldens; a memorize-then-speak capstone; the Shakespeare checkpoint speaking four ways) | `pixi run test` | 2026-07-05 |
+| XVI+ | BPE weights + KV cache | not started | — | — |
 
 ## Notes
 
@@ -159,6 +160,31 @@ proves the part green on a fresh checkout (`pixi install` first).
   Shakespeare, checkpoint + load-and-resume). NumPy oracle
   `tests/oracles/adamw_reference.py`. See
   [notes/part-14-notes.md](notes/part-14-notes.md).
+
+- **Part XV deliverables:** generation, with ZERO new math below the top layer —
+  pure assembly in `generation/` over the existing forward, temperature softmax,
+  argmax, and inverse-CDF sampler (nothing under `tensor/`, `nn/`, `transformer/`,
+  `training/`, `config.mojo`, `models/`, or `lab/` changed). `sampler.mojo` grows
+  the two distribution filters (`filter_top_k`, `filter_top_p`, in probability
+  space, each renormalizing, sharing one merge-sort tie rule), a `SamplerConfig`
+  policy (temperature/top-k/top-p, with `validate` and greedy/standard presets),
+  and `sample_next` (the single entry point: temperature 0 = argmax drawing zero
+  rng; else softmax → top-k → top-p → categorical, exactly one draw). A new
+  `generate.mojo` holds the autoregressive loop (sliding-window context crop,
+  append-then-halt stop tokens, ids-in/ids-out, bound to nothing but `GPT`). The
+  capstone overfits a tiny GPT and greedy-generates the memorized continuation
+  exactly; `examples/generate_shakespeare.mojo` makes the Part XIV checkpoint
+  speak under four policies. Python oracle
+  `tests/oracles/sampling_reference.py` (filter goldens + LCG-replay exact
+  sampled ids). See [notes/part-15-notes.md](notes/part-15-notes.md).
+
+### Generation (Part XV)
+
+| File | Covers |
+|------|--------|
+| `tests/test_sampling_filters.mojo` | top-k oracle goldens; k=0/k≥n exact identity; k=1 one-hot at argmax; k-th boundary tie keeps the lower index; renormalized sum (1e-12); k<0/empty raises. top-p goldens with a tie case; p=1.0 exact identity (no cumsum path); tiny p keeps exactly the argmax; renormalized sum; p≤0/p>1/empty raises. Composition golden pinning top-k-then-top-p (the two orders disagree by construction) |
+| `tests/test_sample_next.mojo` | greedy (T=0) equals argmax with `rng.state` bit-unchanged (zero draws, across many calls); sampled advances the state exactly once per call; LCG-replay goldens (fixed seed + logit row → exact oracle-predicted ids) for three seeds; top_k=1 forces the argmax regardless of seed; `validate` raises per named field; presets validate |
+| `tests/test_generate.mojo` | length == budget with no stop; max_new_tokens 0 → empty; negative raises; empty prompt raises; greedy twice → identical ids and untouched `rng.state`; equal seeds → identical sampled runs; stop token appended-then-halt (shorter than budget, a prefix of the unstopped run); a stop id in the PROMPT does not halt; empty stop list runs to budget; context-crop equivalence against a manual hand-cropped forward; the memorize-then-speak capstone (plain-SGD overfit → exact greedy continuation) |
 
 ### Training (Part XIV)
 
