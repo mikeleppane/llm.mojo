@@ -30,3 +30,9 @@ from .gpt import (
     GPTForward,
     position_ids,
 )
+from .gpt2_weights import (
+    GPT2W_MAGIC,
+    GPT2W_FAMILY,
+    GPT2W_VERSION_TAG,
+    load_gpt2,
+)
