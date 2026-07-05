@@ -6,6 +6,7 @@
 # batches also makes generation reproducible. Top-k / top-p and the real
 # generate loop build on this later.
 
+from llm.tensor.ops import argmax, softmax_row_temperature
 from llm.utils.random import Rng
 
 
@@ -216,3 +217,78 @@ def filter_top_p(probs: List[Float64], p: Float64) raises -> List[Float64]:
         if cumulative >= p:
             break  # smallest prefix reaching p; at least one token always kept
     return _renormalize(kept)
+
+
+# --- the decoding policy: SamplerConfig + sample_next -------------------------
+
+
+@fieldwise_init
+struct SamplerConfig(Copyable, Movable):
+    # One policy struct composing the four standard decoding knobs. Greedy is not
+    # a separate mode but a POINT in this space: temperature 0.0 means argmax.
+    var temperature: Float64  # 0.0 = greedy (argmax, no rng draw); else softmax T
+    var top_k: Int  # 0 = disabled; else keep the k highest-probability tokens
+    var top_p: Float64  # 1.0 = disabled; else nucleus threshold in (0, 1)
+
+    @staticmethod
+    def greedy() -> SamplerConfig:
+        # Deterministic argmax decoding: (temperature 0, no filters).
+        return SamplerConfig(0.0, 0, 1.0)
+
+    @staticmethod
+    def standard() -> SamplerConfig:
+        # Plain temperature-1 sampling, no truncation: (1.0, disabled, disabled).
+        return SamplerConfig(1.0, 0, 1.0)
+
+    def validate(self) raises:
+        # Reject an out-of-range field, naming it. temperature 0 is VALID (the
+        # greedy sentinel); only a negative temperature is rejected. top_k must be
+        # non-negative (0 disabled); top_p must be in (0, 1] (1.0 disabled). Reads
+        # self; allocates nothing; draws no rng.
+        if self.temperature < 0.0:
+            raise Error(
+                "SamplerConfig: temperature must be >= 0 (0 = greedy), got "
+                + String(self.temperature)
+            )
+        if self.top_k < 0:
+            raise Error(
+                "SamplerConfig: top_k must be >= 0 (0 = disabled), got "
+                + String(self.top_k)
+            )
+        if self.top_p <= 0.0 or self.top_p > 1.0:
+            raise Error(
+                "SamplerConfig: top_p must be in (0, 1] (1 = disabled), got "
+                + String(self.top_p)
+            )
+
+
+def sample_next(
+    logits: List[Float64], cfg: SamplerConfig, mut rng: Rng
+) raises -> Int:
+    # Turn one logit row [V] into the next token id under the policy `cfg`. This is
+    # the SINGLE decoding entry point. Reads logits; allocates the intermediate
+    # distributions; raises on an invalid config or (in the sampled path) a
+    # degenerate distribution.
+    #
+    # rng-draw count — the invariant the tests pin:
+    #   * greedy (temperature == 0.0): ZERO draws. It is pure argmax, so switching
+    #     a run to greedy never perturbs any other seeded draw stream (the same
+    #     "disabling randomness consumes no draws" invariant dropout established).
+    #   * sampled (temperature > 0): EXACTLY ONE draw, consumed by
+    #     sample_categorical at the end of the pipeline.
+    #
+    # Pipeline (sampled path), each stage renormalizing:
+    #   softmax_row_temperature(logits, T)
+    #     -> filter_top_k (if k > 0) -> filter_top_p (if p < 1) -> sample_categorical
+    # softmax_row_temperature raises on T <= 0, so temperature 0.0 is an
+    # unambiguous greedy sentinel with no valid sampled interpretation.
+    cfg.validate()
+    if cfg.temperature == 0.0:
+        return argmax(logits)  # greedy: no rng draw
+
+    var probs = softmax_row_temperature(logits, cfg.temperature)
+    if cfg.top_k > 0:
+        probs = filter_top_k(probs, cfg.top_k)
+    if cfg.top_p < 1.0:
+        probs = filter_top_p(probs, cfg.top_p)
+    return sample_categorical(probs, rng)
