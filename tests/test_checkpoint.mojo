@@ -40,7 +40,7 @@ comptime WD = 0.1
 
 
 def _tiny_gpt(seed: UInt64) raises -> GPT:
-    var cfg = GPTConfig(8, 8, 8, 2, 2, 0.0)  # V, C, ctx, L, H, dropout
+    var cfg = GPTConfig(8, 8, 8, 2, 2, 0.0)  # V, ctx, C, L, H, dropout
     var rng = Rng(seed)
     return GPT.init_random(cfg, rng)
 
@@ -160,15 +160,16 @@ def test_load_rejects_bad_magic() raises:
 
 
 def test_load_rejects_shape_mismatch() raises:
-    # Save from a C=8 model, load into a C=16 model: same tensor count, different
-    # shapes, so the per-tensor shape check must fire.
+    # Save from a d_model=8 model, load into a d_model=16 model: same tensor
+    # count, different shapes, so the per-tensor shape check must fire (at tensor
+    # 0, wte, which the wider d_model reshapes).
     var small = _tiny_gpt(1)
     var m = _zeros_state(small)
     var v = _zeros_state(small)
     var path = String("build/ckpt_shape.ckpt")
     save_checkpoint(path, small, m, v, 0, 0)
 
-    var big_cfg = GPTConfig(8, 16, 8, 2, 2, 0.0)  # C=16 instead of 8
+    var big_cfg = GPTConfig(8, 8, 16, 2, 2, 0.0)  # d_model 16 instead of 8
     var big_rng = Rng(1)
     var big = GPT.init_random(big_cfg, big_rng)
     with assert_raises(contains="shape mismatch"):
@@ -213,6 +214,38 @@ def test_load_rejects_truncated() raises:
     var fresh = _tiny_gpt(1)
     with assert_raises(contains="truncated"):
         _ = load_checkpoint(tpath, fresh)
+
+
+def test_save_rejects_misshaped_moment() raises:
+    # A moment list with the right length but a wrong-shaped tensor would write a
+    # payload that no longer lines up with the header shapes; save must reject it
+    # rather than emit a file load would silently mis-read.
+    var gpt = _tiny_gpt(1)
+    var m = _zeros_state(gpt)
+    var v = _zeros_state(gpt)
+    m[0] = zeros_2d(1, 1)  # wrong shape for wte
+    var path = String("build/ckpt_misshaped.ckpt")
+    with assert_raises(contains="does not match parameter"):
+        save_checkpoint(path, gpt, m, v, 0, 0)
+
+
+def test_load_rejects_trailing_garbage() raises:
+    # A file with extra value lines beyond params+m+v does not match this model;
+    # load must reject it rather than ignore the tail.
+    var gpt = _tiny_gpt(1)
+    var m = _zeros_state(gpt)
+    var v = _zeros_state(gpt)
+    var path = String("build/ckpt_valid.ckpt")
+    save_checkpoint(path, gpt, m, v, 0, 0)
+
+    var content = open(path, "r").read()
+    var gpath = String("build/ckpt_garbage.ckpt")
+    with open(gpath, "w") as f:
+        f.write(content + "0000000000000000\n")  # one extra value line
+
+    var fresh = _tiny_gpt(1)
+    with assert_raises(contains="extra value"):
+        _ = load_checkpoint(gpath, fresh)
 
 
 def test_resume_gate_bit_identical() raises:

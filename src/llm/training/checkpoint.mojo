@@ -145,9 +145,10 @@ def save_checkpoint(
 ) raises:
     # Write a complete resume checkpoint. Reads gpt (via export_parameters /
     # parameter_shapes) and the trainer-owned m, v, t, rng_state. Raises if m or v
-    # do not have one tensor per parameter (a mis-sized optimizer state would
-    # write an unloadable file). Overwrites `path`; allocates the export copies
-    # and the write buffers.
+    # do not have one tensor per parameter, or if any moment tensor's shape does
+    # not match its parameter — either would write a file whose payload no longer
+    # lines up with the header shapes, so load would silently shift values between
+    # tensors. Overwrites `path`; allocates the export copies and the write buffers.
     var shapes = gpt.parameter_shapes()
     var params = gpt.export_parameters()
     var n = len(shapes)
@@ -160,6 +161,21 @@ def save_checkpoint(
             + ", len(v)="
             + String(len(v))
         )
+    for k in range(n):
+        if m[k].rows != shapes[k].rows or m[k].cols != shapes[k].cols:
+            raise Error(
+                "save_checkpoint: m["
+                + String(k)
+                + "] shape does not match parameter "
+                + String(k)
+            )
+        if v[k].rows != shapes[k].rows or v[k].cols != shapes[k].cols:
+            raise Error(
+                "save_checkpoint: v["
+                + String(k)
+                + "] shape does not match parameter "
+                + String(k)
+            )
 
     var header = CKPT_MAGIC + " " + String(CKPT_VERSION) + "\n"
     header += String(n) + "\n"
@@ -260,6 +276,15 @@ def load_checkpoint(path: String, mut gpt: GPT) raises -> CheckpointState:
     var v = List[Tensor2D]()
     for k in range(n):
         v.append(_read_tensor(lines, cursor, shapes[k].rows, shapes[k].cols))
+
+    # The three sections must consume the file exactly. Extra values mean the file
+    # does not match this model (or is corrupt); reject rather than ignore them.
+    if cursor != len(lines):
+        raise Error(
+            "load_checkpoint: file has "
+            + String(len(lines) - cursor)
+            + " extra value line(s) after params, m, v"
+        )
 
     gpt.import_parameters(params)
     return CheckpointState(m^, v^, t, rng_state)
