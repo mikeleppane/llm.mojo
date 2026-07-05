@@ -52,3 +52,167 @@ def sample_categorical(probs: List[Float64], mut rng: Rng) raises -> Int:
         if threshold < cumulative:
             return i
     return n - 1
+
+
+# --- distribution filters -----------------------------------------------------
+#
+# Both filters live in PROBABILITY space: probs [V] -> probs [V], keeping a subset
+# of tokens, zeroing the rest, and renormalizing so the result is again a valid
+# distribution. This is the deliberate alternative to the "set filtered logits to
+# -inf, softmax once" idiom: every intermediate stays a finite, valid distribution
+# (no +/-inf ever enters the codebase), each filter is independently testable as
+# distribution -> distribution against a NumPy-free Python oracle, and
+# sample_categorical's own sum-to-1 guard re-validates the filters' output for
+# free. The two forms are algebraically equivalent; this one keeps the arithmetic
+# honest and legible.
+
+
+def _order_by_prob_desc(probs: List[Float64]) -> List[Int]:
+    # Return the indices 0..n-1 ordered by probability DESCENDING, ties broken by
+    # ascending index (lower index first). This single ordering serves both
+    # filters and encodes the one tie rule the whole part shares with argmax
+    # (first-wins). Bottom-up merge sort: O(n log n) and stable, which both
+    # matter at n = 50257 (the BPE vocab in the next part) where an O(n^2) scan
+    # would be a real defect even though the n = 11 tests never feel it.
+    # Allocates two index buffers; does not mutate probs; draws no rng.
+    var n = len(probs)
+    var a = List[Int]()
+    for i in range(n):
+        a.append(i)
+    if n < 2:
+        return a^
+
+    # "i sorts before j" — strictly greater probability, or equal probability
+    # (neither strictly greater) with the smaller index. Expressed without an
+    # `==` on floats: if neither is strictly larger, they are equal and the index
+    # decides. The order is total (indices are distinct), so no stability subtlety
+    # remains — merging can take the "before" element unconditionally.
+    var buf = List[Int]()
+    for _ in range(n):
+        buf.append(0)
+
+    var width = 1
+    while width < n:
+        var lo = 0
+        while lo < n:
+            var mid = lo + width
+            if mid > n:
+                mid = n
+            var hi = lo + 2 * width
+            if hi > n:
+                hi = n
+            # Merge the two sorted runs a[lo:mid] and a[mid:hi] into buf[lo:hi].
+            var i = lo
+            var j = mid
+            var out_pos = lo
+            while i < mid and j < hi:
+                var li = a[i]
+                var rj = a[j]
+                # li before rj iff probs[li] > probs[rj], or (tie) li < rj.
+                var li_first = probs[li] > probs[rj] or (
+                    not (probs[rj] > probs[li]) and li < rj
+                )
+                if li_first:
+                    buf[out_pos] = li
+                    i += 1
+                else:
+                    buf[out_pos] = rj
+                    j += 1
+                out_pos += 1
+            while i < mid:
+                buf[out_pos] = a[i]
+                i += 1
+                out_pos += 1
+            while j < hi:
+                buf[out_pos] = a[j]
+                j += 1
+                out_pos += 1
+            lo += 2 * width
+        # Copy the merged buffer back into a for the next pass.
+        for k in range(n):
+            a[k] = buf[k]
+        width *= 2
+    return a^
+
+
+def _renormalize(probs: List[Float64]) raises -> List[Float64]:
+    # Divide a non-negative vector by its sum so it sums to 1. Raises if the sum
+    # is not positive (every kept mass zeroed out) — a filter that keeps at least
+    # one token from a softmax distribution can never hit this, so it is a genuine
+    # "the input was not a valid distribution" signal, not a normal path.
+    # Allocates the result; does not mutate the input.
+    var total = 0.0
+    for i in range(len(probs)):
+        total += probs[i]
+    if total <= 0.0:
+        raise Error(
+            "filter: kept probability mass is not positive (got "
+            + String(total)
+            + "); input was not a valid distribution"
+        )
+    var out = List[Float64]()
+    for i in range(len(probs)):
+        out.append(probs[i] / total)
+    return out^
+
+
+def filter_top_k(probs: List[Float64], k: Int) raises -> List[Float64]:
+    # Keep the k highest-probability entries, zero the rest, renormalize to sum 1.
+    # Shapes: probs [V] -> [V]. Does not mutate probs; allocates the result; draws
+    # NO rng. Raises on k < 0 or an empty input.
+    #
+    # Sentinels and edges: k == 0 is DISABLED (identity — the documented "off"
+    # value used by SamplerConfig); k >= V is also the identity (nothing to drop);
+    # k == 1 yields a one-hot at the argmax (greedy-by-filter). A tie at the k-th
+    # boundary keeps the LOWER index (the shared first-wins rule), because
+    # _order_by_prob_desc breaks equal probabilities toward the smaller index.
+    var n = len(probs)
+    if n == 0:
+        raise Error("filter_top_k: empty distribution")
+    if k < 0:
+        raise Error("filter_top_k: k must be non-negative, got " + String(k))
+    if k == 0 or k >= n:
+        return probs.copy()  # disabled / nothing to drop -> identity
+
+    var order = _order_by_prob_desc(probs)
+    var kept = List[Float64]()
+    for _ in range(n):
+        kept.append(0.0)
+    for rank in range(k):
+        var idx = order[rank]
+        kept[idx] = probs[idx]
+    return _renormalize(kept)
+
+
+def filter_top_p(probs: List[Float64], p: Float64) raises -> List[Float64]:
+    # Nucleus filter: sort by probability descending (ties: lower index first),
+    # keep the smallest prefix whose cumulative probability is >= p, zero the
+    # rest, renormalize. Always keeps at least one token, so a tiny p collapses to
+    # the argmax one-hot rather than an empty distribution.
+    # Shapes: probs [V] -> [V]. Does not mutate probs; allocates the result; draws
+    # NO rng. Raises on p <= 0, p > 1, or an empty input.
+    #
+    # p >= 1.0 is the DISABLED identity and is returned BEFORE any cumulative sum:
+    # deciding "disabled" via `cumsum >= 1.0` would let a distribution whose mass
+    # rounds to 0.999... silently drop its tail. The explicit short-circuit is the
+    # honest gate.
+    var n = len(probs)
+    if n == 0:
+        raise Error("filter_top_p: empty distribution")
+    if p <= 0.0 or p > 1.0:
+        raise Error("filter_top_p: p must be in (0, 1], got " + String(p))
+    if p >= 1.0:
+        return probs.copy()  # disabled -> identity, no cumulative-sum path
+
+    var order = _order_by_prob_desc(probs)
+    var kept = List[Float64]()
+    for _ in range(n):
+        kept.append(0.0)
+    var cumulative = 0.0
+    for rank in range(n):
+        var idx = order[rank]
+        kept[idx] = probs[idx]
+        cumulative += probs[idx]
+        if cumulative >= p:
+            break  # smallest prefix reaching p; at least one token always kept
+    return _renormalize(kept)
