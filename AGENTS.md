@@ -126,6 +126,29 @@ publishable until its code passes these — see *Publishing* below):
   destroyed and the field can't be transferred out of it. Bind the whole result
   first (`var fwd = some_call(...); fwd.cache`), which borrows the field. Same
   family as the single-field-transfer rule above.
+- **`mojo format` rejects a plain reassignment to a local named `out`** — `out =
+  expr` fails with `Cannot parse` even though the compiler accepts it, because
+  `out` is the argument-convention keyword and the formatter's parser reads
+  `out = …` as a malformed signature. `out += …`, `out[i] = …`, and `return out`
+  all format fine; only the bare reassignment trips it. A file can compile and
+  pass `pixi run test` yet fail `pixi run fmt-check` for this alone. Don't name a
+  reassigned local `out` (use `acc`/`result`); the same guard applies to the
+  other convention keywords (`mut`, `read`, `owned`, `ref`, `deinit`). Reserved
+  words also surprise as ordinary identifiers: `ref` cannot be a variable name at
+  all (`unexpected token in expression`).
+- **A Float64 ↔ its IEEE-754 bit pattern:** `x.to_bits[DType.uint64]()` and
+  `bitcast[DType.float64, 1](SIMD[DType.uint64, 1](bits))[0]` (import `bitcast`
+  from `std.memory`). `Float64.from_bits` does not exist on the pinned Mojo. This
+  is how the checkpoint stores exact values (a hex UInt64 per Float64) so a resume
+  round-trips bit-for-bit instead of through a re-rounded decimal.
+- **`String.split(sep)` yields `StringSlice`, not `String`**, so a helper typed
+  `List[String]` needs an explicit `String(slice)` per element; and a
+  newline-terminated file always leaves a trailing empty slice, which a parser
+  must drop (or it surfaces as a spurious blank-line error rather than the real
+  "truncated file").
+- **Default `List[T]()` arguments are legal** (`init_m: List[Tensor2D] =
+  List[Tensor2D]()`), the clean way to make an optional list parameter without an
+  overload.
 
 ## Toolchain and the quality floor
 
@@ -250,6 +273,21 @@ tensor, data  →  models  →  { training, generation }
 When you add an import that points "up" the graph, stop: the dependency belongs
 somewhere else, or the thing you need should move down. See
 [improve-architecture](.agents/skills/improve-architecture/SKILL.md).
+
+**The `GPT` parameter walk is a load-bearing contract.** With no framework
+parameter dict, the model's fixed traversal order (wte once, wpe, each block's 12
+parameters in layer order, ln_f) IS the registry: the optimizer state (m/v),
+gradient clipping, the checkpoint format, and export/import all index that ONE
+order. Every walk method (`parameter_shapes`, `parameter_decay_flags`,
+`grad_norm`, `scale_grads`, `export/import_parameters`, `export_gradients`,
+`apply_adamw`, `zero_grad`, `apply_sgd`) must visit the same parameters in the
+same order, wte exactly once (weight tying → one Parameter). The per-block 12 live
+once in `transformer/block.mojo` so the order is authored in a single place; order
+drift between methods is the named failure mode, guarded by the shape/count
+reconciliation, the decay-partition inventory, the checkpoint round-trip, and the
+against-oracle optimizer run. Optimizer *math* lives in `nn/optim.mojo`
+(Parameter-level, layering-legal for `transformer/` to call); optimizer *state* is
+trainer-owned, never stored in `Parameter`.
 
 ## Testing
 

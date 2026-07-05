@@ -18,7 +18,8 @@ proves the part green on a fresh checkout (`pixi install` first).
 | XI | Backpropagation by hand | ✅ green (every layer's backward finite-difference-checked; explicit per-layer caches; grads accumulate) | `pixi run test` | 2026-07-04 |
 | XII | Encoder-decoder lab | ✅ green (cross-attention + pre-LN blocks assembled into a seq2seq model in `src/llm/lab/`; trains copy/reverse to exact-match with a memory ablation; all lab code quarantined off the main line) | `pixi run test` | 2026-07-04 |
 | XIII | The GPT-2 model | ✅ green (pre-LN `TransformerBlock` + weight-tied `GPT`; three-site dropout; residual-init scaling; walk reconciles with the 124,439,808 formula) | `pixi run test` | 2026-07-04 |
-| XIV+ | Training & generation | not started | — | — |
+| XIV | Training | ✅ green (AdamW with decoupled decay + selective weight decay; warmup/cosine schedule; global-norm clipping; bit-exact checkpoints with a proven resume gate; `train_gpt` over `BatchLoader`; the parameter walk promoted to a load-bearing registry) | `pixi run test` | 2026-07-05 |
+| XV+ | Generation | not started | — | — |
 
 ## Notes
 
@@ -137,6 +138,38 @@ proves the part green on a fresh checkout (`pixi install` first).
   124M preset and asserts the walked total is 124,439,808. NumPy oracle
   `tests/oracles/gpt_reference.py`. See
   [notes/part-13-notes.md](notes/part-13-notes.md).
+
+- **Part XIV deliverables:** the training machinery that turns "learns" into
+  "trains" (nothing under `tensor/`, `lab/`, `generation/`, `models/`, or
+  `config.mojo` changed). Per-Parameter optimizer math moved to its
+  layering-legal home `nn/optim.mojo` (`sgd_update`; `apply_sgd` refactored to
+  delegate, behavior-frozen; `adamw_update` — decoupled decay, bias correction
+  from t=1, NumPy-oracle-checked). The model's fixed traversal order is promoted
+  to a **parameter registry**: additive `GPT` walk methods (`parameter_shapes`,
+  `parameter_decay_flags`, `grad_norm`, `scale_grads`, `export/import_parameters`,
+  `export_gradients`, `apply_adamw`), all visiting the same parameters in the same
+  order (wte once), with the GPT-family selective-decay partition (matrices decay,
+  biases and LayerNorm vectors do not). `training/`: a pure warmup+cosine
+  `lr_at`, `AdamWConfig`/`ScheduleConfig` (config.mojo untouched — TrainingConfig
+  is fieldwise-init), global-norm `clip_grad_norm`, versioned bit-exact
+  checkpoints (`save_checkpoint`/`load_checkpoint`, Float64 stored as its hex bit
+  pattern), and `train_gpt` (AdamW + schedule + clip over `BatchLoader`, with
+  `estimate_loss` and resumable segments). The capstone: overfit-one-batch through
+  the real trainer, plus `examples/train_gpt_shakespeare.mojo` (char-level tiny
+  Shakespeare, checkpoint + load-and-resume). NumPy oracle
+  `tests/oracles/adamw_reference.py`. See
+  [notes/part-14-notes.md](notes/part-14-notes.md).
+
+### Training (Part XIV)
+
+| File | Covers |
+|------|--------|
+| `tests/test_adamw.mojo` | `adamw_update` vs the NumPy oracle over several steps (decay on and off, value + m + v); the hand-computed step 1 (the 1−β^1 bias correction cancels the 1−β that formed the moment, so mhat=g, vhat=g²); the decoupled-decay pin (g=0 ⇒ moments stay exactly zero, value still shrinks by 1−lr·wd); t<1 and shape-mismatch raises; determinism |
+| `tests/test_schedule.mojo` | hand-computed goldens (step 0→0, mid-warmup, warmup end = peak, cosine midpoint, max_steps = min_lr, past-the-end clamped); monotone non-increasing after warmup; degenerate warmup=0; `ScheduleConfig.validate` and `lr_at` guards |
+| `tests/test_gpt_optimizer.mojo` | `parameter_shapes` reconciles with `parameter_count_actual` (wte once); the decay-partition inventory (per block 4 decayed matrices + 8 undecayed; embeddings decay, ln_f not); `apply_adamw` moves every Parameter and rejects a mis-sized m/v; walk stability; the against-oracle 2-step run — `apply_adamw` matches a flat reference driving the oracle-verified `adamw_update` over the model's published walk metadata |
+| `tests/test_clipping.mojo` | hand-computed global norm across three different parameters (3,4,12 → 13, which no per-tensor norm reports); below-threshold exact no-op; above-threshold post-clip norm == clip with direction preserved; zero-grad edge (no 0/0); `scale_grads` doubles every gradient |
+| `tests/test_checkpoint.mojo` | the resume gate (k + checkpoint + fresh model + (n−k) == n straight steps, bit-identical); bit-exact save/load round-trip (params, m, v, t, rng); the edge-value hex round-trip; and the bad-magic / shape / parameter-count / truncated guards |
+| `tests/test_gpt_train_loop.mojo` | overfit-one-batch through the real `train_gpt` crushes the loss far below log V (seeded, deterministic); a dropout=0.1 run still ends below its start; a segmented run reproduces a straight run bit-for-bit; `estimate_loss` matches a hand-averaged dropout-free loss and preserves the cursor; TrainReport history lengths; the AdamW preset (β₂=0.95) pinned |
 
 ### The GPT-2 model (Part XIII)
 
