@@ -4,10 +4,11 @@
 # It puts the whole Part XIV surface to work end to end: a char tokenizer and
 # batch loader over a train/val split, a mini-GPT, and train_gpt (AdamW with a
 # warmup+cosine schedule and global-norm gradient clipping) run in segments so it
-# can checkpoint periodically and log train/val loss and perplexity. It saves a
-# final checkpoint, then demonstrates load-and-resume: a freshly built model
-# loads the checkpoint (parameters, optimizer moments, step counter, rng state)
-# and continues training with no discontinuity.
+# can checkpoint periodically and log train/val loss and perplexity. It interrupts
+# the run at a checkpoint, then demonstrates load-and-resume: a freshly built
+# model loads that checkpoint (parameters, optimizer moments, step counter, rng
+# state) and FINISHES the run under the same schedule — no lr discontinuity, a
+# genuine continuation rather than a fresh run.
 #
 # Run (needs a checkpoints/ directory, which is gitignored):
 #     mkdir -p checkpoints
@@ -38,16 +39,19 @@ comptime N_HEADS = 4
 comptime CONTEXT = 48  # T: sequence length the model trains on
 comptime DROPOUT = 0.1
 
-# Run knobs.
+# Run knobs. The schedule horizon is the FULL run TOTAL_STEPS; we interrupt at
+# CHECKPOINT_STOP to demonstrate load-and-resume, so both phases share one cosine
+# (the resume continues the same schedule, no lr jump). CHECKPOINT_STOP is also
+# where the last periodic checkpoint lands.
 comptime BATCH = 12
 comptime PEAK_LR = 3e-3
 comptime MIN_LR = 3e-4
 comptime WARMUP = 30
-comptime MAX_STEPS = 300
+comptime TOTAL_STEPS = 330  # the full run and the schedule horizon
+comptime CHECKPOINT_STOP = 300  # interrupt here; resume finishes to TOTAL_STEPS
 comptime EVAL_INTERVAL = 50
 comptime EVAL_BATCHES = 6
 comptime CHECKPOINT_INTERVAL = 100  # save every this many steps
-comptime RESUME_STEPS = 30  # extra steps the resume demo trains
 comptime SEED: UInt64 = 1337
 
 # The dropout rng is a stream distinct from the loader's `seed + epoch` family so
@@ -107,29 +111,36 @@ def main() raises:
         gpt.parameter_count_actual(),
     )
 
-    var tc = TrainingConfig(BATCH, PEAK_LR, MAX_STEPS, SEED)
+    # The schedule horizon is the FULL run (TOTAL_STEPS), so the cosine is one
+    # continuous curve across both the pre-checkpoint and the resumed phase.
+    var tc = TrainingConfig(BATCH, PEAK_LR, TOTAL_STEPS, SEED)
     var oc = AdamWConfig.gpt2_defaults()
     var sc = ScheduleConfig(WARMUP, MIN_LR)
     var dropout_rng = Rng(SEED + DROPOUT_STREAM_OFFSET)
 
     print(
-        "\ninitial loss (a uniform model would be ~", perplexity(0.0), "x V):"
+        "\ninitial loss (a uniform model scores loss log V; perplexity V =",
+        vocab_size,
+        "):",
     )
     _report_perplexity("train", gpt, train_loader)
     _report_perplexity("val  ", gpt, val_loader)
 
-    # --- Train in segments, checkpointing between -------------------------
-    # Each segment runs under the SAME schedule horizon (tc.max_steps), carrying
-    # the AdamW moments across via init_m/init_v, so the segmented run is
-    # identical to one uninterrupted run — just with checkpoints in the gaps.
-    print("\ntraining", MAX_STEPS, "steps (warmup", WARMUP, "-> cosine):")
+    # --- Train up to the checkpoint, saving periodically ------------------
+    # Each segment runs under the SAME schedule horizon (tc.max_steps =
+    # TOTAL_STEPS), carrying the AdamW moments across via init_m/init_v, so the
+    # segmented run is identical to one uninterrupted run — just with checkpoints
+    # in the gaps. We stop at CHECKPOINT_STOP to hand off to the resume demo.
+    print(
+        "\ntraining to step", CHECKPOINT_STOP, "(warmup", WARMUP, "-> cosine):"
+    )
     var m = List[Tensor2D]()  # empty -> train_gpt starts fresh zeros
     var v = List[Tensor2D]()
     var done = 0
-    while done < MAX_STEPS:
+    while done < CHECKPOINT_STOP:
         var seg_end = done + CHECKPOINT_INTERVAL
-        if seg_end > MAX_STEPS:
-            seg_end = MAX_STEPS
+        if seg_end > CHECKPOINT_STOP:
+            seg_end = CHECKPOINT_STOP
         var report = train_gpt(
             gpt,
             train_loader,
@@ -146,6 +157,9 @@ def main() raises:
             seg_end,
         )
         for e in range(len(report.eval_steps)):
+            # report.lrs is indexed from this segment's start (`done`), so the lr
+            # for eval at absolute step S is lrs[S - done].
+            var lr_idx = report.eval_steps[e] - done
             print(
                 "  step",
                 report.eval_steps[e] + 1,
@@ -156,7 +170,7 @@ def main() raises:
                 "| val ppl",
                 perplexity(report.eval_val_losses[e]),
                 "| lr",
-                report.lrs[len(report.lrs) - 1],
+                report.lrs[lr_idx],
             )
         m = report.m.copy()
         v = report.v.copy()
@@ -164,14 +178,15 @@ def main() raises:
         save_checkpoint(CHECKPOINT_PATH, gpt, m, v, done, dropout_rng.state)
         print("  [checkpoint saved at step", done, "->", CHECKPOINT_PATH, "]")
 
-    print("\nfinal loss after", MAX_STEPS, "steps:")
+    print("\nloss at the checkpoint (step", CHECKPOINT_STOP, "):")
     _report_perplexity("train", gpt, train_loader)
     _report_perplexity("val  ", gpt, val_loader)
 
     # --- Load-and-resume demo --------------------------------------------
     # A fresh model (deliberately different init) loads the checkpoint and
-    # continues, restoring parameters, optimizer moments, step counter, and the
-    # dropout rng state — so training picks up exactly where it left off.
+    # finishes the run, restoring parameters, optimizer moments, step counter, and
+    # the dropout rng state — so training picks up exactly where it left off, under
+    # the same schedule (no lr discontinuity).
     print("\n--- load-and-resume demo ---")
     var resume_init = Rng(SEED + 999)  # a different init, fully overwritten
     var resumed = GPT.init_random(cfg, resume_init)
@@ -180,14 +195,13 @@ def main() raises:
     print("resumed model matches the saved model (identical eval loss):")
     _report_perplexity("val  ", resumed, val_loader)
 
-    var tc2 = TrainingConfig(BATCH, PEAK_LR, MAX_STEPS + RESUME_STEPS, SEED)
     var resume_rng = Rng(0)
     resume_rng.state = state.rng_state  # continue the exact dropout stream
     var report2 = train_gpt(
         resumed,
         train_loader,
         val_loader,
-        tc2,
+        tc,  # same horizon -> the schedule continues seamlessly
         oc,
         sc,
         resume_rng,
@@ -196,9 +210,15 @@ def main() raises:
         state.t,
         state.m.copy(),
         state.v.copy(),
-        MAX_STEPS + RESUME_STEPS,
+        TOTAL_STEPS,
     )
-    print("trained", RESUME_STEPS, "more steps from the checkpoint:")
+    print(
+        "resumed to step",
+        TOTAL_STEPS,
+        "(",
+        TOTAL_STEPS - CHECKPOINT_STOP,
+        "more steps):",
+    )
     _report_perplexity("train", resumed, train_loader)
     _report_perplexity("val  ", resumed, val_loader)
     _ = report2
