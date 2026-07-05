@@ -149,6 +149,17 @@ publishable until its code passes these — see *Publishing* below):
 - **Default `List[T]()` arguments are legal** (`init_m: List[Tensor2D] =
   List[Tensor2D]()`), the clean way to make an optional list parameter without an
   overload.
+- **Raw binary file reads: `open(path, "r").read_bytes()`** returns the whole
+  file as a `List[UInt8]`. There is **no `"rb"` mode** — passing it raises
+  `invalid mode: "rb". Can only be one of {"r", "w", "rw", "a"}`; `read_bytes()`
+  is a method on the ordinary text handle, not a binary-open flag. Reconstruct a
+  little-endian float32 from four bytes with
+  `bitcast[DType.float32, 1](SIMD[DType.uint32, 1](b0 | b1<<8 | b2<<16 | b3<<24))[0]`
+  and widen with `Float64(f32)` — the widening is EXACT (every float32 is a
+  float64), so a released-weights loader round-trips the on-disk f32 bit-for-bit
+  (the GPT2W loader pins this with a probe). Scan for the header's newline and
+  break at it rather than reading the whole file into a `String` — a 498 MB
+  payload should never materialize as one string.
 
 ## Toolchain and the quality floor
 
