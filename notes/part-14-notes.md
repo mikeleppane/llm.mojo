@@ -208,26 +208,27 @@ wall including compile), so a meaningful step count is 10–15+ minutes — past
 a few minutes. This is the deliberate scale trade the plan called for; the trainer
 machinery is identical at any size (the 124M path is Part XVI).
 
-Final reported run (SEED 1337, 300 steps, warmup 30, peak lr 3e-3 -> min 3e-4,
-batch 12, dropout 0.1; **5:50 wall-clock on CPU including compile**):
+Final reported run (SEED 1337, 330-step horizon interrupted at 300, warmup 30,
+peak lr 3e-3 -> min 3e-4, batch 12, dropout 0.1; **5:50 wall-clock on CPU
+including compile**):
 
 ```
 vocab 65 chars, train 1,003,855 tokens, val 111,539 tokens
 initial:  train loss 4.180  ppl 65.4   (a uniform 65-token model)
-step  50: train 2.691  val 2.745  val ppl 15.6
-step 100: train 2.573  val 2.627  val ppl 13.8   [checkpoint]
-step 150: train 2.500  val 2.565  val ppl 13.0
-step 200: train 2.459  val 2.528  val ppl 12.5   [checkpoint]
-step 250: train 2.418  val 2.487  val ppl 12.0
-step 300: train 2.403  val 2.476  val ppl 11.9   [checkpoint]
-final:    train ppl 11.1,  val ppl 11.9
+step  50: train 2.691  val 2.745  val ppl 15.6   lr 2.97e-3
+step 100: train 2.573  val 2.628  val ppl 13.8   lr 2.66e-3  [checkpoint]
+step 150: train 2.502  val 2.566  val ppl 13.0   lr 2.08e-3
+step 200: train 2.464  val 2.530  val ppl 12.5   lr 1.38e-3  [checkpoint]
+step 250: train 2.420  val 2.487  val ppl 12.0   lr 7.6e-4
+step 300: train 2.400  val 2.472  val ppl 11.8   lr 3.7e-4   [checkpoint, interrupt]
 ```
 
 The load-and-resume demo restores from the step-300 checkpoint into a
-differently-initialized fresh model, reports the **identical** val loss
-(2.4759705791474045 — bit-for-bit, so the parameters loaded exactly), then trains
-30 more steps from the restored optimizer moments and rng, dropping val loss to
-2.465 (ppl 11.76). Loss fell smoothly the whole way. No hyperparameter thrash was
+differently-initialized fresh model and reports the **identical** val loss
+(2.4718109811387374 — bit-for-bit, so the parameters loaded exactly), then
+finishes the run `[300, 330)` from the restored moments, step counter, and rng —
+under the same 330-step cosine, so the lr continues without a jump — landing at
+val ppl 11.70. Loss fell smoothly the whole way. No hyperparameter thrash was
 needed: every gradient and the optimizer are oracle-tested upstream, so the
 end-to-end run converging on the first honest config is the expected outcome.
 
@@ -282,5 +283,78 @@ end-to-end run converging on the first honest config is the expected outcome.
 
 ## Review triage
 
-<!-- FILL after dual review: findings from Codex (GPT-5.5 high) and Opus 4.8
-xhigh, fix/reject per finding. -->
+Dual external review over `git diff main...part-14-training`, both read-only, both
+asked to VERIFY THE OPTIMIZER SEMANTICS AND CONTRACTS by re-deriving (AdamW
+decoupled decay + bias correction, the selective-decay partition, the global-norm
+clip, the single-order parameter walk, the bit-exact checkpoint/resume, the
+layering). Neither found a correctness blocker; the AdamW math, decoupled/selective
+decay, clipping, the walk registry, and the resume gate all held under
+re-derivation.
+
+- **Claude Opus 4.8 (xhigh): 0 blocker, 1 should-fix, 5 nits, 12 confirmed-correct.**
+  Full text: `docs/plans/part-14-review-opus.md` (gitignored).
+- **Codex (GPT-5.5, high): 0 blocker, 2 P2, 2 P3.** Full text:
+  `docs/plans/part-14-review-codex.md` (gitignored).
+
+Triage (both reviewers), fix/reject per finding:
+
+- **Opus S1 — FIXED.** `test_checkpoint.mojo`'s shape-mismatch test wrote
+  `GPTConfig(8, 16, 8, …)  # C=16` but the constructor order is
+  `(vocab, context_length, d_model, …)`, so slot 2 sets *context_length*, not
+  d_model — the test passed only because a wider context reshapes `wpe`. Changed
+  to `GPTConfig(8, 8, 16, …)  # d_model 16` so the first mismatch is at tensor 0
+  (`wte`) as the docstring claims, and corrected the comment. A real
+  mis-teaching, not just a label slip.
+- **Opus N1 — FIXED.** Three `GPTConfig` comments labelled the positions
+  `V, C, ctx` when the true order is `V, ctx, C` (all values were 8, so
+  numerically inert). Relabelled.
+- **Opus N2 / Codex-implicit — FIXED.** The example printed `perplexity(0.0)`
+  (= 1.0, a *perfect* model) as the "uniform model" baseline. A uniform model
+  scores loss `log V`, perplexity `V`; now prints `vocab_size` directly.
+- **Codex P2a — FIXED.** `save_checkpoint` checked only `len(m)/len(v)`, not each
+  moment tensor's shape; a same-length but wrong-shaped state would serialize a
+  payload that no longer matches the header shapes, and load would shift values
+  between tensors. Added a per-tensor shape check before writing, with a test
+  (`test_save_rejects_misshaped_moment`).
+- **Opus N5b — FIXED.** `load_checkpoint` read exactly `N` tensors × 3 sections
+  but ignored *extra* trailing lines. Added a "file consumed exactly" check
+  (`cursor == len(lines)`) so a file with extra data is rejected, with a test
+  (`test_load_rejects_trailing_garbage`). Truncation (the dangerous direction) was
+  already caught.
+- **Codex P2b — FIXED (example restructured).** The resume demo saved the
+  checkpoint under a 300-step schedule horizon but resumed under a 330-step one,
+  so `lr_at(step, …, max_steps)` used a different cosine denominator on the first
+  resumed step — an lr jump, not a seamless continuation. Restructured the example
+  to ONE horizon (`TOTAL_STEPS = 330`): it trains to `CHECKPOINT_STOP = 300` in
+  segments, then the resume finishes `[300, 330)` under the same `tc` — a genuine
+  interrupt-and-continue with no lr discontinuity (the same property
+  `test_segmented_resume_matches_straight_run` proves in the suite).
+- **Codex P3a — FIXED.** The example printed the segment's final lr for every eval
+  in a segment (a segment can hold multiple evals). Now indexes
+  `report.lrs[eval_step - segment_start]` so each eval shows its own lr.
+- **Codex P3b — FIXED.** A code comment in `gpt.mojo` carried the internal marker
+  `(D2)`, which AGENTS.md bans (private plan references dangle in the public repo).
+  Removed the marker, kept the explanation. (Pre-existing `D5` markers in the Part
+  XI backward tests are out of scope for this branch and untouched.)
+
+Rejected / left as-is, with justification:
+
+- **Opus N3 (decay partition authored twice).** `apply_adamw` hard-codes each
+  parameter's decay as a literal `0.0`/`weight_decay` argument while
+  `parameter_decay_flags` hard-codes the same partition as `True`/`False`. In
+  Mojo's concrete-struct world there is no clean way to derive one from the other
+  without a parallel reference-yielding walk (which the layout does not support).
+  The two are cross-checked by `test_apply_adamw_matches_flat_walk_two_steps` (the
+  flat reference drives `adamw_update` from `parameter_decay_flags`; a drift
+  diverges the run), so it is a guarded maintenance smell, not a correctness risk.
+  Kept, as Opus concluded ("no change required").
+- **Opus N4 (new heavy tests not in `SLOW_6554`).** The full-model suites are NOT
+  #6554-slow: measured real wall-clock is ~0.85 s (`test_checkpoint`) and ~1.2 s
+  (`test_gpt_train_loop`) — the multi-second numbers in `TestSuite`'s per-test
+  display are the known-unreliable timer (AGENTS.md). So they do not belong in
+  `SLOW_6554` and `scripts/test_all.sh` is left untouched.
+- **Opus N5a (`adamw_update` trusts the beta range).** `nn/optim` is deliberately
+  low-level per-tensor math; `AdamWConfig.validate()` (called by `train_gpt`)
+  enforces `beta ∈ [0, 1)` at the config edge. Adding a redundant beta check to
+  the inner loop buys nothing the config guard does not already give. Left; the
+  docstring's raising contract (t and shapes) is accurate for this layer.

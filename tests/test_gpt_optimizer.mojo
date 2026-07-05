@@ -34,7 +34,7 @@ comptime EPS = 1e-8
 
 
 def _tiny_gpt(seed: UInt64) raises -> GPT:
-    # V=8, C=8, context=8, L=2, H=2, dropout 0. 28 parameter tensors:
+    # V=8, context=8, C=8, L=2, H=2, dropout 0. 28 parameter tensors:
     # wte, wpe, 12 per block x 2, ln_f weight+bias.
     var cfg = GPTConfig(8, 8, 8, 2, 2, 0.0)
     var rng = Rng(seed)

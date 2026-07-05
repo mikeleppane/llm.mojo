@@ -347,7 +347,7 @@ struct GPT(Copyable, Movable):
         total += self.ln_f.bias.value.size()
         return total
 
-    # --- The parameter walk as a registry (D2) ---------------------------------
+    # --- The parameter walk as a registry --------------------------------------
     #
     # The model has no framework parameter dict; instead ONE documented traversal
     # order IS the registry, and these methods all consume it. The order is: wte

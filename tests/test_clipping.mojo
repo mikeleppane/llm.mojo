@@ -22,7 +22,7 @@ from llm.utils.random import Rng
 
 
 def _tiny_gpt(seed: UInt64) raises -> GPT:
-    # V=8, C=8, context=8, L=2, H=2, dropout 0.
+    # V=8, context=8, C=8, L=2, H=2, dropout 0.
     var cfg = GPTConfig(8, 8, 8, 2, 2, 0.0)
     var rng = Rng(seed)
     return GPT.init_random(cfg, rng)
