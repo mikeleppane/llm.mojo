@@ -21,7 +21,8 @@ from .block import (
     TransformerBlock,
     BlockCache,
     BlockForward,
-    sgd_parameter,
+    ParamShape,
+    BLOCK_PARAM_COUNT,
 )
 from .gpt import (
     GPT,

@@ -29,9 +29,10 @@
 #    training = False (or cfg.dropout = 0) every site is the identity with an
 #    all-ones mask and NO rng consumed, so forward_cached equals forward exactly.
 #
-# GPT.apply_sgd performs the in-place p -= lr*grad update via the block's
-# sgd_parameter helper rather than training.optimizer.sgd_step: transformer/
-# sits BELOW training/ in the dependency layering, so it must not import upward.
+# GPT.apply_sgd performs the in-place p -= lr*grad update via nn.optim.sgd_update
+# rather than training.optimizer.sgd_step: transformer/ sits BELOW training/ in
+# the dependency layering (nn -> transformer -> training), so it must not import
+# upward; nn/ owns the Parameter-level update math and transformer/ may import it.
 
 from std.math import sqrt
 
@@ -39,12 +40,17 @@ from llm.config import GPTConfig
 from llm.nn.dropout import dropout_backward, dropout_cached
 from llm.nn.embedding import Embedding, EmbeddingCache
 from llm.nn.layernorm import LayerNorm, LayerNormCache
+from llm.nn.optim import adamw_update, sgd_update
 from llm.tensor.ops import add, cross_entropy_rows, matmul, transpose
 from llm.tensor.tensor2d import Tensor2D, zeros_2d
 from llm.transformer.block import (
+    _grad_scale,
+    _grad_sum_sq,
+    _load_value,
+    BLOCK_PARAM_COUNT,
     BlockCache,
+    ParamShape,
     TransformerBlock,
-    sgd_parameter,
 )
 from llm.transformer.masks import causal_mask
 from llm.utils.random import Rng
@@ -306,14 +312,15 @@ struct GPT(Copyable, Movable):
 
     def apply_sgd(mut self, lr: Float64):
         # One plain-SGD step (p -= lr*grad) on every parameter — the same
-        # inventory zero_grad walks, wte updated ONCE. Mutates parameter values in
-        # place; allocates nothing; cannot raise.
-        sgd_parameter(self.wte.table, lr)
-        sgd_parameter(self.wpe.table, lr)
+        # inventory zero_grad walks, in the same order, wte updated ONCE.
+        # Delegates to nn.optim.sgd_update. Mutates parameter values in place;
+        # allocates nothing; cannot raise.
+        sgd_update(self.wte.table, lr)
+        sgd_update(self.wpe.table, lr)
         for i in range(len(self.blocks)):
             self.blocks[i].apply_sgd(lr)
-        sgd_parameter(self.ln_f.weight, lr)
-        sgd_parameter(self.ln_f.bias, lr)
+        sgd_update(self.ln_f.weight, lr)
+        sgd_update(self.ln_f.bias, lr)
 
     def parameter_count_actual(self) -> Int:
         # Walk every Parameter and sum value.size() — the count of ACTUAL floats
@@ -339,3 +346,190 @@ struct GPT(Copyable, Movable):
         total += self.ln_f.weight.value.size()
         total += self.ln_f.bias.value.size()
         return total
+
+    # --- The parameter walk as a registry --------------------------------------
+    #
+    # The model has no framework parameter dict; instead ONE documented traversal
+    # order IS the registry, and these methods all consume it. The order is: wte
+    # (once — the tied head owns no Parameter), wpe, then each block's 12
+    # parameters in layer order (ln1 w/b, attn qkv w/b, attn proj w/b, ln2 w/b,
+    # mlp up w/b, mlp down w/b), then ln_f w/b. Optimizer state (m, v) is
+    # trainer-owned: plain parallel List[Tensor2D] sized from parameter_shapes and
+    # indexed in this same order. Every method below — parameter_shapes,
+    # parameter_decay_flags, grad_norm, scale_grads, export/import_parameters,
+    # apply_adamw — visits exactly these parameters in exactly this order; drift
+    # between them is the named failure mode the optimizer and checkpoint tests
+    # exist to catch.
+
+    def parameter_tensor_count(self) -> Int:
+        # How many Parameter TENSORS the walk visits (NOT the float count): wte,
+        # wpe, 12 per block, ln_f weight and bias. This sizes the m/v state lists
+        # and the checkpoint. Reads self; allocates nothing; cannot raise.
+        return 2 + BLOCK_PARAM_COUNT * len(self.blocks) + 2
+
+    def parameter_shapes(self) -> List[ParamShape]:
+        # The (rows, cols) of every Parameter, in walk order — used to allocate
+        # zeros m/v state and to validate a checkpoint header against the live
+        # model. wte appears ONCE. Reads self; allocates the returned list; cannot
+        # raise.
+        var out = List[ParamShape]()
+        out.append(
+            ParamShape(self.wte.table.value.rows, self.wte.table.value.cols)
+        )
+        out.append(
+            ParamShape(self.wpe.table.value.rows, self.wpe.table.value.cols)
+        )
+        for i in range(len(self.blocks)):
+            self.blocks[i].parameter_shapes(out)
+        out.append(
+            ParamShape(self.ln_f.weight.value.rows, self.ln_f.weight.value.cols)
+        )
+        out.append(
+            ParamShape(self.ln_f.bias.value.rows, self.ln_f.bias.value.cols)
+        )
+        return out^
+
+    def parameter_decay_flags(self) -> List[Bool]:
+        # The weight-decay flag of every Parameter, in walk order (the GPT-family
+        # partition): the embedding matrices wte and wpe and every Linear weight
+        # decay; every bias and every LayerNorm weight/bias (ln1, ln2, ln_f) do
+        # not. Reads self; allocates the returned list; cannot raise. This is the
+        # partition apply_adamw applies; a test pins the two agree.
+        var out = List[Bool]()
+        out.append(True)  # wte (token embedding matrix)
+        out.append(True)  # wpe (positional embedding matrix)
+        for i in range(len(self.blocks)):
+            self.blocks[i].parameter_decay_flags(out)
+        out.append(False)  # ln_f.weight (LayerNorm vector)
+        out.append(False)  # ln_f.bias   (LayerNorm vector)
+        return out^
+
+    def grad_norm(self) -> Float64:
+        # The GLOBAL L2 norm of the whole-model gradient: sqrt of the sum of
+        # squares over EVERY gradient entry (wte once, wpe, all blocks, ln_f) —
+        # the single vector norm gradient clipping thresholds against, NOT a
+        # per-tensor norm. Reads self; allocates nothing; cannot raise.
+        var s = 0.0
+        s += _grad_sum_sq(self.wte.table)
+        s += _grad_sum_sq(self.wpe.table)
+        for i in range(len(self.blocks)):
+            s += self.blocks[i].grad_norm_sq()
+        s += _grad_sum_sq(self.ln_f.weight)
+        s += _grad_sum_sq(self.ln_f.bias)
+        return sqrt(s)
+
+    def scale_grads(mut self, factor: Float64):
+        # Multiply EVERY gradient in the model by `factor` in place — the second
+        # half of gradient clipping (grad *= clip / norm). wte scaled ONCE.
+        # Mutates every grad; allocates nothing; cannot raise.
+        _grad_scale(self.wte.table, factor)
+        _grad_scale(self.wpe.table, factor)
+        for i in range(len(self.blocks)):
+            self.blocks[i].scale_grads(factor)
+        _grad_scale(self.ln_f.weight, factor)
+        _grad_scale(self.ln_f.bias, factor)
+
+    def export_parameters(self) -> List[Tensor2D]:
+        # A copy of every Parameter's VALUE, in walk order (for checkpoint save;
+        # copies are fine at IO time). wte appears ONCE. Reads self; allocates the
+        # returned list; cannot raise.
+        var out = List[Tensor2D]()
+        out.append(self.wte.table.value.copy())
+        out.append(self.wpe.table.value.copy())
+        for i in range(len(self.blocks)):
+            self.blocks[i].export_parameters(out)
+        out.append(self.ln_f.weight.value.copy())
+        out.append(self.ln_f.bias.value.copy())
+        return out^
+
+    def export_gradients(self) -> List[Tensor2D]:
+        # A copy of every Parameter's GRADIENT, in walk order (symmetric to
+        # export_parameters). wte appears ONCE — its grad is the summed two-path
+        # tied-weight gradient. Reads self; allocates the returned list; cannot
+        # raise. Used for per-layer gradient inspection and to drive the
+        # walk-consistency check against apply_adamw.
+        var out = List[Tensor2D]()
+        out.append(self.wte.table.grad.copy())
+        out.append(self.wpe.table.grad.copy())
+        for i in range(len(self.blocks)):
+            self.blocks[i].export_gradients(out)
+        out.append(self.ln_f.weight.grad.copy())
+        out.append(self.ln_f.bias.grad.copy())
+        return out^
+
+    def import_parameters(mut self, params: List[Tensor2D]) raises:
+        # Copy `params` (in walk order) into every Parameter's value in place (for
+        # checkpoint restore). Raises if the count or any shape does not match the
+        # live model — a checkpoint for a different architecture must fail loudly,
+        # never load garbage. Mutates every value; allocates nothing.
+        var expected = self.parameter_tensor_count()
+        if len(params) != expected:
+            raise Error(
+                "import_parameters: expected "
+                + String(expected)
+                + " tensors, got "
+                + String(len(params))
+            )
+        _load_value(self.wte.table, params[0])
+        _load_value(self.wpe.table, params[1])
+        var off = 2
+        for i in range(len(self.blocks)):
+            off = self.blocks[i].import_parameters(params, off)
+        _load_value(self.ln_f.weight, params[off])
+        _load_value(self.ln_f.bias, params[off + 1])
+
+    def apply_adamw(
+        mut self,
+        mut m: List[Tensor2D],
+        mut v: List[Tensor2D],
+        t: Int,
+        lr: Float64,
+        beta1: Float64,
+        beta2: Float64,
+        eps: Float64,
+        weight_decay: Float64,
+    ) raises:
+        # One AdamW step on EVERY parameter, indexing the trainer-owned m/v state
+        # lists in walk order. wte and wpe (matrices) decay; ln_f (LayerNorm) does
+        # not; each block applies the selective-decay partition to its own twelve.
+        # m and v must have exactly parameter_tensor_count() entries, each shaped
+        # like its parameter (allocate them from parameter_shapes). Mutates every
+        # value and every m/v entry; allocates nothing; raises on a length
+        # mismatch, a bad t, or a mis-shaped state tensor.
+        var expected = self.parameter_tensor_count()
+        if len(m) != expected or len(v) != expected:
+            raise Error(
+                "apply_adamw: m/v must have "
+                + String(expected)
+                + " entries (one per parameter), got len(m)="
+                + String(len(m))
+                + ", len(v)="
+                + String(len(v))
+            )
+        # wte and wpe: embedding matrices, decayed.
+        adamw_update(
+            self.wte.table, m[0], v[0], t, lr, beta1, beta2, eps, weight_decay
+        )
+        adamw_update(
+            self.wpe.table, m[1], v[1], t, lr, beta1, beta2, eps, weight_decay
+        )
+        var off = 2
+        for i in range(len(self.blocks)):
+            off = self.blocks[i].apply_adamw(
+                m, v, off, t, lr, beta1, beta2, eps, weight_decay
+            )
+        # ln_f: LayerNorm vectors, never decayed.
+        adamw_update(
+            self.ln_f.weight, m[off], v[off], t, lr, beta1, beta2, eps, 0.0
+        )
+        adamw_update(
+            self.ln_f.bias,
+            m[off + 1],
+            v[off + 1],
+            t,
+            lr,
+            beta1,
+            beta2,
+            eps,
+            0.0,
+        )
