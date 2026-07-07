@@ -85,6 +85,32 @@ def test_from_rows_rejects_empty() raises:
         _ = from_rows(empty)
 
 
+def test_row_sums_a_known_tensor() raises:
+    # row(r) hands back a borrowed [cols] view over the flat buffer — no copy.
+    # Summing it recovers the row's contents.
+    var a = from_rows([[1.0, 2.0, 3.0], [10.0, 20.0, 30.0]])
+    var r0 = a.row(0)
+    assert_equal(len(r0), 3)
+    var s0 = 0.0
+    for c in range(len(r0)):
+        s0 += r0[c]
+    assert_almost_equal(s0, 6.0, atol=1e-12)
+    var r1 = a.row(1)
+    var s1 = 0.0
+    for c in range(len(r1)):
+        s1 += r1[c]
+    assert_almost_equal(s1, 60.0, atol=1e-12)
+
+
+def test_row_view_sees_writes_through_the_tensor() raises:
+    # The view borrows self.data, so a write through the subscript is visible
+    # when the same element is read back through row() — proof it is a view, not
+    # a snapshot copy.
+    var x = zeros_2d(2, 3)
+    x[1, 2] = 9.0
+    assert_almost_equal(x.row(1)[2], 9.0, atol=1e-12)
+
+
 def test_writable_shape_and_values() raises:
     # String.write must carry the shape header and the leading values, and cap
     # the preview: a 3x4 tensor has 12 values, so the `…` truncation marker

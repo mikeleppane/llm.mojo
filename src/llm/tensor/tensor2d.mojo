@@ -42,6 +42,17 @@ struct Tensor2D(Copyable, Movable, Writable):
             raise Error("Tensor2D index out of range")
         return self.data[self.offset(row, col)]
 
+    def row(ref self, r: Int) -> Span[Float64, origin_of(self.data)]:
+        # A borrowed [cols] view of row r — no copy, no allocation. The Span
+        # borrows self.data as its origin, so it reads (and writes) straight
+        # through the flat buffer for as long as the view is live; the compiler
+        # forbids mutating the tensor while the view is held. Unchecked like
+        # __getitem__ (the hot path): a bad r indexes the buffer, it does not
+        # raise. What it teaches: an origin-tagged view replacing a per-row copy,
+        # at the cost of the borrow — the tensor is pinned immutable underneath.
+        var start = r * self.cols
+        return Span(self.data)[start : start + self.cols]
+
     def fill(mut self, value: Float64):
         # Overwrite every element with `value`. Mutates in place.
         for i in range(self.size()):
