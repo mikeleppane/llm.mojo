@@ -15,7 +15,7 @@ from std.collections import List
 
 
 @fieldwise_init
-struct Tensor3D(Copyable, Movable):
+struct Tensor3D(Copyable, Movable, Writable):
     var d0: Int
     var d1: Int
     var d2: Int
@@ -34,6 +34,22 @@ struct Tensor3D(Copyable, Movable):
         # accumulating through the subscript mutates the buffer directly — no
         # separate setter. (Origin must name the field, not self.)
         return self.data[self.offset(i, j, k)]
+
+    def write_to(self, mut writer: Some[Writer]):
+        # Printable form: a shape header plus a capped preview of the buffer,
+        # e.g. `Tensor3D[2, 3, 4](1.5, 2.0, 0.0, …)`. The preview stops at 8
+        # values (a trailing `…` marks the truncation) so printing a big batched
+        # activation stays one short line, not thousands of floats.
+        writer.write("Tensor3D[", self.d0, ", ", self.d1, ", ", self.d2, "](")
+        var n = self.size()
+        var limit = n if n < 8 else 8
+        for i in range(limit):
+            if i > 0:
+                writer.write(", ")
+            writer.write(self.data[i])
+        if n > 8:
+            writer.write(", …")
+        writer.write(")")
 
     def at(self, i: Int, j: Int, k: Int) raises -> Float64:
         # Bounds-checked read. Raises if any index is outside its dimension.

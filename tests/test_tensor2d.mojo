@@ -8,6 +8,7 @@ from std.testing import (
     assert_equal,
     assert_almost_equal,
     assert_raises,
+    assert_true,
     TestSuite,
 )
 
@@ -82,6 +83,20 @@ def test_from_rows_rejects_empty() raises:
     var empty = List[List[Float64]]()
     with assert_raises(contains="at least one row"):
         _ = from_rows(empty)
+
+
+def test_writable_shape_and_values() raises:
+    # String.write must carry the shape header and the leading values, and cap
+    # the preview: a 3x4 tensor has 12 values, so the `…` truncation marker
+    # appears rather than all twelve.
+    var x = zeros_2d(3, 4)
+    x[0, 0] = 1.5
+    x[0, 1] = 2.0
+    var s = String.write(x)
+    assert_true("Tensor2D[3, 4]" in s)
+    assert_true("1.5" in s)
+    assert_true("2.0" in s)
+    assert_true("…" in s)
 
 
 def main() raises:

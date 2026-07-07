@@ -17,7 +17,7 @@ from std.collections import List
 
 
 @fieldwise_init
-struct Tensor2D(Copyable, Movable):
+struct Tensor2D(Copyable, Movable, Writable):
     var rows: Int
     var cols: Int
     var data: List[Float64]  # flat row-major [rows, cols]
@@ -46,6 +46,22 @@ struct Tensor2D(Copyable, Movable):
         # Overwrite every element with `value`. Mutates in place.
         for i in range(self.size()):
             self.data[i] = value
+
+    def write_to(self, mut writer: Some[Writer]):
+        # Printable form: a shape header plus a capped preview of the buffer,
+        # e.g. `Tensor2D[3, 4](1.5, 2.0, 0.0, …)`. The preview stops at 8 values
+        # (a trailing `…` marks the truncation) so printing a big table — a
+        # [50257, 768] embedding — stays one short line, not millions of floats.
+        writer.write("Tensor2D[", self.rows, ", ", self.cols, "](")
+        var n = self.size()
+        var limit = n if n < 8 else 8
+        for i in range(limit):
+            if i > 0:
+                writer.write(", ")
+            writer.write(self.data[i])
+        if n > 8:
+            writer.write(", …")
+        writer.write(")")
 
     def __matmul__(self, other: Tensor2D) raises -> Tensor2D:
         # Matrix multiply via the `@` operator: [M, K] @ [K, N] -> [M, N] in ikj
