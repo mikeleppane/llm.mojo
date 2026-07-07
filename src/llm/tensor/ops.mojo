@@ -141,7 +141,7 @@ def matmul_ikj(a: Tensor2D, b: Tensor2D) raises -> Tensor2D:
     return a @ b
 
 
-def matvec(a: Tensor2D, x: List[Float64]) raises -> List[Float64]:
+def matvec(a: Tensor2D, x: Span[Float64, _]) raises -> List[Float64]:
     # Matrix-vector product [M, K] @ [K] -> [M]. The special case that dominates
     # single-token decoding. The inner loop walks a[i, *] contiguously. Raises on
     # a shape mismatch; allocates the result.
@@ -159,7 +159,7 @@ def matvec(a: Tensor2D, x: List[Float64]) raises -> List[Float64]:
 # --- softmax ---
 
 
-def softmax_row(input: List[Float64]) -> List[Float64]:
+def softmax_row(input: Span[Float64, _]) -> List[Float64]:
     # Numerically stable softmax over one vector: subtract the row max before
     # exponentiating so the largest exponent is exp(0) = 1 and nothing overflows.
     # An empty input yields an empty output. Allocates the result.
@@ -238,7 +238,7 @@ def softmax_rows_backward(
 
 
 def softmax_row_temperature(
-    input: List[Float64], temperature: Float64
+    input: Span[Float64, _], temperature: Float64
 ) raises -> List[Float64]:
     # Softmax of input / temperature. T < 1 sharpens, T > 1 flattens. Raises if
     # temperature <= 0; an empty input yields an empty output.
@@ -280,7 +280,7 @@ def softmax_row_temperature(
 # --- cross-entropy ---
 
 
-def logsumexp(x: List[Float64]) -> Float64:
+def logsumexp(x: Span[Float64, _]) -> Float64:
     # Stable log(sum(exp(x))) = max(x) + log(sum(exp(x - max(x)))). Assumes a
     # non-empty x.
     var n = len(x)
@@ -294,7 +294,7 @@ def logsumexp(x: List[Float64]) -> Float64:
     return m + log(s)
 
 
-def cross_entropy_one(logits: List[Float64], target: Int) raises -> Float64:
+def cross_entropy_one(logits: Span[Float64, _], target: Int) raises -> Float64:
     # Cross-entropy loss for one position: logsumexp(logits) - logits[target],
     # the stable form of -log(softmax(logits)[target]). Raises if target is out
     # of range.
@@ -304,7 +304,7 @@ def cross_entropy_one(logits: List[Float64], target: Int) raises -> Float64:
 
 
 def cross_entropy_grad(
-    logits: List[Float64], target: Int
+    logits: Span[Float64, _], target: Int
 ) raises -> List[Float64]:
     # Gradient of cross_entropy_one wrt logits: softmax(logits) - onehot(target),
     # i.e. p_i - y_i. Cheap, bounded, and the backbone of every training step.
@@ -324,8 +324,8 @@ def cross_entropy_rows(logits: Tensor2D, targets: List[Int]) raises -> Float64:
     # logits [N, V]; targets has length N (one target id per row). This is the
     # batched training loss the backward chain differentiates — the mean, not the
     # sum, so the gradient scale is independent of batch size. Reads its args;
-    # allocates one scratch row per position; raises on a length mismatch, an
-    # empty batch (no mean is defined), or an out-of-range target (surfaced by
+    # borrows each row as a Span (no per-row copy); raises on a length mismatch,
+    # an empty batch (no mean is defined), or an out-of-range target (surfaced by
     # cross_entropy_one).
     var n = logits.rows
     if len(targets) != n:
@@ -339,10 +339,7 @@ def cross_entropy_rows(logits: Tensor2D, targets: List[Int]) raises -> Float64:
         raise Error("cross_entropy_rows: empty batch has no mean loss")
     var total = 0.0
     for i in range(n):
-        var row = List[Float64]()
-        for j in range(logits.cols):
-            row.append(logits[i, j])
-        total += cross_entropy_one(row, targets[i])
+        total += cross_entropy_one(logits.row(i), targets[i])
     return total / Float64(n)
 
 
@@ -352,10 +349,11 @@ def cross_entropy_rows_backward(
     # Gradient of cross_entropy_rows wrt logits: (softmax(logits) - onehot) / N,
     # row by row. logits [N, V] -> [N, V]. Each row is cross_entropy_grad
     # (softmax - onehot, which sums to 0) scaled by 1/N — the mean's factor — so
-    # every row still sums to 0 after scaling. Reads its args; allocates the
-    # result; raises on a length mismatch, empty batch, or out-of-range target —
-    # the same guards as the loss, so loss and gradient reject bad input
-    # symmetrically instead of one writing out of bounds.
+    # every row still sums to 0 after scaling. Reads its args; borrows each row
+    # as a Span (no per-row copy); allocates the result; raises on a length
+    # mismatch, empty batch, or out-of-range target — the same guards as the
+    # loss, so loss and gradient reject bad input symmetrically instead of one
+    # writing out of bounds.
     var n = logits.rows
     if len(targets) != n:
         raise Error(
@@ -369,10 +367,9 @@ def cross_entropy_rows_backward(
     var inv_n = 1.0 / Float64(n)
     var out = zeros_2d(n, logits.cols)
     for i in range(n):
-        var row = List[Float64]()
-        for j in range(logits.cols):
-            row.append(logits[i, j])
-        var g = cross_entropy_grad(row, targets[i])  # softmax - onehot
+        var g = cross_entropy_grad(
+            logits.row(i), targets[i]
+        )  # softmax - onehot
         for j in range(logits.cols):
             out[i, j] = g[j] * inv_n
     return out^
@@ -381,7 +378,7 @@ def cross_entropy_rows_backward(
 # --- argmax ---
 
 
-def argmax(values: List[Float64]) -> Int:
+def argmax(values: Span[Float64, _]) -> Int:
     # Index of the maximum value, first-wins on ties (strict >). The tie rule is
     # deliberate: greedy decoding must be deterministic, and two logits can
     # genuinely tie. Assumes a non-empty input.
