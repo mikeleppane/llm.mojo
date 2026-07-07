@@ -7,9 +7,8 @@
 # transpose-at-load concern, handled where the weights are read, never by bending
 # this convention.)
 #
-# The forward transposes the weight to [in, out] and reuses the tested `matmul`
-# rather than introducing a second matmul kernel, then broadcasts the bias row
-# across every position.
+# The forward transposes the weight to [in, out] and multiplies with the `@`
+# operator (x @ wt), then broadcasts the bias row across every position.
 
 from llm.nn.parameter import Parameter
 from llm.tensor.ops import transpose

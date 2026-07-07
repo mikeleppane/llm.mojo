@@ -8,9 +8,9 @@
 # [T_k, D] is the whole story. This is why the tests exercise T_q != T_k now,
 # before any cross-attention layer exists to need it.
 #
-# The pipeline reuses the tested tensor ops (matmul, transpose, scale, add,
-# softmax_rows) rather than open-coding a second matmul or softmax. The order is
-# load-bearing and pinned in the docstring below.
+# The pipeline reuses the tested tensor ops (the `@` matmul operator, transpose,
+# scale, add, softmax_rows) rather than open-coding a second matmul or softmax.
+# The order is load-bearing and pinned in the docstring below.
 
 from std.math import sqrt
 
