@@ -102,13 +102,15 @@ def test_row_sums_a_known_tensor() raises:
     assert_almost_equal(s1, 60.0, atol=1e-12)
 
 
-def test_row_view_sees_writes_through_the_tensor() raises:
-    # The view borrows self.data, so a write through the subscript is visible
-    # when the same element is read back through row() — proof it is a view, not
-    # a snapshot copy.
+def test_row_view_is_a_live_alias_not_a_copy() raises:
+    # Write THROUGH the borrowed view, then read the element back through the
+    # tensor. A snapshot copy would leave the tensor at 0.0; seeing 9.0 is the
+    # proof that row() aliases self.data — and that the view is writable, not a
+    # read-only preview. (Ordering matters: mutating first and reading the view
+    # after would also pass for a copy, so the write has to go through the view.)
     var x = zeros_2d(2, 3)
-    x[1, 2] = 9.0
-    assert_almost_equal(x.row(1)[2], 9.0, atol=1e-12)
+    x.row(1)[2] = 9.0
+    assert_almost_equal(x[1, 2], 9.0, atol=1e-12)
 
 
 def test_writable_shape_and_values() raises:

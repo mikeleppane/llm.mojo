@@ -9,23 +9,23 @@ from llm.tensor.ops import argmax
 
 
 def test_argmax_basic() raises:
-    var v = [0.1, 0.9, 0.3]
-    assert_equal(argmax(v), 1)
+    var logits = [0.1, 0.9, 0.3]
+    assert_equal(argmax(logits), 1)
 
 
 def test_argmax_tie_prefers_first() raises:
-    var v = [0.5, 2.0, 2.0, 1.0]
-    assert_equal(argmax(v), 1)
+    var logits = [0.5, 2.0, 2.0, 1.0]
+    assert_equal(argmax(logits), 1)
 
 
 def test_argmax_single_element() raises:
-    var v = [42.0]
-    assert_equal(argmax(v), 0)
+    var logits = [42.0]
+    assert_equal(argmax(logits), 0)
 
 
 def test_argmax_negative_values() raises:
-    var v = [-3.0, -1.0, -2.0]
-    assert_equal(argmax(v), 1)
+    var logits = [-3.0, -1.0, -2.0]
+    assert_equal(argmax(logits), 1)
 
 
 def main() raises:

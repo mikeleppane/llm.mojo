@@ -1,4 +1,7 @@
-# Tensor and vector operations built on Tensor2D and List[Float64].
+# Tensor and vector operations built on Tensor2D. Read-only vector inputs are
+# taken as borrowed `Span[Float64, _]` views — a Tensor2D row (via `.row()`) or a
+# List both coerce in, so a per-row copy is never needed on the hot path; owned
+# results are still returned as fresh `List[Float64]`.
 #
 # Everything a small LLM leans on before attention: elementwise add/scale, a
 # physical transpose, matmul in two loop orders (ijk clear, ikj cache-friendly)
