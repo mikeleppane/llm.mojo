@@ -47,6 +47,24 @@ struct Tensor2D(Copyable, Movable):
         for i in range(self.size()):
             self.data[i] = value
 
+    def __matmul__(self, other: Tensor2D) raises -> Tensor2D:
+        # Matrix multiply via the `@` operator: [M, K] @ [K, N] -> [M, N] in ikj
+        # loop order. The inner loop walks other[k, *] and result[i, *]
+        # contiguously along rows, which is cache-friendly and often several
+        # times faster than the clear ijk form on non-trivial sizes. Raises on a
+        # shape mismatch; allocates the result. (The teaching contrast, the plain
+        # ijk kernel, lives in ops.matmul.)
+        if self.cols != other.rows:
+            raise Error("matmul shape mismatch")
+        var result = zeros_2d(self.rows, other.cols)
+        for i in range(self.rows):
+            for k in range(self.cols):
+                # self[i, k] is constant across j; hoist it out of the inner loop.
+                var a_ik = self[i, k]
+                for j in range(other.cols):
+                    result[i, j] += a_ik * other[k, j]
+        return result^
+
 
 def zeros_2d(rows: Int, cols: Int) -> Tensor2D:
     # A rows x cols tensor of zeros. Allocates the flat buffer.

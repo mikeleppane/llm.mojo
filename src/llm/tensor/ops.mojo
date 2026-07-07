@@ -131,16 +131,14 @@ def matmul_ikj(a: Tensor2D, b: Tensor2D) raises -> Tensor2D:
     # Same math as matmul, ikj loop order: the inner loop walks b[k, *] and
     # out[i, *] contiguously along rows, which is cache-friendly and often
     # several times faster on non-trivial sizes. Raises on a shape mismatch.
-    if a.cols != b.rows:
-        raise Error("matmul shape mismatch")
-    var out = zeros_2d(a.rows, b.cols)
-    for i in range(a.rows):
-        for k in range(a.cols):
-            # a[i, k] is constant across j; hoist it out of the inner loop.
-            var a_ik = a[i, k]
-            for j in range(b.cols):
-                out[i, j] += a_ik * b[k, j]
-    return out^
+    #
+    # The kernel itself now lives on the tensor as the `@` operator, so this is a
+    # thin delegate — kept as a named entry point for the tests and benchmarks
+    # that call matmul_ikj directly and to sit beside the ijk matmul as its
+    # contrast. ops.mojo imports tensor2d.mojo, so the kernel can only live in one
+    # place; putting it on the tensor keeps `a @ b` self-contained and avoids an
+    # import cycle back into ops.
+    return a @ b
 
 
 def matvec(a: Tensor2D, x: List[Float64]) raises -> List[Float64]:
