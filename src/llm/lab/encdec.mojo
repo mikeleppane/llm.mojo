@@ -194,7 +194,7 @@ struct EncDec(Copyable, Movable):
         var t_tgt = len(tgt_in)
 
         # --- encoder ---
-        var src_tok_fwd = self.src_tok.forward_cached(src)
+        var src_tok_fwd = self.src_tok.forward_cached(src.copy())
         var src_pos_fwd = self.src_pos.forward_cached(position_ids(t_src))
         var x = add(src_tok_fwd.output, src_pos_fwd.output)  # [T_src, C]
         var enc_mask = no_mask(t_src, t_src)
@@ -203,11 +203,11 @@ struct EncDec(Copyable, Movable):
             var blk = self.encoder[i].forward_cached(x, enc_mask)
             x = blk.output.copy()
             enc_caches.append(blk.cache.copy())
-        var enc_ln_f_fwd = self.enc_ln_f.forward_cached(x)
+        var enc_ln_f_fwd = self.enc_ln_f.forward_cached(x^)
         var memory = enc_ln_f_fwd.output.copy()  # [T_src, C]
 
         # --- decoder ---
-        var tgt_tok_fwd = self.tgt_tok.forward_cached(tgt_in)
+        var tgt_tok_fwd = self.tgt_tok.forward_cached(tgt_in.copy())
         var tgt_pos_fwd = self.tgt_pos.forward_cached(position_ids(t_tgt))
         var y = add(tgt_tok_fwd.output, tgt_pos_fwd.output)  # [T_tgt, C]
         var self_mask = causal_mask(t_tgt)
@@ -219,8 +219,8 @@ struct EncDec(Copyable, Movable):
             )
             y = blk.output.copy()
             dec_caches.append(blk.cache.copy())
-        var dec_ln_f_fwd = self.dec_ln_f.forward_cached(y)
-        var head_fwd = self.head.forward_cached(dec_ln_f_fwd.output)
+        var dec_ln_f_fwd = self.dec_ln_f.forward_cached(y^)
+        var head_fwd = self.head.forward_cached(dec_ln_f_fwd.output.copy())
 
         var cache = EncDecCache(
             src_tok_fwd.cache.copy(),

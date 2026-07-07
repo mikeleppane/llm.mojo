@@ -178,15 +178,15 @@ struct TransformerBlock(Copyable, Movable):
         # computes. Reads self; allocates the intermediates, caches, and result;
         # mutates rng only in the training/p>0 branch; raises on a shape/config
         # mismatch or an out-of-range p. The cache is valid only for this call.
-        var ln1_fwd = self.ln1.forward_cached(x)
+        var ln1_fwd = self.ln1.forward_cached(x.copy())
         var attn_fwd = self.attn.forward_cached_train(
             ln1_fwd.output, mask, p, training, rng
         )
         var attn_drop = dropout_cached(attn_fwd.output, p, training, rng)
         var a = add(x, attn_drop.output)  # x + dropout(attn(ln1(x)))
 
-        var ln2_fwd = self.ln2.forward_cached(a)
-        var mlp_fwd = self.mlp.forward_cached(ln2_fwd.output)
+        var ln2_fwd = self.ln2.forward_cached(a.copy())
+        var mlp_fwd = self.mlp.forward_cached(ln2_fwd.output.copy())
         var mlp_drop = dropout_cached(mlp_fwd.output, p, training, rng)
         var out = add(a, mlp_drop.output)  # a + dropout(mlp(ln2(a)))
 

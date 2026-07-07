@@ -103,11 +103,11 @@ struct EncoderBlock(Copyable, Movable):
         # Same computation as forward, capturing each sublayer's cache. Reads
         # self; allocates the intermediates, caches, and result; raises on a
         # shape/config mismatch. The cache is valid only for this call.
-        var ln1_fwd = self.ln1.forward_cached(x)
+        var ln1_fwd = self.ln1.forward_cached(x.copy())
         var attn_fwd = self.attn.forward_cached(ln1_fwd.output, mask)
         var a = add(x, attn_fwd.output)  # [T, C]
-        var ln2_fwd = self.ln2.forward_cached(a)
-        var mlp_fwd = self.mlp.forward_cached(ln2_fwd.output)
+        var ln2_fwd = self.ln2.forward_cached(a.copy())
+        var mlp_fwd = self.mlp.forward_cached(ln2_fwd.output.copy())
         var out = add(a, mlp_fwd.output)  # [T, C]
         var cache = EncoderBlockCache(
             ln1_fwd.cache.copy(),
@@ -240,16 +240,16 @@ struct DecoderBlock(Copyable, Movable):
         # Same computation as forward, capturing each sublayer's cache. Reads
         # self; allocates the intermediates, caches, and result; raises on a
         # shape/config mismatch. The cache is valid only for this call.
-        var ln1_fwd = self.ln1.forward_cached(x)
+        var ln1_fwd = self.ln1.forward_cached(x.copy())
         var self_fwd = self.self_attn.forward_cached(ln1_fwd.output, self_mask)
         var a = add(x, self_fwd.output)  # [T_tgt, C]
-        var ln2_fwd = self.ln2.forward_cached(a)
+        var ln2_fwd = self.ln2.forward_cached(a.copy())
         var cross_fwd = self.cross_attn.forward_cached(
             ln2_fwd.output, memory, cross_mask
         )
         var b = add(a, cross_fwd.output)  # [T_tgt, C]
-        var ln3_fwd = self.ln3.forward_cached(b)
-        var mlp_fwd = self.mlp.forward_cached(ln3_fwd.output)
+        var ln3_fwd = self.ln3.forward_cached(b.copy())
+        var mlp_fwd = self.mlp.forward_cached(ln3_fwd.output.copy())
         var out = add(b, mlp_fwd.output)  # [T_tgt, C]
         var cache = DecoderBlockCache(
             ln1_fwd.cache.copy(),

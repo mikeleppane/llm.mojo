@@ -44,6 +44,14 @@ struct LayerNormForward(Copyable, Movable):
     var output: Tensor2D  # [N, C]
     var cache: LayerNormCache
 
+    def split(deinit self, mut cache_slot: LayerNormCache) -> Tensor2D:
+        # Consume this forward: the cache moves into the caller's slot and the
+        # output is returned. Lets an assembly site take both pieces by move
+        # instead of copying each out of a live struct (a field cannot be
+        # transferred with `^`).
+        cache_slot = self.cache^
+        return self.output^
+
 
 @fieldwise_init
 struct LayerNorm(Copyable, Movable):
@@ -108,12 +116,15 @@ struct LayerNorm(Copyable, Movable):
                 )
         return out^
 
-    def forward_cached(self, x: Tensor2D) raises -> LayerNormForward:
+    def forward_cached(self, var x: Tensor2D) raises -> LayerNormForward:
         # [N, C] -> LayerNormForward: the same normalization as forward, plus the
-        # cache backward needs (x and the per-row mean and rstd). Reads self;
-        # allocates the output and two per-row vectors; raises on a feature-count
-        # or bias-shape mismatch (same guards as forward). Uses biased variance
-        # (÷C) and eps inside the sqrt. The cache is valid only for this call.
+        # cache backward needs (x and the per-row mean and rstd). Takes x by value
+        # and MOVES it into the cache after reading it (no copy) — the caller
+        # hands over `x^` when x is dead or `x.copy()` when it still needs it.
+        # Reads self; allocates the output and two per-row vectors; raises on a
+        # feature-count or bias-shape mismatch (same guards as forward). Uses
+        # biased variance (÷C) and eps inside the sqrt. The cache is valid only
+        # for this call.
         var c = x.cols
         if c != self.weight.value.cols:
             raise Error(
@@ -154,7 +165,7 @@ struct LayerNorm(Copyable, Movable):
                 out[r, j] = (
                     normed * self.weight.value[0, j] + self.bias.value[0, j]
                 )
-        return LayerNormForward(out^, LayerNormCache(x.copy(), means^, rstds^))
+        return LayerNormForward(out^, LayerNormCache(x^, means^, rstds^))
 
     def backward(
         mut self, cache: LayerNormCache, d_out: Tensor2D

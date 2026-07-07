@@ -119,7 +119,7 @@ def test_d_x_matches_finite_difference() raises:
     var mlp = build_mlp(w[0], w[1], w[2], w[3])
     var x = sample_input()
     var cot = cotangent()
-    var fwd = mlp.forward_cached(x)
+    var fwd = mlp.forward_cached(x.copy())
     var d_x = mlp.backward(fwd.cache, cot)
 
     var h = 1e-5
@@ -144,7 +144,7 @@ def test_parameter_grads_match_finite_difference() raises:
     mlp.up.bias.zero_grad()
     mlp.down.weight.zero_grad()
     mlp.down.bias.zero_grad()
-    var fwd = mlp.forward_cached(x)
+    var fwd = mlp.forward_cached(x.copy())
     _ = mlp.backward(fwd.cache, cot)
 
     # up weight [6, 4]

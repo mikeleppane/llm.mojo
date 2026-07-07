@@ -169,9 +169,11 @@ struct CrossMultiHeadAttention(Copyable, Movable):
         self._check_config(c)
         var d_head = c // self.n_heads
 
-        var q_fwd = self.q.forward_cached(x)  # output [T_q, C], cache = x
+        var q_fwd = self.q.forward_cached(
+            x.copy()
+        )  # output [T_q, C], cache = x
         var kv_fwd = self.kv.forward_cached(
-            memory
+            memory.copy()
         )  # output [T_k, 2C], cache = memory
         var k_all = slice_cols(kv_fwd.output, 0, c)  # [T_k, C]
         var v_all = slice_cols(kv_fwd.output, c, 2 * c)  # [T_k, C]
@@ -188,7 +190,7 @@ struct CrossMultiHeadAttention(Copyable, Movable):
             head_outputs.append(head.output.copy())  # [T_q, D]
             head_caches.append(head.cache.copy())
         var concatenated = concat_cols(head_outputs)  # [T_q, C]
-        var proj_fwd = self.proj.forward_cached(concatenated)  # [T_q, C]
+        var proj_fwd = self.proj.forward_cached(concatenated^)  # [T_q, C]
 
         var cache = CrossMHACache(
             q_fwd.cache.copy(),

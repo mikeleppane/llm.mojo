@@ -38,6 +38,16 @@ struct LinearForward(Copyable, Movable):
     var output: Tensor2D  # [N, out]
     var cache: LinearCache
 
+    def split(deinit self, mut cache_slot: LinearCache) -> Tensor2D:
+        # Consume this forward: the cache moves into the caller's slot and the
+        # output is returned. An assembly site that needs both pieces (the output
+        # to feed the next stage, the cache to stash for backward) takes them by
+        # move rather than copying each field out of a live struct — a struct's
+        # field cannot be transferred with `^`, so without this the caller would
+        # deep-copy the whole [N, out] output and the cached [N, in] input.
+        cache_slot = self.cache^
+        return self.output^
+
 
 @fieldwise_init
 struct Linear(Copyable, Movable):
@@ -98,16 +108,18 @@ struct Linear(Copyable, Movable):
                 out[r, c] = out[r, c] + self.bias.value[0, c]
         return out^
 
-    def forward_cached(self, x: Tensor2D) raises -> LinearForward:
+    def forward_cached(self, var x: Tensor2D) raises -> LinearForward:
         # [N, in] -> LinearForward: the same output as forward(x), plus the cache
         # backward needs. That cache is just x — dW = d_out^T @ x and
         # dx = d_out @ W, neither of which touches the output — so nothing else is
-        # stored. Reads self; allocates the output and a cached copy of x; raises
+        # stored. Takes x by value and MOVES it into the cache (no copy): the
+        # caller decides at its call site whether to hand over a dead value (`x^`)
+        # or keep its own (`x.copy()`). Reads self; allocates the output; raises
         # on the same feature-count mismatch forward does. The cache is valid only
         # for this forward call: pairing it with a different call's d_out computes
         # a gradient for the wrong input.
         var output = self.forward(x)
-        return LinearForward(output^, LinearCache(x.copy()))
+        return LinearForward(output^, LinearCache(x^))
 
     def backward(
         mut self, cache: LinearCache, d_out: Tensor2D

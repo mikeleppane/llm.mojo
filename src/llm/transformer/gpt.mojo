@@ -207,7 +207,7 @@ struct GPT(Copyable, Movable):
         self._check_length(t)
         var p = self.cfg.dropout
 
-        var wte_fwd = self.wte.forward_cached(ids)
+        var wte_fwd = self.wte.forward_cached(ids.copy())
         var wpe_fwd = self.wpe.forward_cached(position_ids(t))
         var emb = add(wte_fwd.output, wpe_fwd.output)  # [T, C]
         var emb_drop = dropout_cached(
@@ -222,7 +222,7 @@ struct GPT(Copyable, Movable):
             x = blk.output.copy()
             block_caches.append(blk.cache.copy())
 
-        var ln_f_fwd = self.ln_f.forward_cached(x)  # output h [T, C]
+        var ln_f_fwd = self.ln_f.forward_cached(x^)  # output h [T, C]
         var h = ln_f_fwd.output.copy()
         var logits = h @ transpose(self.wte.table.value)  # [T, V]
 

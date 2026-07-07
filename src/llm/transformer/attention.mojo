@@ -462,7 +462,9 @@ struct MultiHeadAttention(Copyable, Movable):
             )
         var d_head = c // self.n_heads  # per-head width D = C / H
 
-        var qkv_fwd = self.qkv.forward_cached(x)  # output [T, 3C], cache = x
+        var qkv_fwd = self.qkv.forward_cached(
+            x.copy()
+        )  # output [T, 3C], cache = x
         var q_all = slice_cols(qkv_fwd.output, 0, c)  # [T, C]
         var k_all = slice_cols(qkv_fwd.output, c, 2 * c)  # [T, C]
         var v_all = slice_cols(qkv_fwd.output, 2 * c, 3 * c)  # [T, C]
@@ -479,7 +481,7 @@ struct MultiHeadAttention(Copyable, Movable):
             head_outputs.append(head.output.copy())  # [T, D]
             head_caches.append(head.cache.copy())
         var concatenated = concat_cols(head_outputs)  # [T, C]
-        var proj_fwd = self.proj.forward_cached(concatenated)  # [T, C]
+        var proj_fwd = self.proj.forward_cached(concatenated^)  # [T, C]
 
         var cache = MHACache(
             qkv_fwd.cache.copy(), head_caches^, proj_fwd.cache.copy()
@@ -586,7 +588,9 @@ struct MultiHeadAttention(Copyable, Movable):
             )
         var d_head = c // self.n_heads  # per-head width D = C / H
 
-        var qkv_fwd = self.qkv.forward_cached(x)  # output [T, 3C], cache = x
+        var qkv_fwd = self.qkv.forward_cached(
+            x.copy()
+        )  # output [T, 3C], cache = x
         var q_all = slice_cols(qkv_fwd.output, 0, c)  # [T, C]
         var k_all = slice_cols(qkv_fwd.output, c, 2 * c)  # [T, C]
         var v_all = slice_cols(qkv_fwd.output, 2 * c, 3 * c)  # [T, C]
@@ -605,7 +609,7 @@ struct MultiHeadAttention(Copyable, Movable):
             head_outputs.append(head.output.copy())  # [T, D]
             head_caches.append(head.cache.copy())
         var concatenated = concat_cols(head_outputs)  # [T, C]
-        var proj_fwd = self.proj.forward_cached(concatenated)  # [T, C]
+        var proj_fwd = self.proj.forward_cached(concatenated^)  # [T, C]
 
         var cache = MHATrainCache(
             qkv_fwd.cache.copy(), head_caches^, proj_fwd.cache.copy()

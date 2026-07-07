@@ -27,6 +27,14 @@ struct EmbeddingForward(Copyable, Movable):
     var output: Tensor2D  # [N, C]
     var cache: EmbeddingCache
 
+    def split(deinit self, mut cache_slot: EmbeddingCache) -> Tensor2D:
+        # Consume this forward: the cache moves into the caller's slot and the
+        # output is returned. Lets an assembly site take both pieces by move
+        # instead of copying each out of a live struct (a field cannot be
+        # transferred with `^`).
+        cache_slot = self.cache^
+        return self.output^
+
 
 @fieldwise_init
 struct Embedding(Copyable, Movable):
@@ -76,13 +84,15 @@ struct Embedding(Copyable, Movable):
                 out[i, j] = self.table.value[idx, j]
         return out^
 
-    def forward_cached(self, ids: List[Int]) raises -> EmbeddingForward:
+    def forward_cached(self, var ids: List[Int]) raises -> EmbeddingForward:
         # [N] ids -> EmbeddingForward: the same gathered rows as forward, plus the
-        # ids cached for backward. Reads self; allocates the output and a copy of
-        # the ids; raises on any out-of-range id (via forward). The cache is valid
-        # only for this call.
+        # ids cached for backward. Takes ids by value and MOVES them into the
+        # cache after the gather (no copy) — the caller hands over `ids^` when the
+        # list is dead or `ids.copy()` when it still needs it. Reads self;
+        # allocates the output; raises on any out-of-range id (via forward). The
+        # cache is valid only for this call.
         var output = self.forward(ids)
-        return EmbeddingForward(output^, EmbeddingCache(ids.copy()))
+        return EmbeddingForward(output^, EmbeddingCache(ids^))
 
     def backward(mut self, cache: EmbeddingCache, d_out: Tensor2D) raises:
         # Reverse of the gather output[i, :] = table[ids[i], :]. The forward copies
