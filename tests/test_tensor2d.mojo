@@ -31,6 +31,15 @@ def test_set_get() raises:
     assert_almost_equal(x[1, 2], 7.5, atol=1e-12)
 
 
+def test_subscript_mutates_in_place() raises:
+    # The ref-returning subscript serves read, write, and += through one method:
+    # `+=` accumulates into the buffer directly, no separate setter.
+    var x = zeros_2d(2, 3)
+    x[0, 1] = 5.0
+    x[0, 1] += 2.0
+    assert_almost_equal(x[0, 1], 7.0, atol=1e-12)
+
+
 def test_offset() raises:
     var x = zeros_2d(2, 3)
     assert_equal(x.offset(0, 0), 0)

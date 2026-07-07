@@ -6,8 +6,10 @@
 #     offset(i, j, k) = (i * d1 + j) * d2 + k
 #
 # Pinning that offset arithmetic with a test is how you catch a transposed
-# stride before it becomes an attention bug. Access mirrors Tensor2D: unchecked
-# `[i, j, k]` on the hot path, checked `.at(i, j, k)` (raising) for tests.
+# stride before it becomes an attention bug. Access mirrors Tensor2D: one
+# ref-returning `[i, j, k]` on the hot path — a reference into the flat buffer
+# (its origin), so the same subscript reads, writes, and does `+=` with no
+# separate setter — and checked `.at(i, j, k)` (raising) for tests.
 
 from std.collections import List
 
@@ -26,13 +28,12 @@ struct Tensor3D(Copyable, Movable):
         # Nested row-major flat index: (i*d1 + j)*d2 + k. No bounds check.
         return (i * self.d1 + j) * self.d2 + k
 
-    def __getitem__(self, i: Int, j: Int, k: Int) -> Float64:
-        # Unchecked read (hot path).
+    def __getitem__(ref self, i: Int, j: Int, k: Int) -> ref[self.data] Float64:
+        # Unchecked ref access (hot path): one method serves read, write, and +=.
+        # The returned reference borrows self.data as its origin, so assigning or
+        # accumulating through the subscript mutates the buffer directly — no
+        # separate setter. (Origin must name the field, not self.)
         return self.data[self.offset(i, j, k)]
-
-    def __setitem__(mut self, i: Int, j: Int, k: Int, value: Float64):
-        # Unchecked write (hot path).
-        self.data[self.offset(i, j, k)] = value
 
     def at(self, i: Int, j: Int, k: Int) raises -> Float64:
         # Bounds-checked read. Raises if any index is outside its dimension.

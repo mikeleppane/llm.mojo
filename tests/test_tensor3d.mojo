@@ -30,6 +30,15 @@ def test_set_get() raises:
     assert_equal(t.size(), 24)
 
 
+def test_subscript_mutates_in_place() raises:
+    # The ref-returning subscript serves read, write, and += through one method:
+    # `+=` accumulates into the buffer directly, no separate setter.
+    var t = zeros_3d(2, 3, 4)
+    t[1, 2, 3] = 5.0
+    t[1, 2, 3] += 2.0
+    assert_almost_equal(t[1, 2, 3], 7.0, atol=1e-12)
+
+
 def test_at_out_of_range_raises() raises:
     var t = zeros_3d(2, 2, 2)
     with assert_raises(contains="out of range"):

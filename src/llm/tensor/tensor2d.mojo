@@ -5,9 +5,13 @@
 # is a single `List[Float64]` in row-major order: element (row, col) lives at
 # `row * cols + col`.
 #
-# Access comes in two flavors on purpose. `[i, j]` (via __getitem__/__setitem__)
-# is unchecked and cheap — the hot path. `.at(i, j)` bounds-checks and therefore
-# raises — the debugging/test path. Fast by default, checked on demand.
+# Access comes in two flavors on purpose. `[i, j]` (one ref-returning
+# __getitem__) is unchecked and cheap — the hot path. It hands back a *reference*
+# into the flat buffer, tagged with that buffer as its origin, so the single
+# subscript serves reads, writes (`t[i, j] = v`), and in-place updates
+# (`t[i, j] += v`) alike — no separate setter to keep in sync. `.at(i, j)`
+# bounds-checks and therefore raises — the debugging/test path. Fast by default,
+# checked on demand.
 
 from std.collections import List
 
@@ -25,13 +29,12 @@ struct Tensor2D(Copyable, Movable):
         # Row-major flat index. No bounds check — callers that need one use at().
         return row * self.cols + col
 
-    def __getitem__(self, row: Int, col: Int) -> Float64:
-        # Unchecked read (hot path).
+    def __getitem__(ref self, row: Int, col: Int) -> ref[self.data] Float64:
+        # Unchecked ref access (hot path): one method serves read, write, and +=.
+        # The returned reference borrows self.data as its origin, so assigning or
+        # accumulating through the subscript mutates the buffer directly — no
+        # separate setter. (Origin must name the field, not self.)
         return self.data[self.offset(row, col)]
-
-    def __setitem__(mut self, row: Int, col: Int, value: Float64):
-        # Unchecked write (hot path).
-        self.data[self.offset(row, col)] = value
 
     def at(self, row: Int, col: Int) raises -> Float64:
         # Bounds-checked read. Raises if (row, col) is outside the shape.
