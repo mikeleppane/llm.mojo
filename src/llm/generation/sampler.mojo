@@ -263,7 +263,7 @@ struct SamplerConfig(Copyable, Movable):
 
 
 def sample_next(
-    logits: List[Float64], cfg: SamplerConfig, mut rng: Rng
+    logits: Span[Float64, _], cfg: SamplerConfig, mut rng: Rng
 ) raises -> Int:
     # Turn one logit row [V] into the next token id under the policy `cfg`. This is
     # the SINGLE decoding entry point. Reads logits; allocates the intermediate
