@@ -66,8 +66,8 @@ struct Tensor3D(Copyable, Movable, Writable):
 
 
 def zeros_3d(d0: Int, d1: Int, d2: Int) -> Tensor3D:
-    # A d0 x d1 x d2 tensor of zeros. Allocates the flat buffer.
-    var data = List[Float64]()
-    for _ in range(d0 * d1 * d2):
-        data.append(0.0)
+    # A d0 x d1 x d2 tensor of zeros. Allocates the flat buffer in one shot:
+    # length= sizes it and fill= zeros it, no append loop to grow it element by
+    # element (which would reallocate as it outgrows its capacity).
+    var data = List[Float64](length=d0 * d1 * d2, fill=0.0)
     return Tensor3D(d0, d1, d2, data^)

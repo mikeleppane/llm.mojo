@@ -147,7 +147,7 @@ def matvec(a: Tensor2D, x: List[Float64]) raises -> List[Float64]:
     # a shape mismatch; allocates the result.
     if a.cols != len(x):
         raise Error("matvec shape mismatch")
-    var out = List[Float64]()
+    var out = List[Float64](capacity=a.rows)  # one row entry per output
     for i in range(a.rows):
         var acc = 0.0
         for k in range(a.cols):
@@ -164,7 +164,9 @@ def softmax_row(input: List[Float64]) -> List[Float64]:
     # exponentiating so the largest exponent is exp(0) = 1 and nothing overflows.
     # An empty input yields an empty output. Allocates the result.
     var n = len(input)
-    var out = List[Float64]()
+    var out = List[Float64](
+        capacity=n
+    )  # one exp() per input, reserved up front
     if n == 0:
         return out^
 
@@ -253,7 +255,9 @@ def softmax_row_temperature(
     if temperature <= 0.0:
         raise Error("temperature must be positive")
     var n = len(input)
-    var out = List[Float64]()
+    var out = List[Float64](
+        capacity=n
+    )  # one exp() per input, reserved up front
     if n == 0:
         return out^
 

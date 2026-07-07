@@ -83,10 +83,10 @@ struct Tensor2D(Copyable, Movable, Writable):
 
 
 def zeros_2d(rows: Int, cols: Int) -> Tensor2D:
-    # A rows x cols tensor of zeros. Allocates the flat buffer.
-    var data = List[Float64]()
-    for _ in range(rows * cols):
-        data.append(0.0)
+    # A rows x cols tensor of zeros. Allocates the flat buffer in one shot:
+    # length= sizes it and fill= zeros it, no append loop to grow it element by
+    # element (which would reallocate as it outgrows its capacity).
+    var data = List[Float64](length=rows * cols, fill=0.0)
     return Tensor2D(rows, cols, data^)
 
 
