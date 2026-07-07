@@ -180,7 +180,7 @@ struct TransformerBlock(Copyable, Movable):
         # mismatch or an out-of-range p. The cache is valid only for this call.
         var ln1_fwd = self.ln1.forward_cached(x.copy())
         var attn_fwd = self.attn.forward_cached_train(
-            ln1_fwd.output, mask, p, training, rng
+            ln1_fwd.output.copy(), mask, p, training, rng
         )
         var attn_drop = dropout_cached(attn_fwd.output, p, training, rng)
         var a = add(x, attn_drop.output)  # x + dropout(attn(ln1(x)))

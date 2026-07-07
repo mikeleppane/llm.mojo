@@ -244,7 +244,7 @@ def test_mha_backward_d_x() raises:
     var x = mha_input()
     var cot = mha_cotangent()
     var mask = causal_mask(4)
-    var fwd = mha.forward_cached(x, mask)
+    var fwd = mha.forward_cached(x.copy(), mask)
     var d_x = mha.backward(fwd.cache, cot)
 
     var h = 1e-5
@@ -271,7 +271,7 @@ def test_mha_backward_parameter_grads() raises:
     mha.qkv.bias.zero_grad()
     mha.proj.weight.zero_grad()
     mha.proj.bias.zero_grad()
-    var fwd = mha.forward_cached(x, mask)
+    var fwd = mha.forward_cached(x.copy(), mask)
     _ = mha.backward(fwd.cache, cot)
 
     var h = 1e-5

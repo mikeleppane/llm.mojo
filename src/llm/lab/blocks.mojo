@@ -104,7 +104,7 @@ struct EncoderBlock(Copyable, Movable):
         # self; allocates the intermediates, caches, and result; raises on a
         # shape/config mismatch. The cache is valid only for this call.
         var ln1_fwd = self.ln1.forward_cached(x.copy())
-        var attn_fwd = self.attn.forward_cached(ln1_fwd.output, mask)
+        var attn_fwd = self.attn.forward_cached(ln1_fwd.output.copy(), mask)
         var a = add(x, attn_fwd.output)  # [T, C]
         var ln2_fwd = self.ln2.forward_cached(a.copy())
         var mlp_fwd = self.mlp.forward_cached(ln2_fwd.output.copy())
@@ -241,7 +241,9 @@ struct DecoderBlock(Copyable, Movable):
         # self; allocates the intermediates, caches, and result; raises on a
         # shape/config mismatch. The cache is valid only for this call.
         var ln1_fwd = self.ln1.forward_cached(x.copy())
-        var self_fwd = self.self_attn.forward_cached(ln1_fwd.output, self_mask)
+        var self_fwd = self.self_attn.forward_cached(
+            ln1_fwd.output.copy(), self_mask
+        )
         var a = add(x, self_fwd.output)  # [T_tgt, C]
         var ln2_fwd = self.ln2.forward_cached(a.copy())
         var cross_fwd = self.cross_attn.forward_cached(
