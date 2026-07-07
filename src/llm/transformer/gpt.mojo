@@ -41,7 +41,7 @@ from llm.nn.dropout import dropout_backward, dropout_cached
 from llm.nn.embedding import Embedding, EmbeddingCache
 from llm.nn.layernorm import LayerNorm, LayerNormCache
 from llm.nn.optim import adamw_update, sgd_update
-from llm.tensor.ops import add, cross_entropy_rows, matmul, transpose
+from llm.tensor.ops import add, cross_entropy_rows, transpose
 from llm.tensor.tensor2d import Tensor2D, zeros_2d
 from llm.transformer.block import (
     _grad_scale,
@@ -182,7 +182,7 @@ struct GPT(Copyable, Movable):
             x = self.blocks[i].forward(x, mask)
         var h = self.ln_f.forward(x)  # [T, C]
         # Tied head: logits = h @ wte.table^T. transpose(table) is [C, V].
-        return matmul(h, transpose(self.wte.table.value))  # [T, V]
+        return h @ transpose(self.wte.table.value)  # [T, V]
 
     def loss(self, ids: List[Int], targets: List[Int]) raises -> Float64:
         # Mean cross-entropy of the inference-path logits against the targets:
@@ -224,7 +224,7 @@ struct GPT(Copyable, Movable):
 
         var ln_f_fwd = self.ln_f.forward_cached(x)  # output h [T, C]
         var h = ln_f_fwd.output.copy()
-        var logits = matmul(h, transpose(self.wte.table.value))  # [T, V]
+        var logits = h @ transpose(self.wte.table.value)  # [T, V]
 
         var cache = GPTCache(
             wte_fwd.cache.copy(),
@@ -269,8 +269,8 @@ struct GPT(Copyable, Movable):
         var c = self.wte.table.value.cols
 
         # Head path into a fresh [V, C] delta; d_h flows on down the stack.
-        var d_table = matmul(transpose(d_logits), cache.h)  # [V, C]
-        var d_h = matmul(d_logits, self.wte.table.value)  # [T, C]
+        var d_table = transpose(d_logits) @ cache.h  # [V, C]
+        var d_h = d_logits @ self.wte.table.value  # [T, C]
 
         # ln_f and the block stack.
         var d_x = self.ln_f.backward(cache.ln_f_cache, d_h)  # [T, C]

@@ -12,7 +12,7 @@
 # across every position.
 
 from llm.nn.parameter import Parameter
-from llm.tensor.ops import matmul, transpose
+from llm.tensor.ops import transpose
 from llm.tensor.tensor2d import Tensor2D, zeros_2d
 from llm.utils.random import Rng
 
@@ -93,7 +93,7 @@ struct Linear(Copyable, Movable):
                 + "]"
             )
         var wt = transpose(self.weight.value)  # [out, in] -> [in, out]
-        var out = matmul(x, wt)  # [N, in] @ [in, out] -> [N, out]
+        var out = x @ wt  # [N, in] @ [in, out] -> [N, out]
         for r in range(out.rows):
             for c in range(out.cols):
                 out[r, c] = out[r, c] + self.bias.value[0, c]
@@ -149,7 +149,7 @@ struct Linear(Copyable, Movable):
                 + " must equal in_features "
                 + String(in_features)
             )
-        var d_weight = matmul(transpose(d_out), cache.x)  # [out, in]
+        var d_weight = transpose(d_out) @ cache.x  # [out, in]
         for o in range(out_features):
             for i in range(in_features):
                 self.weight.grad[o, i] = self.weight.grad[o, i] + d_weight[o, i]
@@ -158,6 +158,4 @@ struct Linear(Copyable, Movable):
             for n in range(d_out.rows):
                 col_sum += d_out[n, o]
             self.bias.grad[0, o] = self.bias.grad[0, o] + col_sum
-        return matmul(
-            d_out, self.weight.value
-        )  # [N, out] @ [out, in] -> [N, in]
+        return d_out @ self.weight.value  # [N, out] @ [out, in] -> [N, in]

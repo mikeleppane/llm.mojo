@@ -19,7 +19,6 @@ from llm.nn.linear import Linear, LinearCache
 from llm.tensor.ops import (
     add,
     concat_cols,
-    matmul,
     scale,
     slice_cols,
     softmax_rows,
@@ -94,11 +93,11 @@ def scaled_dot_product_attention(
             + "]"
         )
 
-    var scores = matmul(q, transpose(k))  # [T_q, T_k]
+    var scores = q @ transpose(k)  # [T_q, T_k]
     var scaled = scale(scores, 1.0 / sqrt(Float64(d)))  # 1/sqrt(d_head)
     var biased = add(scaled, mask)  # additive mask, after the scale
     var weights = softmax_rows(biased)  # [T_q, T_k], rows sum to 1
-    var output = matmul(weights, v)  # [T_q, D_v]
+    var output = weights @ v  # [T_q, D_v]
     return AttentionResult(output^, weights^)
 
 
@@ -181,11 +180,11 @@ def scaled_dot_product_attention_backward(
             "scaled_dot_product_attention_backward: v/k length mismatch"
         )
     var s = 1.0 / sqrt(Float64(d))
-    var d_v = matmul(transpose(cache.weights), d_out)  # [T_k, D_v]
-    var d_w = matmul(d_out, transpose(cache.v))  # [T_q, T_k]
+    var d_v = transpose(cache.weights) @ d_out  # [T_k, D_v]
+    var d_w = d_out @ transpose(cache.v)  # [T_q, T_k]
     var d_scores = softmax_rows_backward(cache.weights, d_w)  # [T_q, T_k]
-    var d_q = scale(matmul(d_scores, cache.k), s)  # [T_q, D]
-    var d_k = scale(matmul(transpose(d_scores), cache.q), s)  # [T_k, D]
+    var d_q = scale(d_scores @ cache.k, s)  # [T_q, D]
+    var d_k = scale(transpose(d_scores) @ cache.q, s)  # [T_k, D]
     return AttentionGrads(d_q^, d_k^, d_v^)
 
 
@@ -248,7 +247,7 @@ def scaled_dot_product_attention_train(
     # can fold the throwaway matmul away. Only `base.weights` is used.
     var base = scaled_dot_product_attention(q, k, v, mask)  # base.weights = W
     var drop = dropout_cached(base.weights, p, training, rng)  # dropped_W, mask
-    var output = matmul(drop.output, v)  # dropped_W @ v -> [T_q, D_v]
+    var output = drop.output @ v  # dropped_W @ v -> [T_q, D_v]
     var cache = AttentionTrainCache(
         q.copy(),
         k.copy(),
@@ -289,15 +288,15 @@ def scaled_dot_product_attention_train_backward(
     var dropped_w = dropout_backward(
         cache.drop_mask, cache.inv_keep, cache.weights
     )  # [T_q, T_k]
-    var d_v = matmul(transpose(dropped_w), d_out)  # [T_k, D_v]
-    var d_dropped_w = matmul(d_out, transpose(cache.v))  # [T_q, T_k]
+    var d_v = transpose(dropped_w) @ d_out  # [T_k, D_v]
+    var d_dropped_w = d_out @ transpose(cache.v)  # [T_q, T_k]
     var d_w = dropout_backward(
         cache.drop_mask, cache.inv_keep, d_dropped_w
     )  # [T_q, T_k]
     var d_scores = softmax_rows_backward(cache.weights, d_w)  # PRE-dropout W
     var s = 1.0 / sqrt(Float64(d))
-    var d_q = scale(matmul(d_scores, cache.k), s)  # [T_q, D]
-    var d_k = scale(matmul(transpose(d_scores), cache.q), s)  # [T_k, D]
+    var d_q = scale(d_scores @ cache.k, s)  # [T_q, D]
+    var d_k = scale(transpose(d_scores) @ cache.q, s)  # [T_k, D]
     return AttentionGrads(d_q^, d_k^, d_v^)
 
 
