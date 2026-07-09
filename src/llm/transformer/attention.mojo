@@ -337,6 +337,13 @@ struct MHAForward(Copyable, Movable):
     var output: Tensor2D  # [T, C]
     var cache: MHACache
 
+    def split(deinit self, mut cache_slot: MHACache) -> Tensor2D:
+        # Consume this forward: the cache moves into the caller's slot and the
+        # output is returned. Lets a block move the (large) attention cache into
+        # its own cache instead of deep-copying it out of a live struct.
+        cache_slot = self.cache^
+        return self.output^
+
 
 @fieldwise_init
 struct MHATrainCache(Copyable, Movable):

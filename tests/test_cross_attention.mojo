@@ -363,7 +363,7 @@ def test_d_x_matches_finite_difference() raises:
     var x = ca_x()
     var mem = ca_mem()
     var cot = cotangent()
-    var fwd = layer.forward_cached(x, mem, no_mask(3, 4))
+    var fwd = layer.forward_cached(x.copy(), mem.copy(), no_mask(3, 4))
     var grads = layer.backward(fwd.cache, cot)
 
     var h = 1e-5
@@ -386,7 +386,7 @@ def test_d_memory_matches_finite_difference() raises:
     var x = ca_x()
     var mem = ca_mem()
     var cot = cotangent()
-    var fwd = layer.forward_cached(x, mem, no_mask(3, 4))
+    var fwd = layer.forward_cached(x.copy(), mem.copy(), no_mask(3, 4))
     var grads = layer.backward(fwd.cache, cot)
 
     var h = 1e-5
@@ -429,7 +429,7 @@ def test_parameter_grads_match_finite_difference() raises:
     var mem = ca_mem()
     var cot = cotangent()
     layer.zero_grad()
-    var fwd = layer.forward_cached(x, mem, no_mask(3, 4))
+    var fwd = layer.forward_cached(x.copy(), mem.copy(), no_mask(3, 4))
     _ = layer.backward(fwd.cache, cot)
 
     # which: 0=q_w, 1=q_b, 2=kv_w, 3=kv_b, 4=proj_w, 5=proj_b
@@ -458,7 +458,7 @@ def test_backward_accumulates_exactly() raises:
     var mem = ca_mem()
     var cot = cotangent()
     layer.zero_grad()
-    var fwd = layer.forward_cached(x, mem, no_mask(3, 4))
+    var fwd = layer.forward_cached(x.copy(), mem.copy(), no_mask(3, 4))
     _ = layer.backward(fwd.cache, cot)
     var qw1 = layer.q.weight.grad.copy()
     var kvw1 = layer.kv.weight.grad.copy()
