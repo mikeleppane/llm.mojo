@@ -263,12 +263,13 @@ struct SamplerConfig(Copyable, Movable):
 
 
 def sample_next(
-    logits: List[Float64], cfg: SamplerConfig, mut rng: Rng
+    logits: Span[Float64, _], cfg: SamplerConfig, mut rng: Rng
 ) raises -> Int:
     # Turn one logit row [V] into the next token id under the policy `cfg`. This is
-    # the SINGLE decoding entry point. Reads logits; allocates the intermediate
-    # distributions; raises on an invalid config or (in the sampled path) a
-    # degenerate distribution.
+    # the SINGLE decoding entry point. `logits` is a borrowed `Span` view — the
+    # caller passes a Tensor2D row directly (no copy). Reads logits; allocates the
+    # intermediate distributions; raises on an invalid config or (in the sampled
+    # path) a degenerate distribution.
     #
     # rng-draw count — the invariant the tests pin:
     #   * greedy (temperature == 0.0): ZERO draws. It is pure argmax, so switching

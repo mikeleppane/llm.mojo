@@ -36,10 +36,15 @@ from llm.lab.params import (
     sgd_mlp,
 )
 from llm.nn.layernorm import LayerNorm, LayerNormCache
+from llm.nn.linear import LinearCache
 from llm.nn.mlp import MLP, MLPCache
 from llm.tensor.ops import add
-from llm.tensor.tensor2d import Tensor2D
-from llm.transformer.attention import MHACache, MultiHeadAttention
+from llm.tensor.tensor2d import Tensor2D, zeros_2d
+from llm.transformer.attention import (
+    AttentionCache,
+    MHACache,
+    MultiHeadAttention,
+)
 from llm.utils.random import Rng
 
 
@@ -64,6 +69,12 @@ struct EncoderBlockForward(Copyable, Movable):
     # forward_cached's output plus the cache its backward consumes.
     var output: Tensor2D  # [T, C]
     var cache: EncoderBlockCache
+
+    def take_cache(deinit self) -> EncoderBlockCache:
+        # Consume this forward and hand back just the (large) cache, dropping the
+        # output. The encoder loop reads the block output, passing it on to the next block,
+        # then moves this whole cache into its list instead of deep-copying it.
+        return self.cache^
 
 
 @fieldwise_init
@@ -103,17 +114,41 @@ struct EncoderBlock(Copyable, Movable):
         # Same computation as forward, capturing each sublayer's cache. Reads
         # self; allocates the intermediates, caches, and result; raises on a
         # shape/config mismatch. The cache is valid only for this call.
-        var ln1_fwd = self.ln1.forward_cached(x)
-        var attn_fwd = self.attn.forward_cached(ln1_fwd.output, mask)
-        var a = add(x, attn_fwd.output)  # [T, C]
-        var ln2_fwd = self.ln2.forward_cached(a)
-        var mlp_fwd = self.mlp.forward_cached(ln2_fwd.output)
-        var out = add(a, mlp_fwd.output)  # [T, C]
+        # Each sublayer forward is split into (output, cache): the output moves
+        # into the next sublayer, the cache moves into the block cache. x and a are
+        # residual streams, still needed at their `add`s, so ln1/ln2 copy them.
+        var ln1_fwd = self.ln1.forward_cached(
+            x.copy()
+        )  # x is the residual, kept
+        var ln1_cache = LayerNormCache(
+            zeros_2d(0, 0), List[Float64](), List[Float64]()
+        )  # placeholder, replaced by the move
+        var ln1_out = ln1_fwd^.split(ln1_cache)  # cache -> ln1_cache
+        var attn_fwd = self.attn.forward_cached(ln1_out^, mask)
+        var attn_cache = MHACache(
+            LinearCache(zeros_2d(0, 0)),
+            List[AttentionCache](),
+            LinearCache(zeros_2d(0, 0)),
+        )  # placeholder, replaced by the move
+        var attn_out = attn_fwd^.split(attn_cache)  # cache -> attn_cache
+        var a = add(x, attn_out)  # [T, C]
+        var ln2_fwd = self.ln2.forward_cached(
+            a.copy()
+        )  # a is the residual, kept
+        var ln2_cache = LayerNormCache(
+            zeros_2d(0, 0), List[Float64](), List[Float64]()
+        )  # placeholder, replaced by the move
+        var ln2_out = ln2_fwd^.split(ln2_cache)  # cache -> ln2_cache
+        var mlp_fwd = self.mlp.forward_cached(ln2_out^)
+        var mlp_cache = MLPCache(
+            LinearCache(zeros_2d(0, 0)),
+            zeros_2d(0, 0),
+            LinearCache(zeros_2d(0, 0)),
+        )  # placeholder, replaced by the move
+        var mlp_out = mlp_fwd^.split(mlp_cache)  # cache -> mlp_cache
+        var out = add(a, mlp_out)  # [T, C]
         var cache = EncoderBlockCache(
-            ln1_fwd.cache.copy(),
-            attn_fwd.cache.copy(),
-            ln2_fwd.cache.copy(),
-            mlp_fwd.cache.copy(),
+            ln1_cache^, attn_cache^, ln2_cache^, mlp_cache^
         )
         return EncoderBlockForward(out^, cache^)
 
@@ -170,6 +205,12 @@ struct DecoderBlockForward(Copyable, Movable):
     # forward_cached's output plus the cache its backward consumes.
     var output: Tensor2D  # [T_tgt, C]
     var cache: DecoderBlockCache
+
+    def take_cache(deinit self) -> DecoderBlockCache:
+        # Consume this forward and hand back just the (large) cache, dropping the
+        # output. The decoder loop reads the block output, passing it on to the next block,
+        # then moves this whole cache into its list instead of deep-copying it.
+        return self.cache^
 
 
 @fieldwise_init
@@ -240,24 +281,69 @@ struct DecoderBlock(Copyable, Movable):
         # Same computation as forward, capturing each sublayer's cache. Reads
         # self; allocates the intermediates, caches, and result; raises on a
         # shape/config mismatch. The cache is valid only for this call.
-        var ln1_fwd = self.ln1.forward_cached(x)
-        var self_fwd = self.self_attn.forward_cached(ln1_fwd.output, self_mask)
-        var a = add(x, self_fwd.output)  # [T_tgt, C]
-        var ln2_fwd = self.ln2.forward_cached(a)
+        # Each sublayer forward is split into (output, cache): the output moves
+        # into the next sublayer, the cache moves into the block cache. x/a/b are
+        # residual streams, still needed at their `add`s, so the LayerNorms copy
+        # them; memory is shared across decoder blocks, so cross-attention copies
+        # it into its own cache.
+        var ln1_fwd = self.ln1.forward_cached(
+            x.copy()
+        )  # x is the residual, kept
+        var ln1_cache = LayerNormCache(
+            zeros_2d(0, 0), List[Float64](), List[Float64]()
+        )  # placeholder, replaced by the move
+        var ln1_out = ln1_fwd^.split(ln1_cache)  # cache -> ln1_cache
+        var self_fwd = self.self_attn.forward_cached(ln1_out^, self_mask)
+        var self_cache = MHACache(
+            LinearCache(zeros_2d(0, 0)),
+            List[AttentionCache](),
+            LinearCache(zeros_2d(0, 0)),
+        )  # placeholder, replaced by the move
+        var self_out = self_fwd^.split(self_cache)  # cache -> self_cache
+        var a = add(x, self_out)  # [T_tgt, C]
+
+        var ln2_fwd = self.ln2.forward_cached(
+            a.copy()
+        )  # a is the residual, kept
+        var ln2_cache = LayerNormCache(
+            zeros_2d(0, 0), List[Float64](), List[Float64]()
+        )  # placeholder, replaced by the move
+        var ln2_out = ln2_fwd^.split(ln2_cache)  # cache -> ln2_cache
         var cross_fwd = self.cross_attn.forward_cached(
-            ln2_fwd.output, memory, cross_mask
+            ln2_out^, memory.copy(), cross_mask  # memory is shared, kept
         )
-        var b = add(a, cross_fwd.output)  # [T_tgt, C]
-        var ln3_fwd = self.ln3.forward_cached(b)
-        var mlp_fwd = self.mlp.forward_cached(ln3_fwd.output)
-        var out = add(b, mlp_fwd.output)  # [T_tgt, C]
+        var cross_cache = CrossMHACache(
+            LinearCache(zeros_2d(0, 0)),
+            LinearCache(zeros_2d(0, 0)),
+            List[AttentionCache](),
+            LinearCache(zeros_2d(0, 0)),
+        )  # placeholder, replaced by the move
+        var cross_out = cross_fwd^.split(cross_cache)  # cache -> cross_cache
+        var b = add(a, cross_out)  # [T_tgt, C]
+
+        var ln3_fwd = self.ln3.forward_cached(
+            b.copy()
+        )  # b is the residual, kept
+        var ln3_cache = LayerNormCache(
+            zeros_2d(0, 0), List[Float64](), List[Float64]()
+        )  # placeholder, replaced by the move
+        var ln3_out = ln3_fwd^.split(ln3_cache)  # cache -> ln3_cache
+        var mlp_fwd = self.mlp.forward_cached(ln3_out^)
+        var mlp_cache = MLPCache(
+            LinearCache(zeros_2d(0, 0)),
+            zeros_2d(0, 0),
+            LinearCache(zeros_2d(0, 0)),
+        )  # placeholder, replaced by the move
+        var mlp_out = mlp_fwd^.split(mlp_cache)  # cache -> mlp_cache
+        var out = add(b, mlp_out)  # [T_tgt, C]
+
         var cache = DecoderBlockCache(
-            ln1_fwd.cache.copy(),
-            self_fwd.cache.copy(),
-            ln2_fwd.cache.copy(),
-            cross_fwd.cache.copy(),
-            ln3_fwd.cache.copy(),
-            mlp_fwd.cache.copy(),
+            ln1_cache^,
+            self_cache^,
+            ln2_cache^,
+            cross_cache^,
+            ln3_cache^,
+            mlp_cache^,
         )
         return DecoderBlockForward(out^, cache^)
 

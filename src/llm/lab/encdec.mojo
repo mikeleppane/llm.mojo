@@ -194,46 +194,75 @@ struct EncDec(Copyable, Movable):
         var t_tgt = len(tgt_in)
 
         # --- encoder ---
-        var src_tok_fwd = self.src_tok.forward_cached(src)
+        # src is a small id list, borrowed; the token embedding consumes it. The
+        # two embedding outputs are added into x, then each cache moves out (the
+        # split's returned output is dropped). Block caches move via take_cache.
+        var src_tok_fwd = self.src_tok.forward_cached(src.copy())
         var src_pos_fwd = self.src_pos.forward_cached(position_ids(t_src))
         var x = add(src_tok_fwd.output, src_pos_fwd.output)  # [T_src, C]
+        var src_tok_cache = EmbeddingCache(
+            List[Int]()
+        )  # placeholder, moved into
+        _ = src_tok_fwd^.split(src_tok_cache)
+        var src_pos_cache = EmbeddingCache(
+            List[Int]()
+        )  # placeholder, moved into
+        _ = src_pos_fwd^.split(src_pos_cache)
         var enc_mask = no_mask(t_src, t_src)
         var enc_caches = List[EncoderBlockCache]()
         for i in range(len(self.encoder)):
             var blk = self.encoder[i].forward_cached(x, enc_mask)
-            x = blk.output.copy()
-            enc_caches.append(blk.cache.copy())
-        var enc_ln_f_fwd = self.enc_ln_f.forward_cached(x)
-        var memory = enc_ln_f_fwd.output.copy()  # [T_src, C]
+            x = blk.output.copy()  # [T_src, C] feeds the next block
+            enc_caches.append(blk^.take_cache())  # move the large block cache
+        var enc_ln_f_fwd = self.enc_ln_f.forward_cached(x^)
+        var enc_ln_f_cache = LayerNormCache(
+            zeros_2d(0, 0), List[Float64](), List[Float64]()
+        )  # placeholder, replaced by the move
+        var memory = enc_ln_f_fwd^.split(enc_ln_f_cache)  # [T_src, C]
 
         # --- decoder ---
-        var tgt_tok_fwd = self.tgt_tok.forward_cached(tgt_in)
+        var tgt_tok_fwd = self.tgt_tok.forward_cached(tgt_in.copy())
         var tgt_pos_fwd = self.tgt_pos.forward_cached(position_ids(t_tgt))
         var y = add(tgt_tok_fwd.output, tgt_pos_fwd.output)  # [T_tgt, C]
+        var tgt_tok_cache = EmbeddingCache(
+            List[Int]()
+        )  # placeholder, moved into
+        _ = tgt_tok_fwd^.split(tgt_tok_cache)
+        var tgt_pos_cache = EmbeddingCache(
+            List[Int]()
+        )  # placeholder, moved into
+        _ = tgt_pos_fwd^.split(tgt_pos_cache)
         var self_mask = causal_mask(t_tgt)
         var cross_mask = no_mask(t_tgt, t_src)
         var dec_caches = List[DecoderBlockCache]()
         for i in range(len(self.decoder)):
+            # memory is borrowed by every decoder block (each caches its own copy).
             var blk = self.decoder[i].forward_cached(
                 y, memory, self_mask, cross_mask
             )
-            y = blk.output.copy()
-            dec_caches.append(blk.cache.copy())
-        var dec_ln_f_fwd = self.dec_ln_f.forward_cached(y)
-        var head_fwd = self.head.forward_cached(dec_ln_f_fwd.output)
+            y = blk.output.copy()  # [T_tgt, C] feeds the next block
+            dec_caches.append(blk^.take_cache())  # move the large block cache
+        var dec_ln_f_fwd = self.dec_ln_f.forward_cached(y^)
+        var dec_ln_f_cache = LayerNormCache(
+            zeros_2d(0, 0), List[Float64](), List[Float64]()
+        )  # placeholder, replaced by the move
+        var dec_ln_f_out = dec_ln_f_fwd^.split(dec_ln_f_cache)  # [T_tgt, C]
+        var head_fwd = self.head.forward_cached(dec_ln_f_out^)
+        var head_cache = LinearCache(zeros_2d(0, 0))  # placeholder, moved into
+        var logits = head_fwd^.split(head_cache)  # [T_tgt, V]
 
         var cache = EncDecCache(
-            src_tok_fwd.cache.copy(),
-            src_pos_fwd.cache.copy(),
-            tgt_tok_fwd.cache.copy(),
-            tgt_pos_fwd.cache.copy(),
+            src_tok_cache^,
+            src_pos_cache^,
+            tgt_tok_cache^,
+            tgt_pos_cache^,
             enc_caches^,
-            enc_ln_f_fwd.cache.copy(),
+            enc_ln_f_cache^,
             dec_caches^,
-            dec_ln_f_fwd.cache.copy(),
-            head_fwd.cache.copy(),
+            dec_ln_f_cache^,
+            head_cache^,
         )
-        return EncDecForward(head_fwd.output.copy(), cache^)
+        return EncDecForward(logits^, cache^)
 
     def loss(
         self, src: List[Int], tgt_in: List[Int], tgt: List[Int]

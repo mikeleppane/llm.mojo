@@ -79,9 +79,9 @@ def test_embedding_table_grad_matches_finite_difference() raises:
 
     # Analytic: one full forward_cached / backward pass down to the table.
     emb.table.zero_grad()
-    var emb_fwd = emb.forward_cached(ids)  # [N, C]
-    var ln_fwd = ln.forward_cached(emb_fwd.output)  # [N, C]
-    var mlp_fwd = mlp.forward_cached(ln_fwd.output)  # [N, V]
+    var emb_fwd = emb.forward_cached(ids.copy())  # [N, C]
+    var ln_fwd = ln.forward_cached(emb_fwd.output.copy())  # [N, C]
+    var mlp_fwd = mlp.forward_cached(ln_fwd.output.copy())  # [N, V]
     var d_logits = cross_entropy_rows_backward(mlp_fwd.output, targets)
     var d_normed = mlp.backward(mlp_fwd.cache, d_logits)  # [N, C]
     var d_embedded = ln.backward(ln_fwd.cache, d_normed)  # [N, C]
@@ -137,9 +137,9 @@ def test_twenty_sgd_steps_strictly_decrease_loss() raises:
         mlp.down.weight.zero_grad()
         mlp.down.bias.zero_grad()
 
-        var emb_fwd = emb.forward_cached(ids)
-        var ln_fwd = ln.forward_cached(emb_fwd.output)
-        var mlp_fwd = mlp.forward_cached(ln_fwd.output)
+        var emb_fwd = emb.forward_cached(ids.copy())
+        var ln_fwd = ln.forward_cached(emb_fwd.output.copy())
+        var mlp_fwd = mlp.forward_cached(ln_fwd.output.copy())
         var d_logits = cross_entropy_rows_backward(mlp_fwd.output, targets)
         var d_normed = mlp.backward(mlp_fwd.cache, d_logits)
         var d_embedded = ln.backward(ln_fwd.cache, d_normed)

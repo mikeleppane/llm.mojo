@@ -8,6 +8,7 @@ from std.testing import (
     assert_equal,
     assert_almost_equal,
     assert_raises,
+    assert_true,
     TestSuite,
 )
 
@@ -29,6 +30,15 @@ def test_set_get() raises:
     var x = zeros_2d(2, 3)
     x[1, 2] = 7.5
     assert_almost_equal(x[1, 2], 7.5, atol=1e-12)
+
+
+def test_subscript_mutates_in_place() raises:
+    # The ref-returning subscript serves read, write, and += through one method:
+    # `+=` accumulates into the buffer directly, no separate setter.
+    var x = zeros_2d(2, 3)
+    x[0, 1] = 5.0
+    x[0, 1] += 2.0
+    assert_almost_equal(x[0, 1], 7.0, atol=1e-12)
 
 
 def test_offset() raises:
@@ -73,6 +83,48 @@ def test_from_rows_rejects_empty() raises:
     var empty = List[List[Float64]]()
     with assert_raises(contains="at least one row"):
         _ = from_rows(empty)
+
+
+def test_row_sums_a_known_tensor() raises:
+    # row(r) hands back a borrowed [cols] view over the flat buffer — no copy.
+    # Summing it recovers the row's contents.
+    var a = from_rows([[1.0, 2.0, 3.0], [10.0, 20.0, 30.0]])
+    var r0 = a.row(0)
+    assert_equal(len(r0), 3)
+    var s0 = 0.0
+    for c in range(len(r0)):
+        s0 += r0[c]
+    assert_almost_equal(s0, 6.0, atol=1e-12)
+    var r1 = a.row(1)
+    var s1 = 0.0
+    for c in range(len(r1)):
+        s1 += r1[c]
+    assert_almost_equal(s1, 60.0, atol=1e-12)
+
+
+def test_row_view_is_a_live_alias_not_a_copy() raises:
+    # Write THROUGH the borrowed view, then read the element back through the
+    # tensor. A snapshot copy would leave the tensor at 0.0; seeing 9.0 is the
+    # proof that row() aliases self.data — and that the view is writable, not a
+    # read-only preview. (Ordering matters: mutating first and reading the view
+    # after would also pass for a copy, so the write has to go through the view.)
+    var x = zeros_2d(2, 3)
+    x.row(1)[2] = 9.0
+    assert_almost_equal(x[1, 2], 9.0, atol=1e-12)
+
+
+def test_writable_shape_and_values() raises:
+    # String.write must carry the shape header and the leading values, and cap
+    # the preview: a 3x4 tensor has 12 values, so the `…` truncation marker
+    # appears rather than all twelve.
+    var x = zeros_2d(3, 4)
+    x[0, 0] = 1.5
+    x[0, 1] = 2.0
+    var s = String.write(x)
+    assert_true("Tensor2D[3, 4]" in s)
+    assert_true("1.5" in s)
+    assert_true("2.0" in s)
+    assert_true("…" in s)
 
 
 def main() raises:

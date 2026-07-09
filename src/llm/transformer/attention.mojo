@@ -8,9 +8,9 @@
 # [T_k, D] is the whole story. This is why the tests exercise T_q != T_k now,
 # before any cross-attention layer exists to need it.
 #
-# The pipeline reuses the tested tensor ops (matmul, transpose, scale, add,
-# softmax_rows) rather than open-coding a second matmul or softmax. The order is
-# load-bearing and pinned in the docstring below.
+# The pipeline reuses the tested tensor ops (the `@` matmul operator, transpose,
+# scale, add, softmax_rows) rather than open-coding a second matmul or softmax.
+# The order is load-bearing and pinned in the docstring below.
 
 from std.math import sqrt
 
@@ -19,14 +19,13 @@ from llm.nn.linear import Linear, LinearCache
 from llm.tensor.ops import (
     add,
     concat_cols,
-    matmul,
     scale,
     slice_cols,
     softmax_rows,
     softmax_rows_backward,
     transpose,
 )
-from llm.tensor.tensor2d import Tensor2D
+from llm.tensor.tensor2d import Tensor2D, zeros_2d
 from llm.utils.random import Rng
 
 
@@ -41,6 +40,20 @@ struct AttentionResult(Copyable, Movable):
     def __init__(out self, var output: Tensor2D, var weights: Tensor2D):
         self.output = output^
         self.weights = weights^
+
+    def take_output(deinit self) -> Tensor2D:
+        # Consume this result and hand back just the output, dropping the weights
+        # (the inference path needs the output only). A caller that keeps solely
+        # the output moves it out instead of copying it out of a live struct.
+        return self.output^
+
+    def split(deinit self, mut weights_slot: Tensor2D) -> Tensor2D:
+        # Consume this result, moving the weights into the caller's slot and
+        # returning the output. A caching forward keeps both pieces; this moves
+        # each out instead of copying it, since a struct's field can't be
+        # transferred with `^` while the struct is still live.
+        weights_slot = self.weights^
+        return self.output^
 
 
 def scaled_dot_product_attention(
@@ -94,11 +107,11 @@ def scaled_dot_product_attention(
             + "]"
         )
 
-    var scores = matmul(q, transpose(k))  # [T_q, T_k]
+    var scores = q @ transpose(k)  # [T_q, T_k]
     var scaled = scale(scores, 1.0 / sqrt(Float64(d)))  # 1/sqrt(d_head)
     var biased = add(scaled, mask)  # additive mask, after the scale
     var weights = softmax_rows(biased)  # [T_q, T_k], rows sum to 1
-    var output = matmul(weights, v)  # [T_q, D_v]
+    var output = weights @ v  # [T_q, D_v]
     return AttentionResult(output^, weights^)
 
 
@@ -122,6 +135,13 @@ struct AttentionForward(Copyable, Movable):
     var output: Tensor2D  # [T_q, D_v]
     var cache: AttentionCache
 
+    def split(deinit self, mut cache_slot: AttentionCache) -> Tensor2D:
+        # Consume this forward: the cache moves into the caller's slot and the
+        # output is returned. Lets the head loop move a head's output and its
+        # cache into their lists instead of copying each out of a live struct.
+        cache_slot = self.cache^
+        return self.output^
+
 
 @fieldwise_init
 struct AttentionGrads(Copyable, Movable):
@@ -138,10 +158,12 @@ def scaled_dot_product_attention_cached(
     # cache its backward needs (q, k, v, weights). Reads its args; allocates the
     # output and the cache; raises on the same shape mismatches the forward does.
     var result = scaled_dot_product_attention(q, k, v, mask)
-    var cache = AttentionCache(
-        q.copy(), k.copy(), v.copy(), result.weights.copy()
-    )
-    return AttentionForward(result.output.copy(), cache^)
+    # q/k/v are borrowed inputs the cache must own, so they copy; the output and
+    # weights are owned by `result`, so move them out instead of copying.
+    var weights = zeros_2d(0, 0)  # placeholder, replaced by the move
+    var output = result^.split(weights)
+    var cache = AttentionCache(q.copy(), k.copy(), v.copy(), weights^)
+    return AttentionForward(output^, cache^)
 
 
 def scaled_dot_product_attention_backward(
@@ -181,11 +203,11 @@ def scaled_dot_product_attention_backward(
             "scaled_dot_product_attention_backward: v/k length mismatch"
         )
     var s = 1.0 / sqrt(Float64(d))
-    var d_v = matmul(transpose(cache.weights), d_out)  # [T_k, D_v]
-    var d_w = matmul(d_out, transpose(cache.v))  # [T_q, T_k]
+    var d_v = transpose(cache.weights) @ d_out  # [T_k, D_v]
+    var d_w = d_out @ transpose(cache.v)  # [T_q, T_k]
     var d_scores = softmax_rows_backward(cache.weights, d_w)  # [T_q, T_k]
-    var d_q = scale(matmul(d_scores, cache.k), s)  # [T_q, D]
-    var d_k = scale(matmul(transpose(d_scores), cache.q), s)  # [T_k, D]
+    var d_q = scale(d_scores @ cache.k, s)  # [T_q, D]
+    var d_k = scale(transpose(d_scores) @ cache.q, s)  # [T_k, D]
     return AttentionGrads(d_q^, d_k^, d_v^)
 
 
@@ -222,6 +244,13 @@ struct AttentionTrainForward(Copyable, Movable):
     var output: Tensor2D  # [T_q, D_v]
     var cache: AttentionTrainCache
 
+    def split(deinit self, mut cache_slot: AttentionTrainCache) -> Tensor2D:
+        # Consume this forward: the cache moves into the caller's slot and the
+        # output is returned. Lets the train-path head loop move a head's output
+        # and its cache into their lists instead of copying each out.
+        cache_slot = self.cache^
+        return self.output^
+
 
 def scaled_dot_product_attention_train(
     q: Tensor2D,
@@ -248,12 +277,18 @@ def scaled_dot_product_attention_train(
     # can fold the throwaway matmul away. Only `base.weights` is used.
     var base = scaled_dot_product_attention(q, k, v, mask)  # base.weights = W
     var drop = dropout_cached(base.weights, p, training, rng)  # dropped_W, mask
-    var output = matmul(drop.output, v)  # dropped_W @ v -> [T_q, D_v]
+    var output = drop.output @ v  # dropped_W @ v -> [T_q, D_v]
+    # base.weights (the PRE-dropout W) is owned by base and no longer read after
+    # the dropout call, so move it into the cache; base's recomputed output is
+    # unused and dropped. q/k/v are borrowed inputs, so they still copy, and
+    # DropoutResult's mask field can't move out.
+    var weights_pre = zeros_2d(0, 0)  # placeholder, replaced by the move
+    _ = base^.split(weights_pre)
     var cache = AttentionTrainCache(
         q.copy(),
         k.copy(),
         v.copy(),
-        base.weights.copy(),  # PRE-dropout W, for softmax_rows_backward
+        weights_pre^,  # PRE-dropout W, for softmax_rows_backward
         drop.mask.copy(),
         drop.inv_keep,
     )
@@ -289,15 +324,15 @@ def scaled_dot_product_attention_train_backward(
     var dropped_w = dropout_backward(
         cache.drop_mask, cache.inv_keep, cache.weights
     )  # [T_q, T_k]
-    var d_v = matmul(transpose(dropped_w), d_out)  # [T_k, D_v]
-    var d_dropped_w = matmul(d_out, transpose(cache.v))  # [T_q, T_k]
+    var d_v = transpose(dropped_w) @ d_out  # [T_k, D_v]
+    var d_dropped_w = d_out @ transpose(cache.v)  # [T_q, T_k]
     var d_w = dropout_backward(
         cache.drop_mask, cache.inv_keep, d_dropped_w
     )  # [T_q, T_k]
     var d_scores = softmax_rows_backward(cache.weights, d_w)  # PRE-dropout W
     var s = 1.0 / sqrt(Float64(d))
-    var d_q = scale(matmul(d_scores, cache.k), s)  # [T_q, D]
-    var d_k = scale(matmul(transpose(d_scores), cache.q), s)  # [T_k, D]
+    var d_q = scale(d_scores @ cache.k, s)  # [T_q, D]
+    var d_k = scale(transpose(d_scores) @ cache.q, s)  # [T_k, D]
     return AttentionGrads(d_q^, d_k^, d_v^)
 
 
@@ -318,6 +353,13 @@ struct MHAForward(Copyable, Movable):
     var output: Tensor2D  # [T, C]
     var cache: MHACache
 
+    def split(deinit self, mut cache_slot: MHACache) -> Tensor2D:
+        # Consume this forward: the cache moves into the caller's slot and the
+        # output is returned. Lets a block move the (large) attention cache into
+        # its own cache instead of deep-copying it out of a live struct.
+        cache_slot = self.cache^
+        return self.output^
+
 
 @fieldwise_init
 struct MHATrainCache(Copyable, Movable):
@@ -337,6 +379,13 @@ struct MHATrainForward(Copyable, Movable):
     # forward_cached_train's output plus the cache its backward consumes.
     var output: Tensor2D  # [T, C]
     var cache: MHATrainCache
+
+    def split(deinit self, mut cache_slot: MHATrainCache) -> Tensor2D:
+        # Consume this forward: the cache moves into the caller's slot and the
+        # output is returned. Lets a block move the (large) attention cache into
+        # its own cache instead of deep-copying it out of a live struct.
+        cache_slot = self.cache^
+        return self.output^
 
 
 @fieldwise_init
@@ -432,17 +481,21 @@ struct MultiHeadAttention(Copyable, Movable):
             var k_h = slice_cols(k_all, lo, hi)  # [T, D]
             var v_h = slice_cols(v_all, lo, hi)  # [T, D]
             var result = scaled_dot_product_attention(q_h, k_h, v_h, mask)
-            # Copy the field out: a single struct field cannot be transferred
-            # (`^`) from a live value ("destroyed out of the middle of a value").
-            head_outputs.append(result.output.copy())  # [T, D]
+            # Move the output out (the weights are not needed here) rather than
+            # copying a field out of a live struct.
+            head_outputs.append(result^.take_output())  # [T, D]
         var concatenated = concat_cols(head_outputs)  # [T, C]
 
         return self.proj.forward(concatenated)  # [T, C] -> [T, C]
 
-    def forward_cached(self, x: Tensor2D, mask: Tensor2D) raises -> MHAForward:
+    def forward_cached(
+        self, var x: Tensor2D, mask: Tensor2D
+    ) raises -> MHAForward:
         # Self-attention over one sequence with the cache backward needs: [T, C] +
         # mask [T, T] -> MHAForward. Same computation as forward, capturing the
-        # fused-qkv cache, one AttentionCache per head, and the proj cache. Reads
+        # fused-qkv cache, one AttentionCache per head, and the proj cache. Takes x
+        # by value and moves it into the qkv cache; each stage's forward is split
+        # into (output, cache) so both pieces move on with no [T, *] copy. Reads
         # self; allocates the projections, per-head slices, caches, and result;
         # raises on a feature-count mismatch or an indivisible width. The cache is
         # valid only for this call.
@@ -463,7 +516,7 @@ struct MultiHeadAttention(Copyable, Movable):
             )
         var d_head = c // self.n_heads  # per-head width D = C / H
 
-        var qkv_fwd = self.qkv.forward_cached(x)  # output [T, 3C], cache = x
+        var qkv_fwd = self.qkv.forward_cached(x^)  # output [T, 3C], cache = x
         var q_all = slice_cols(qkv_fwd.output, 0, c)  # [T, C]
         var k_all = slice_cols(qkv_fwd.output, c, 2 * c)  # [T, C]
         var v_all = slice_cols(qkv_fwd.output, 2 * c, 3 * c)  # [T, C]
@@ -477,15 +530,24 @@ struct MultiHeadAttention(Copyable, Movable):
             var k_h = slice_cols(k_all, lo, hi)  # [T, D]
             var v_h = slice_cols(v_all, lo, hi)  # [T, D]
             var head = scaled_dot_product_attention_cached(q_h, k_h, v_h, mask)
-            head_outputs.append(head.output.copy())  # [T, D]
-            head_caches.append(head.cache.copy())
+            var head_cache = AttentionCache(
+                zeros_2d(0, 0), zeros_2d(0, 0), zeros_2d(0, 0), zeros_2d(0, 0)
+            )  # placeholder, replaced by the move
+            var out_h = head^.split(head_cache)  # [T, D]; cache -> head_cache
+            head_outputs.append(out_h^)
+            head_caches.append(head_cache^)
         var concatenated = concat_cols(head_outputs)  # [T, C]
-        var proj_fwd = self.proj.forward_cached(concatenated)  # [T, C]
+        var proj_fwd = self.proj.forward_cached(concatenated^)  # [T, C]
 
-        var cache = MHACache(
-            qkv_fwd.cache.copy(), head_caches^, proj_fwd.cache.copy()
+        # Move the qkv and proj caches into the MHA cache (the qkv output was
+        # already sliced into q/k/v, so split's returned output is dropped).
+        var qkv_cache = LinearCache(zeros_2d(0, 0))  # placeholder
+        _ = qkv_fwd^.split(qkv_cache)
+        var proj_cache = LinearCache(zeros_2d(0, 0))  # placeholder
+        var output = proj_fwd^.split(proj_cache)  # [T, C]
+        return MHAForward(
+            output^, MHACache(qkv_cache^, head_caches^, proj_cache^)
         )
-        return MHAForward(proj_fwd.output.copy(), cache^)
 
     def backward(mut self, cache: MHACache, d_out: Tensor2D) raises -> Tensor2D:
         # Reverse the forward plumbing exactly, right to left. [T, C] d_out ->
@@ -555,7 +617,7 @@ struct MultiHeadAttention(Copyable, Movable):
 
     def forward_cached_train(
         self,
-        x: Tensor2D,
+        var x: Tensor2D,
         mask: Tensor2D,
         p: Float64,
         training: Bool,
@@ -566,7 +628,9 @@ struct MultiHeadAttention(Copyable, Movable):
         # dropout core. [T, C] + mask [T, T] -> MHATrainForward. rng is threaded
         # through the heads in order, so each head draws its own [T, T] weight mask;
         # with training = False (or p = 0) no head draws and the result equals
-        # forward_cached exactly. Reads self; allocates the projections, per-head
+        # forward_cached exactly. Takes x by value and moves it into the qkv cache;
+        # each stage's forward is split into (output, cache) so both pieces move on
+        # with no [T, *] copy. Reads self; allocates the projections, per-head
         # slices, caches, and result; mutates rng only in the training/p>0 branch;
         # raises on a feature-count mismatch, an indivisible width, or an
         # out-of-range p. The cache is valid only for this call.
@@ -587,7 +651,7 @@ struct MultiHeadAttention(Copyable, Movable):
             )
         var d_head = c // self.n_heads  # per-head width D = C / H
 
-        var qkv_fwd = self.qkv.forward_cached(x)  # output [T, 3C], cache = x
+        var qkv_fwd = self.qkv.forward_cached(x^)  # output [T, 3C], cache = x
         var q_all = slice_cols(qkv_fwd.output, 0, c)  # [T, C]
         var k_all = slice_cols(qkv_fwd.output, c, 2 * c)  # [T, C]
         var v_all = slice_cols(qkv_fwd.output, 2 * c, 3 * c)  # [T, C]
@@ -603,15 +667,29 @@ struct MultiHeadAttention(Copyable, Movable):
             var head = scaled_dot_product_attention_train(
                 q_h, k_h, v_h, mask, p, training, rng
             )
-            head_outputs.append(head.output.copy())  # [T, D]
-            head_caches.append(head.cache.copy())
+            var head_cache = AttentionTrainCache(
+                zeros_2d(0, 0),
+                zeros_2d(0, 0),
+                zeros_2d(0, 0),
+                zeros_2d(0, 0),
+                zeros_2d(0, 0),
+                0.0,
+            )  # placeholder, replaced by the move
+            var out_h = head^.split(head_cache)  # [T, D]; cache -> head_cache
+            head_outputs.append(out_h^)
+            head_caches.append(head_cache^)
         var concatenated = concat_cols(head_outputs)  # [T, C]
-        var proj_fwd = self.proj.forward_cached(concatenated)  # [T, C]
+        var proj_fwd = self.proj.forward_cached(concatenated^)  # [T, C]
 
-        var cache = MHATrainCache(
-            qkv_fwd.cache.copy(), head_caches^, proj_fwd.cache.copy()
+        # Move the qkv and proj caches into the MHA cache (the qkv output was
+        # already sliced into q/k/v, so split's returned output is dropped).
+        var qkv_cache = LinearCache(zeros_2d(0, 0))  # placeholder
+        _ = qkv_fwd^.split(qkv_cache)
+        var proj_cache = LinearCache(zeros_2d(0, 0))  # placeholder
+        var output = proj_fwd^.split(proj_cache)  # [T, C]
+        return MHATrainForward(
+            output^, MHATrainCache(qkv_cache^, head_caches^, proj_cache^)
         )
-        return MHATrainForward(proj_fwd.output.copy(), cache^)
 
     def backward_train(
         mut self, cache: MHATrainCache, d_out: Tensor2D

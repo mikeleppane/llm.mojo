@@ -18,7 +18,8 @@ from llm.tensor.tensor2d import from_rows, zeros_2d
 
 
 def test_rows_sum_to_one() raises:
-    var p = softmax_row([1.0, 2.0, 3.0])
+    var logits = [1.0, 2.0, 3.0]
+    var p = softmax_row(logits)
     var s = 0.0
     for i in range(len(p)):
         s += p[i]
@@ -26,12 +27,14 @@ def test_rows_sum_to_one() raises:
 
 
 def test_monotonic() raises:
-    var p = softmax_row([1.0, 2.0, 3.0])
+    var logits = [1.0, 2.0, 3.0]
+    var p = softmax_row(logits)
     assert_true(p[0] < p[1] and p[1] < p[2])
 
 
 def test_stable_under_large_values() raises:
-    var p = softmax_row([1000.0, 1000.0, 1000.0])
+    var logits = [1000.0, 1000.0, 1000.0]
+    var p = softmax_row(logits)
     for i in range(len(p)):
         assert_almost_equal(p[i], 1.0 / 3.0, atol=1e-12)
 
@@ -64,20 +67,23 @@ def test_softmax_rows_zero_columns() raises:
 
 
 def test_high_temperature_approaches_uniform() raises:
-    var p = softmax_row_temperature([1.0, 2.0, 3.0], 1e6)
+    var logits = [1.0, 2.0, 3.0]
+    var p = softmax_row_temperature(logits, 1e6)
     for i in range(len(p)):
         assert_almost_equal(p[i], 1.0 / 3.0, atol=1e-5)
 
 
 def test_low_temperature_approaches_argmax() raises:
-    var p = softmax_row_temperature([1.0, 2.0, 3.0], 1e-3)
+    var logits = [1.0, 2.0, 3.0]
+    var p = softmax_row_temperature(logits, 1e-3)
     assert_almost_equal(p[2], 1.0, atol=1e-9)
     assert_almost_equal(p[0], 0.0, atol=1e-9)
 
 
 def test_temperature_rejects_nonpositive() raises:
+    var logits = [1.0, 2.0]
     with assert_raises(contains="temperature"):
-        _ = softmax_row_temperature([1.0, 2.0], 0.0)
+        _ = softmax_row_temperature(logits, 0.0)
 
 
 def test_extreme_low_temperature_is_stable() raises:
@@ -85,7 +91,8 @@ def test_extreme_low_temperature_is_stable() raises:
     # Subtracting the row max *before* dividing keeps the result finite: the
     # argmax entry -> 1, the rest -> 0. The naive "divide then softmax" form
     # produces inf/inf = NaN here.
-    var p = softmax_row_temperature([1000.0, 0.0], 1e-307)
+    var logits = [1000.0, 0.0]
+    var p = softmax_row_temperature(logits, 1e-307)
     assert_almost_equal(p[0], 1.0, atol=1e-12)
     assert_almost_equal(p[1], 0.0, atol=1e-12)
 

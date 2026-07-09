@@ -5,15 +5,19 @@
 # is a single `List[Float64]` in row-major order: element (row, col) lives at
 # `row * cols + col`.
 #
-# Access comes in two flavors on purpose. `[i, j]` (via __getitem__/__setitem__)
-# is unchecked and cheap — the hot path. `.at(i, j)` bounds-checks and therefore
-# raises — the debugging/test path. Fast by default, checked on demand.
+# Access comes in two flavors on purpose. `[i, j]` (one ref-returning
+# __getitem__) is unchecked and cheap — the hot path. It hands back a *reference*
+# into the flat buffer, tagged with that buffer as its origin, so the single
+# subscript serves reads, writes (`t[i, j] = v`), and in-place updates
+# (`t[i, j] += v`) alike — no separate setter to keep in sync. `.at(i, j)`
+# bounds-checks and therefore raises — the debugging/test path. Fast by default,
+# checked on demand.
 
 from std.collections import List
 
 
 @fieldwise_init
-struct Tensor2D(Copyable, Movable):
+struct Tensor2D(Copyable, Movable, Writable):
     var rows: Int
     var cols: Int
     var data: List[Float64]  # flat row-major [rows, cols]
@@ -25,13 +29,12 @@ struct Tensor2D(Copyable, Movable):
         # Row-major flat index. No bounds check — callers that need one use at().
         return row * self.cols + col
 
-    def __getitem__(self, row: Int, col: Int) -> Float64:
-        # Unchecked read (hot path).
+    def __getitem__(ref self, row: Int, col: Int) -> ref[self.data] Float64:
+        # Unchecked ref access (hot path): one method serves read, write, and +=.
+        # The returned reference borrows self.data as its origin, so assigning or
+        # accumulating through the subscript mutates the buffer directly — no
+        # separate setter. (Origin must name the field, not self.)
         return self.data[self.offset(row, col)]
-
-    def __setitem__(mut self, row: Int, col: Int, value: Float64):
-        # Unchecked write (hot path).
-        self.data[self.offset(row, col)] = value
 
     def at(self, row: Int, col: Int) raises -> Float64:
         # Bounds-checked read. Raises if (row, col) is outside the shape.
@@ -39,17 +42,62 @@ struct Tensor2D(Copyable, Movable):
             raise Error("Tensor2D index out of range")
         return self.data[self.offset(row, col)]
 
+    def row(ref self, r: Int) -> Span[Float64, origin_of(self.data)]:
+        # A borrowed [cols] view of row r — no copy, no allocation. The Span
+        # borrows self.data as its origin, so it reads (and writes) straight
+        # through the flat buffer for as long as the view is live; the compiler
+        # forbids mutating the tensor while the view is held. Unchecked like
+        # __getitem__ (the hot path): a bad r indexes the buffer, it does not
+        # raise. What it teaches: an origin-tagged view replacing a per-row copy,
+        # at the cost of the borrow — the tensor is pinned immutable underneath.
+        var start = r * self.cols
+        return Span(self.data)[start : start + self.cols]
+
     def fill(mut self, value: Float64):
         # Overwrite every element with `value`. Mutates in place.
         for i in range(self.size()):
             self.data[i] = value
 
+    def write_to(self, mut writer: Some[Writer]):
+        # Printable form: a shape header plus a capped preview of the buffer,
+        # e.g. `Tensor2D[3, 4](1.5, 2.0, 0.0, …)`. The preview stops at 8 values
+        # (a trailing `…` marks the truncation) so printing a big table — a
+        # [50257, 768] embedding — stays one short line, not millions of floats.
+        writer.write("Tensor2D[", self.rows, ", ", self.cols, "](")
+        var n = self.size()
+        var limit = n if n < 8 else 8
+        for i in range(limit):
+            if i > 0:
+                writer.write(", ")
+            writer.write(self.data[i])
+        if n > 8:
+            writer.write(", …")
+        writer.write(")")
+
+    def __matmul__(self, other: Tensor2D) raises -> Tensor2D:
+        # Matrix multiply via the `@` operator: [M, K] @ [K, N] -> [M, N] in ikj
+        # loop order. The inner loop walks other[k, *] and result[i, *]
+        # contiguously along rows, which is cache-friendly and often several
+        # times faster than the clear ijk form on non-trivial sizes. Raises on a
+        # shape mismatch; allocates the result. (The teaching contrast, the plain
+        # ijk kernel, lives in ops.matmul.)
+        if self.cols != other.rows:
+            raise Error("matmul shape mismatch")
+        var result = zeros_2d(self.rows, other.cols)
+        for i in range(self.rows):
+            for k in range(self.cols):
+                # self[i, k] is constant across j; hoist it out of the inner loop.
+                var a_ik = self[i, k]
+                for j in range(other.cols):
+                    result[i, j] += a_ik * other[k, j]
+        return result^
+
 
 def zeros_2d(rows: Int, cols: Int) -> Tensor2D:
-    # A rows x cols tensor of zeros. Allocates the flat buffer.
-    var data = List[Float64]()
-    for _ in range(rows * cols):
-        data.append(0.0)
+    # A rows x cols tensor of zeros. Allocates the flat buffer in one shot:
+    # length= sizes it and fill= zeros it, no append loop to grow it element by
+    # element (which would reallocate as it outgrows its capacity).
+    var data = List[Float64](length=rows * cols, fill=0.0)
     return Tensor2D(rows, cols, data^)
 
 

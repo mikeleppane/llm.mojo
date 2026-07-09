@@ -7,12 +7,11 @@
 # transpose-at-load concern, handled where the weights are read, never by bending
 # this convention.)
 #
-# The forward transposes the weight to [in, out] and reuses the tested `matmul`
-# rather than introducing a second matmul kernel, then broadcasts the bias row
-# across every position.
+# The forward transposes the weight to [in, out] and multiplies with the `@`
+# operator (x @ wt), then broadcasts the bias row across every position.
 
 from llm.nn.parameter import Parameter
-from llm.tensor.ops import matmul, transpose
+from llm.tensor.ops import transpose
 from llm.tensor.tensor2d import Tensor2D, zeros_2d
 from llm.utils.random import Rng
 
@@ -38,6 +37,16 @@ struct LinearForward(Copyable, Movable):
     # the cache travels with the output it belongs to.
     var output: Tensor2D  # [N, out]
     var cache: LinearCache
+
+    def split(deinit self, mut cache_slot: LinearCache) -> Tensor2D:
+        # Consume this forward: the cache moves into the caller's slot and the
+        # output is returned. An assembly site that needs both pieces (the output
+        # to feed the next stage, the cache to stash for backward) takes them by
+        # move rather than copying each field out of a live struct — a struct's
+        # field cannot be transferred with `^`, so without this the caller would
+        # deep-copy the whole [N, out] output and the cached [N, in] input.
+        cache_slot = self.cache^
+        return self.output^
 
 
 @fieldwise_init
@@ -93,22 +102,24 @@ struct Linear(Copyable, Movable):
                 + "]"
             )
         var wt = transpose(self.weight.value)  # [out, in] -> [in, out]
-        var out = matmul(x, wt)  # [N, in] @ [in, out] -> [N, out]
+        var out = x @ wt  # [N, in] @ [in, out] -> [N, out]
         for r in range(out.rows):
             for c in range(out.cols):
                 out[r, c] = out[r, c] + self.bias.value[0, c]
         return out^
 
-    def forward_cached(self, x: Tensor2D) raises -> LinearForward:
+    def forward_cached(self, var x: Tensor2D) raises -> LinearForward:
         # [N, in] -> LinearForward: the same output as forward(x), plus the cache
         # backward needs. That cache is just x — dW = d_out^T @ x and
         # dx = d_out @ W, neither of which touches the output — so nothing else is
-        # stored. Reads self; allocates the output and a cached copy of x; raises
+        # stored. Takes x by value and MOVES it into the cache (no copy): the
+        # caller decides at its call site whether to hand over a dead value (`x^`)
+        # or keep its own (`x.copy()`). Reads self; allocates the output; raises
         # on the same feature-count mismatch forward does. The cache is valid only
         # for this forward call: pairing it with a different call's d_out computes
         # a gradient for the wrong input.
         var output = self.forward(x)
-        return LinearForward(output^, LinearCache(x.copy()))
+        return LinearForward(output^, LinearCache(x^))
 
     def backward(
         mut self, cache: LinearCache, d_out: Tensor2D
@@ -149,7 +160,7 @@ struct Linear(Copyable, Movable):
                 + " must equal in_features "
                 + String(in_features)
             )
-        var d_weight = matmul(transpose(d_out), cache.x)  # [out, in]
+        var d_weight = transpose(d_out) @ cache.x  # [out, in]
         for o in range(out_features):
             for i in range(in_features):
                 self.weight.grad[o, i] = self.weight.grad[o, i] + d_weight[o, i]
@@ -158,6 +169,4 @@ struct Linear(Copyable, Movable):
             for n in range(d_out.rows):
                 col_sum += d_out[n, o]
             self.bias.grad[0, o] = self.bias.grad[0, o] + col_sum
-        return matmul(
-            d_out, self.weight.value
-        )  # [N, out] @ [out, in] -> [N, in]
+        return d_out @ self.weight.value  # [N, out] @ [out, in] -> [N, in]

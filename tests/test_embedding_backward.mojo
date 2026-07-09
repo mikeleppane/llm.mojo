@@ -67,7 +67,7 @@ def test_touched_rows_match_finite_difference() raises:
     var ids = sample_ids()
     var cot = cotangent()
     emb.table.zero_grad()
-    var fwd = emb.forward_cached(ids)
+    var fwd = emb.forward_cached(ids.copy())
     emb.backward(fwd.cache, cot)
 
     var h = 1e-5
@@ -92,7 +92,7 @@ def test_repeated_id_accumulates() raises:
     var ids = sample_ids()
     var cot = cotangent()
     emb.table.zero_grad()
-    var fwd = emb.forward_cached(ids)
+    var fwd = emb.forward_cached(ids.copy())
     emb.backward(fwd.cache, cot)
     for j in range(emb.table.value.cols):
         assert_almost_equal(
@@ -112,7 +112,7 @@ def test_untouched_rows_stay_zero() raises:
     var ids = sample_ids()
     var cot = cotangent()
     emb.table.zero_grad()
-    var fwd = emb.forward_cached(ids)
+    var fwd = emb.forward_cached(ids.copy())
     emb.backward(fwd.cache, cot)
     for j in range(emb.table.value.cols):
         assert_true(emb.table.grad[2, j] == 0.0)
@@ -126,7 +126,7 @@ def test_backward_accumulates_across_calls() raises:
     var ids = sample_ids()
     var cot = cotangent()
     emb.table.zero_grad()
-    var fwd = emb.forward_cached(ids)
+    var fwd = emb.forward_cached(ids.copy())
     emb.backward(fwd.cache, cot)
     var once = emb.table.grad.copy()
     emb.backward(fwd.cache, cot)
@@ -154,7 +154,7 @@ def test_repeated_id_doubling_is_bit_exact() raises:
         ]
     )
     emb.table.zero_grad()
-    var fwd = emb.forward_cached(ids)
+    var fwd = emb.forward_cached(ids.copy())
     emb.backward(fwd.cache, d_out)
     var once = emb.table.grad[0, 0]
     emb.backward(fwd.cache, d_out)

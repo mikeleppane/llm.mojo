@@ -61,7 +61,7 @@ def test_d_x_matches_finite_difference() raises:
     var layer = make_layer()
     var x = sample_input()
     var cot = cotangent()
-    var fwd = layer.forward_cached(x)
+    var fwd = layer.forward_cached(x.copy())
     var d_x = layer.backward(fwd.cache, cot)
 
     var h = 1e-5
@@ -83,7 +83,7 @@ def test_d_weight_matches_finite_difference() raises:
     var cot = cotangent()
     layer.weight.zero_grad()
     layer.bias.zero_grad()
-    var fwd = layer.forward_cached(x)
+    var fwd = layer.forward_cached(x.copy())
     _ = layer.backward(fwd.cache, cot)
 
     var h = 1e-5
@@ -111,7 +111,7 @@ def test_d_bias_matches_finite_difference() raises:
     var cot = cotangent()
     layer.weight.zero_grad()
     layer.bias.zero_grad()
-    var fwd = layer.forward_cached(x)
+    var fwd = layer.forward_cached(x.copy())
     _ = layer.backward(fwd.cache, cot)
 
     var h = 1e-5
@@ -142,7 +142,7 @@ def test_backward_accumulates_exactly() raises:
     var cot = cotangent()
     layer.weight.zero_grad()
     layer.bias.zero_grad()
-    var fwd = layer.forward_cached(x)
+    var fwd = layer.forward_cached(x.copy())
     _ = layer.backward(fwd.cache, cot)
     var w_once = layer.weight.grad.copy()
     var b_once = layer.bias.grad.copy()
@@ -158,7 +158,7 @@ def test_zero_grad_resets() raises:
     var layer = make_layer()
     var x = sample_input()
     var cot = cotangent()
-    var fwd = layer.forward_cached(x)
+    var fwd = layer.forward_cached(x.copy())
     _ = layer.backward(fwd.cache, cot)
     layer.weight.zero_grad()
     layer.bias.zero_grad()

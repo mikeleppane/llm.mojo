@@ -16,22 +16,8 @@
 # cache two parts on; here correctness comes first and the recompute is honest.
 
 from llm.generation.sampler import SamplerConfig, sample_next
-from llm.tensor.tensor2d import Tensor2D
 from llm.transformer.gpt import GPT
 from llm.utils.random import Rng
-
-
-def _last_row(logits: Tensor2D) -> List[Float64]:
-    # Copy the final row [V] of a [T, V] logits matrix into a flat list — the only
-    # row generation needs, since the next token is conditioned on the whole
-    # prefix. Private to generation: nothing below this layer wants it, so adding
-    # it to tensor/ops would break the frozen-layer boundary for a two-line loop.
-    # Allocates the row; does not mutate logits; draws no rng.
-    var last = logits.rows - 1
-    var row = List[Float64]()
-    for c in range(logits.cols):
-        row.append(logits[last, c])
-    return row^
 
 
 def _contains(values: List[Int], target: Int) -> Bool:
@@ -102,8 +88,10 @@ def generate(
             context.append(seq[i])
 
         var logits = gpt.forward(context)  # [T', V]
-        var row = _last_row(logits)  # [V]
-        var next_id = sample_next(row, cfg, rng)
+        # The next token is conditioned on the whole prefix, so only the final
+        # row matters. Borrow it as a view [V] rather than copying — logits is
+        # read, not mutated, for the rest of the step, so the borrow is safe.
+        var next_id = sample_next(logits.row(logits.rows - 1), cfg, rng)
 
         emitted.append(next_id)
         seq.append(next_id)

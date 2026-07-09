@@ -24,7 +24,7 @@
 
 from llm.nn.linear import Linear, LinearCache
 from llm.tensor.ops import concat_cols, slice_cols
-from llm.tensor.tensor2d import Tensor2D
+from llm.tensor.tensor2d import Tensor2D, zeros_2d
 from llm.transformer.attention import (
     AttentionCache,
     scaled_dot_product_attention,
@@ -53,6 +53,13 @@ struct CrossMHAForward(Copyable, Movable):
     # forward_cached's output plus the cache its backward consumes.
     var output: Tensor2D  # [T_q, C]
     var cache: CrossMHACache
+
+    def split(deinit self, mut cache_slot: CrossMHACache) -> Tensor2D:
+        # Consume this forward: the cache moves into the caller's slot and the
+        # output is returned. Lets a decoder block move the (large) cross-attention
+        # cache into its own cache instead of deep-copying it out of a live struct.
+        cache_slot = self.cache^
+        return self.output^
 
 
 @fieldwise_init
@@ -152,26 +159,30 @@ struct CrossMultiHeadAttention(Copyable, Movable):
             var k_h = slice_cols(k_all, lo, hi)  # [T_k, D]
             var v_h = slice_cols(v_all, lo, hi)  # [T_k, D]
             var result = scaled_dot_product_attention(q_h, k_h, v_h, mask)
-            head_outputs.append(result.output.copy())  # [T_q, D]
+            # Move the output out (the weights are not needed here) rather than
+            # copying a field out of a live struct.
+            head_outputs.append(result^.take_output())  # [T_q, D]
         var concatenated = concat_cols(head_outputs)  # [T_q, C]
 
         return self.proj.forward(concatenated)  # [T_q, C]
 
     def forward_cached(
-        self, x: Tensor2D, memory: Tensor2D, mask: Tensor2D
+        self, var x: Tensor2D, var memory: Tensor2D, mask: Tensor2D
     ) raises -> CrossMHAForward:
         # Same computation as forward, additionally capturing the cache backward
         # needs (the q and kv Linear caches, one AttentionCache per head, and the
-        # proj cache). Reads self; allocates the projections, per-head slices,
-        # caches, and result; raises on the same mismatches forward does. The
-        # cache is valid only for this call.
+        # proj cache). Takes x and memory by value and moves them into the q and kv
+        # caches; each stage's forward is split into (output, cache) so both pieces
+        # move on with no [T, *] copy. Reads self; allocates the projections,
+        # per-head slices, caches, and result; raises on the same mismatches
+        # forward does. The cache is valid only for this call.
         var c = self.q.weight.value.cols
         self._check_config(c)
         var d_head = c // self.n_heads
 
-        var q_fwd = self.q.forward_cached(x)  # output [T_q, C], cache = x
+        var q_fwd = self.q.forward_cached(x^)  # output [T_q, C], cache = x
         var kv_fwd = self.kv.forward_cached(
-            memory
+            memory^
         )  # output [T_k, 2C], cache = memory
         var k_all = slice_cols(kv_fwd.output, 0, c)  # [T_k, C]
         var v_all = slice_cols(kv_fwd.output, c, 2 * c)  # [T_k, C]
@@ -185,18 +196,27 @@ struct CrossMultiHeadAttention(Copyable, Movable):
             var k_h = slice_cols(k_all, lo, hi)  # [T_k, D]
             var v_h = slice_cols(v_all, lo, hi)  # [T_k, D]
             var head = scaled_dot_product_attention_cached(q_h, k_h, v_h, mask)
-            head_outputs.append(head.output.copy())  # [T_q, D]
-            head_caches.append(head.cache.copy())
+            var head_cache = AttentionCache(
+                zeros_2d(0, 0), zeros_2d(0, 0), zeros_2d(0, 0), zeros_2d(0, 0)
+            )  # placeholder, replaced by the move
+            var out_h = head^.split(head_cache)  # [T_q, D]; cache -> head_cache
+            head_outputs.append(out_h^)
+            head_caches.append(head_cache^)
         var concatenated = concat_cols(head_outputs)  # [T_q, C]
-        var proj_fwd = self.proj.forward_cached(concatenated)  # [T_q, C]
+        var proj_fwd = self.proj.forward_cached(concatenated^)  # [T_q, C]
 
-        var cache = CrossMHACache(
-            q_fwd.cache.copy(),
-            kv_fwd.cache.copy(),
-            head_caches^,
-            proj_fwd.cache.copy(),
+        # Move the q, kv, and proj caches into the cross-attention cache (the q and
+        # kv outputs were already sliced, so those splits' outputs are dropped).
+        var q_cache = LinearCache(zeros_2d(0, 0))  # placeholder
+        _ = q_fwd^.split(q_cache)
+        var kv_cache = LinearCache(zeros_2d(0, 0))  # placeholder
+        _ = kv_fwd^.split(kv_cache)
+        var proj_cache = LinearCache(zeros_2d(0, 0))  # placeholder
+        var output = proj_fwd^.split(proj_cache)  # [T_q, C]
+        return CrossMHAForward(
+            output^,
+            CrossMHACache(q_cache^, kv_cache^, head_caches^, proj_cache^),
         )
-        return CrossMHAForward(proj_fwd.output.copy(), cache^)
 
     def backward(
         mut self, cache: CrossMHACache, d_out: Tensor2D

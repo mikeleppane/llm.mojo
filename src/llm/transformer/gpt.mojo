@@ -41,7 +41,7 @@ from llm.nn.dropout import dropout_backward, dropout_cached
 from llm.nn.embedding import Embedding, EmbeddingCache
 from llm.nn.layernorm import LayerNorm, LayerNormCache
 from llm.nn.optim import adamw_update, sgd_update
-from llm.tensor.ops import add, cross_entropy_rows, matmul, transpose
+from llm.tensor.ops import add, cross_entropy_rows, transpose
 from llm.tensor.tensor2d import Tensor2D, zeros_2d
 from llm.transformer.block import (
     _grad_scale,
@@ -182,7 +182,7 @@ struct GPT(Copyable, Movable):
             x = self.blocks[i].forward(x, mask)
         var h = self.ln_f.forward(x)  # [T, C]
         # Tied head: logits = h @ wte.table^T. transpose(table) is [C, V].
-        return matmul(h, transpose(self.wte.table.value))  # [T, V]
+        return h @ transpose(self.wte.table.value)  # [T, V]
 
     def loss(self, ids: List[Int], targets: List[Int]) raises -> Float64:
         # Mean cross-entropy of the inference-path logits against the targets:
@@ -207,32 +207,47 @@ struct GPT(Copyable, Movable):
         self._check_length(t)
         var p = self.cfg.dropout
 
-        var wte_fwd = self.wte.forward_cached(ids)
+        # ids is borrowed; the token embedding consumes it into its cache.
+        var wte_fwd = self.wte.forward_cached(ids.copy())
         var wpe_fwd = self.wpe.forward_cached(position_ids(t))
         var emb = add(wte_fwd.output, wpe_fwd.output)  # [T, C]
+        # The two embedding outputs are already added into emb, so move each
+        # embedding cache out (split's returned output is dropped here).
+        var wte_cache = EmbeddingCache(List[Int]())  # placeholder, moved into
+        _ = wte_fwd^.split(wte_cache)
+        var wpe_cache = EmbeddingCache(List[Int]())  # placeholder, moved into
+        _ = wpe_fwd^.split(wpe_cache)
+
         var emb_drop = dropout_cached(
             emb, p, training, rng
         )  # embedding dropout
+        # DropoutResult is a shared temporary; its output field can't be moved
+        # out (the mask is needed later), so the residual stream copies it.
         var x = emb_drop.output.copy()  # [T, C]
 
         var mask = causal_mask(t)  # [T, T], shared by every block
         var block_caches = List[BlockCache]()
         for i in range(len(self.blocks)):
             var blk = self.blocks[i].forward_cached(x, mask, p, training, rng)
+            # The block output [T, C] feeds the next block; the block's whole
+            # (large) cache moves into the list rather than being deep-copied.
             x = blk.output.copy()
-            block_caches.append(blk.cache.copy())
+            block_caches.append(blk^.take_cache())
 
-        var ln_f_fwd = self.ln_f.forward_cached(x)  # output h [T, C]
-        var h = ln_f_fwd.output.copy()
-        var logits = matmul(h, transpose(self.wte.table.value))  # [T, V]
+        var ln_f_fwd = self.ln_f.forward_cached(x^)  # output h [T, C]
+        var ln_f_cache = LayerNormCache(
+            zeros_2d(0, 0), List[Float64](), List[Float64]()
+        )  # placeholder, replaced by the move
+        var h = ln_f_fwd^.split(ln_f_cache)  # cache -> ln_f_cache, returns h
+        var logits = h @ transpose(self.wte.table.value)  # [T, V]
 
         var cache = GPTCache(
-            wte_fwd.cache.copy(),
-            wpe_fwd.cache.copy(),
-            emb_drop.mask.copy(),
+            wte_cache^,
+            wpe_cache^,
+            emb_drop.mask.copy(),  # same: DropoutResult's field can't move out
             emb_drop.inv_keep,
             block_caches^,
-            ln_f_fwd.cache.copy(),
+            ln_f_cache^,
             h^,
         )
         return GPTForward(logits^, cache^)
@@ -269,8 +284,8 @@ struct GPT(Copyable, Movable):
         var c = self.wte.table.value.cols
 
         # Head path into a fresh [V, C] delta; d_h flows on down the stack.
-        var d_table = matmul(transpose(d_logits), cache.h)  # [V, C]
-        var d_h = matmul(d_logits, self.wte.table.value)  # [T, C]
+        var d_table = transpose(d_logits) @ cache.h  # [V, C]
+        var d_h = d_logits @ self.wte.table.value  # [T, C]
 
         # ln_f and the block stack.
         var d_x = self.ln_f.backward(cache.ln_f_cache, d_h)  # [T, C]

@@ -320,10 +320,12 @@ def test_mha_train_equals_eval() raises:
     var rng_b = Rng(5)
     var mha_b = MultiHeadAttention.init_random(rng_b, 6, 2)
 
-    var f_eval = mha_a.forward_cached(x, mask)
+    var f_eval = mha_a.forward_cached(x.copy(), mask)
     var _dx_eval = mha_a.backward(f_eval.cache, cot)
     var rng_drop = Rng(1)
-    var f_train = mha_b.forward_cached_train(x, mask, 0.5, False, rng_drop)
+    var f_train = mha_b.forward_cached_train(
+        x.copy(), mask, 0.5, False, rng_drop
+    )
     var _dx_train = mha_b.backward_train(f_train.cache, cot)
 
     for i in range(f_eval.output.rows):
@@ -352,7 +354,7 @@ def test_mha_backward_train_doubles_exactly() raises:
     var rng = Rng(9)
     var mha = MultiHeadAttention.init_random(rng, 6, 2)
     var rng_drop = Rng(3)
-    var fwd = mha.forward_cached_train(x, mask, 0.5, True, rng_drop)
+    var fwd = mha.forward_cached_train(x.copy(), mask, 0.5, True, rng_drop)
     var _d1 = mha.backward_train(fwd.cache, cot)
     # snapshot grads after one call
     var qkv1 = mha.qkv.weight.grad.copy()

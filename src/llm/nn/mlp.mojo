@@ -10,7 +10,7 @@
 
 from llm.nn.gelu import gelu_rows, gelu_rows_backward
 from llm.nn.linear import Linear, LinearCache
-from llm.tensor.tensor2d import Tensor2D
+from llm.tensor.tensor2d import Tensor2D, zeros_2d
 from llm.utils.random import Rng
 
 
@@ -31,6 +31,14 @@ struct MLPForward(Copyable, Movable):
     # forward_cached's output plus the cache its backward consumes.
     var output: Tensor2D  # [N, C]
     var cache: MLPCache
+
+    def split(deinit self, mut cache_slot: MLPCache) -> Tensor2D:
+        # Consume this forward: the cache moves into the caller's slot and the
+        # output is returned. Lets an assembly site (a block) take both pieces by
+        # move instead of copying each out of a live struct (a field cannot be
+        # transferred with `^`).
+        cache_slot = self.cache^
+        return self.output^
 
 
 @fieldwise_init
@@ -56,21 +64,35 @@ struct MLP(Copyable, Movable):
         var activated = gelu_rows(hidden)  # elementwise GELU
         return self.down.forward(activated)  # [N, hidden] -> [N, C]
 
-    def forward_cached(self, x: Tensor2D) raises -> MLPForward:
+    def forward_cached(self, var x: Tensor2D) raises -> MLPForward:
         # [N, C] -> MLPForward: the same output as forward, plus the cache
         # backward needs (the two Linear caches and the pre-activation hidden).
-        # Reads self; allocates the intermediates, the output, and the cache;
-        # raises on a feature-count mismatch (via the up Linear). The cache is
-        # valid only for this call.
-        var up_fwd = self.up.forward_cached(x)  # output = hidden [N, hidden]
-        var activated = gelu_rows(up_fwd.output)  # [N, hidden]
-        var down_fwd = self.down.forward_cached(activated)  # output [N, C]
-        var cache = MLPCache(
-            up_fwd.cache.copy(),  # LinearCache(x)
-            up_fwd.output.copy(),  # pre-activation hidden
-            down_fwd.cache.copy(),  # LinearCache(gelu(hidden))
+        # Takes x by value and threads it through by MOVE — the up Linear absorbs
+        # x into its cache, each stage's forward is split into (output, cache) and
+        # both pieces move on, so no [N, *] activation is copied on the way. Reads
+        # self; allocates the intermediates, the output, and the cache; raises on
+        # a feature-count mismatch (via the up Linear). The cache is valid only
+        # for this call.
+        var up_fwd = self.up.forward_cached(x^)  # x moves into the up cache
+        var up_cache = LinearCache(
+            zeros_2d(0, 0)
+        )  # placeholder, replaced by the move
+        var hidden_pre = up_fwd^.split(
+            up_cache
+        )  # cache -> up_cache; returns [N, hidden]
+        var activated = gelu_rows(hidden_pre)  # [N, hidden], elementwise GELU
+        var down_fwd = self.down.forward_cached(
+            activated^
+        )  # activated moves in
+        var down_cache = LinearCache(
+            zeros_2d(0, 0)
+        )  # placeholder, replaced by the move
+        var output = down_fwd^.split(
+            down_cache
+        )  # cache -> down_cache; returns [N, C]
+        return MLPForward(
+            output^, MLPCache(up_cache^, hidden_pre^, down_cache^)
         )
-        return MLPForward(down_fwd.output.copy(), cache^)
 
     def backward(mut self, cache: MLPCache, d_out: Tensor2D) raises -> Tensor2D:
         # Reverse of down(gelu(up(x))): compose the three stage backwards in
