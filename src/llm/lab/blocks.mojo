@@ -72,7 +72,7 @@ struct EncoderBlockForward(Copyable, Movable):
 
     def take_cache(deinit self) -> EncoderBlockCache:
         # Consume this forward and hand back just the (large) cache, dropping the
-        # output. The encoder loop reads the block output on for the next block,
+        # output. The encoder loop reads the block output, passing it on to the next block,
         # then moves this whole cache into its list instead of deep-copying it.
         return self.cache^
 
@@ -208,7 +208,7 @@ struct DecoderBlockForward(Copyable, Movable):
 
     def take_cache(deinit self) -> DecoderBlockCache:
         # Consume this forward and hand back just the (large) cache, dropping the
-        # output. The decoder loop reads the block output on for the next block,
+        # output. The decoder loop reads the block output, passing it on to the next block,
         # then moves this whole cache into its list instead of deep-copying it.
         return self.cache^
 

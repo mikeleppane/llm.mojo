@@ -34,7 +34,7 @@ def bench_gpt_step(steps: Int, warmup: Int) raises:
     var init_rng = Rng(0)
     var gpt = GPT.init_random(cfg, init_rng)
 
-    var t = 64
+    var t = cfg.context_length
     var ids = List[Int]()
     var targets = List[Int]()
     for i in range(t):

@@ -47,6 +47,14 @@ struct AttentionResult(Copyable, Movable):
         # the output moves it out instead of copying it out of a live struct.
         return self.output^
 
+    def split(deinit self, mut weights_slot: Tensor2D) -> Tensor2D:
+        # Consume this result, moving the weights into the caller's slot and
+        # returning the output. A caching forward keeps both pieces; this moves
+        # each out instead of copying it, since a struct's field can't be
+        # transferred with `^` while the struct is still live.
+        weights_slot = self.weights^
+        return self.output^
+
 
 def scaled_dot_product_attention(
     q: Tensor2D, k: Tensor2D, v: Tensor2D, mask: Tensor2D
@@ -150,10 +158,12 @@ def scaled_dot_product_attention_cached(
     # cache its backward needs (q, k, v, weights). Reads its args; allocates the
     # output and the cache; raises on the same shape mismatches the forward does.
     var result = scaled_dot_product_attention(q, k, v, mask)
-    var cache = AttentionCache(
-        q.copy(), k.copy(), v.copy(), result.weights.copy()
-    )
-    return AttentionForward(result.output.copy(), cache^)
+    # q/k/v are borrowed inputs the cache must own, so they copy; the output and
+    # weights are owned by `result`, so move them out instead of copying.
+    var weights = zeros_2d(0, 0)  # placeholder, replaced by the move
+    var output = result^.split(weights)
+    var cache = AttentionCache(q.copy(), k.copy(), v.copy(), weights^)
+    return AttentionForward(output^, cache^)
 
 
 def scaled_dot_product_attention_backward(
@@ -268,11 +278,17 @@ def scaled_dot_product_attention_train(
     var base = scaled_dot_product_attention(q, k, v, mask)  # base.weights = W
     var drop = dropout_cached(base.weights, p, training, rng)  # dropped_W, mask
     var output = drop.output @ v  # dropped_W @ v -> [T_q, D_v]
+    # base.weights (the PRE-dropout W) is owned by base and no longer read after
+    # the dropout call, so move it into the cache; base's recomputed output is
+    # unused and dropped. q/k/v are borrowed inputs, so they still copy, and
+    # DropoutResult's mask field can't move out.
+    var weights_pre = zeros_2d(0, 0)  # placeholder, replaced by the move
+    _ = base^.split(weights_pre)
     var cache = AttentionTrainCache(
         q.copy(),
         k.copy(),
         v.copy(),
-        base.weights.copy(),  # PRE-dropout W, for softmax_rows_backward
+        weights_pre^,  # PRE-dropout W, for softmax_rows_backward
         drop.mask.copy(),
         drop.inv_keep,
     )
