@@ -32,12 +32,14 @@
 
 from llm.nn.dropout import dropout_backward, dropout_cached
 from llm.nn.layernorm import LayerNorm, LayerNormCache
+from llm.nn.linear import LinearCache
 from llm.nn.mlp import MLP, MLPCache
 from llm.nn.optim import adamw_update, sgd_update
 from llm.nn.parameter import Parameter
 from llm.tensor.ops import add
-from llm.tensor.tensor2d import Tensor2D
+from llm.tensor.tensor2d import Tensor2D, zeros_2d
 from llm.transformer.attention import (
+    AttentionTrainCache,
     MHATrainCache,
     MultiHeadAttention,
 )
@@ -126,6 +128,12 @@ struct BlockForward(Copyable, Movable):
     var output: Tensor2D  # [T, C]
     var cache: BlockCache
 
+    def take_cache(deinit self) -> BlockCache:
+        # Consume this forward and hand back just the (large) cache, dropping the
+        # output. The model loop reads the block output on for the next block, then
+        # moves this whole cache into its list instead of deep-copying it.
+        return self.cache^
+
 
 @fieldwise_init
 struct TransformerBlock(Copyable, Movable):
@@ -178,26 +186,56 @@ struct TransformerBlock(Copyable, Movable):
         # computes. Reads self; allocates the intermediates, caches, and result;
         # mutates rng only in the training/p>0 branch; raises on a shape/config
         # mismatch or an out-of-range p. The cache is valid only for this call.
-        var ln1_fwd = self.ln1.forward_cached(x.copy())
+        # ln1 keeps its own copy of x because x is the residual stream, still
+        # needed at the `x + ...` add below. Each stage's forward is split into
+        # (output, cache): the output moves into the next stage, the cache moves
+        # into this block's cache — no [T, *] activation is copied.
+        var ln1_fwd = self.ln1.forward_cached(
+            x.copy()
+        )  # x is the residual, kept
+        var ln1_cache = LayerNormCache(
+            zeros_2d(0, 0), List[Float64](), List[Float64]()
+        )  # placeholder, replaced by the move
+        var ln1_out = ln1_fwd^.split(ln1_cache)  # cache -> ln1_cache
         var attn_fwd = self.attn.forward_cached_train(
-            ln1_fwd.output.copy(), mask, p, training, rng
+            ln1_out^, mask, p, training, rng
         )
-        var attn_drop = dropout_cached(attn_fwd.output, p, training, rng)
+        var attn_cache = MHATrainCache(
+            LinearCache(zeros_2d(0, 0)),
+            List[AttentionTrainCache](),
+            LinearCache(zeros_2d(0, 0)),
+        )  # placeholder, replaced by the move
+        var attn_out = attn_fwd^.split(attn_cache)  # cache -> attn_cache
+        var attn_drop = dropout_cached(attn_out, p, training, rng)
         var a = add(x, attn_drop.output)  # x + dropout(attn(ln1(x)))
 
-        var ln2_fwd = self.ln2.forward_cached(a.copy())
-        var mlp_fwd = self.mlp.forward_cached(ln2_fwd.output.copy())
-        var mlp_drop = dropout_cached(mlp_fwd.output, p, training, rng)
+        var ln2_fwd = self.ln2.forward_cached(
+            a.copy()
+        )  # a is the residual, kept
+        var ln2_cache = LayerNormCache(
+            zeros_2d(0, 0), List[Float64](), List[Float64]()
+        )  # placeholder, replaced by the move
+        var ln2_out = ln2_fwd^.split(ln2_cache)  # cache -> ln2_cache
+        var mlp_fwd = self.mlp.forward_cached(ln2_out^)
+        var mlp_cache = MLPCache(
+            LinearCache(zeros_2d(0, 0)),
+            zeros_2d(0, 0),
+            LinearCache(zeros_2d(0, 0)),
+        )  # placeholder, replaced by the move
+        var mlp_out = mlp_fwd^.split(mlp_cache)  # cache -> mlp_cache
+        var mlp_drop = dropout_cached(mlp_out, p, training, rng)
         var out = add(a, mlp_drop.output)  # a + dropout(mlp(ln2(a)))
 
         var cache = BlockCache(
-            ln1_fwd.cache.copy(),
-            attn_fwd.cache.copy(),
+            ln1_cache^,
+            attn_cache^,
+            # DropoutResult is a shared temporary; its mask field can't be moved
+            # out, so the cache copies it.
             attn_drop.mask.copy(),
             attn_drop.inv_keep,
-            ln2_fwd.cache.copy(),
-            mlp_fwd.cache.copy(),
-            mlp_drop.mask.copy(),
+            ln2_cache^,
+            mlp_cache^,
+            mlp_drop.mask.copy(),  # same: DropoutResult's field can't move out
             mlp_drop.inv_keep,
         )
         return BlockForward(out^, cache^)
