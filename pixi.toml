@@ -21,9 +21,12 @@ hello = "mojo run examples/hello.mojo"
 fmt = "mojo format src tests examples benchmarks"
 # CI gate: format, then fail if anything changed (never edits in CI).
 fmt-check = "mojo format src tests examples benchmarks && git diff --exit-code"
-# Run the whole test suite (smoke test first, then everything else).
-test = "bash scripts/test_all.sh"
-# TDD-loop variant: skip files that trip the Mojo #6554 compile stall (run those
-# standalone when you touch them). Same coverage otherwise.
+# CANONICAL green gate — smoke test first, then every test EXCEPT the files in
+# SLOW_6554 (currently only test_seq_tasks.mojo, which trips Mojo #6554 and can
+# hang for minutes). This is what CI runs and what "green" means in the docs.
 test-fast = "SKIP_SLOW=1 bash scripts/test_all.sh"
+# Superset of test-fast that ALSO runs the SLOW_6554 files. Not the gate: it can
+# hang on #6554. Use only when you are changing one of those files, and prefer
+# running that file standalone (see AGENTS.md).
+test = "bash scripts/test_all.sh"
 test-smoke = "mojo run -I src tests/test_smoke.mojo"
