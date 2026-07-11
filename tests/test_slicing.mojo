@@ -13,7 +13,7 @@ from std.testing import (
     TestSuite,
 )
 
-from llm.tensor.ops import slice_cols, concat_cols
+from llm.tensor.ops import slice_cols, slice_rows, concat_cols
 from llm.tensor.tensor2d import Tensor2D, from_rows
 
 
@@ -88,6 +88,63 @@ def test_slice_cols_bad_range_raises() raises:
         _ = slice_cols(a, 2, 5)  # end > cols
     with assert_raises(contains="slice_cols"):
         _ = slice_cols(a, 2, 2)  # empty range (start == end)
+
+
+def test_slice_rows_hand_checked() raises:
+    # [4, 2] -> rows [1, 3) -> [2, 2]. Pins that slice_rows reads the right rows
+    # with every column intact, not a transposed or offset window.
+    var a = from_rows([[10.0, 11.0], [20.0, 21.0], [30.0, 31.0], [40.0, 41.0]])
+    var s = slice_rows(a, 1, 3)  # [4, 2] -> [2, 2]
+    assert_equal(s.rows, 2)
+    assert_equal(s.cols, 2)
+    assert_almost_equal(s[0, 0], 20.0, atol=1e-12)
+    assert_almost_equal(s[0, 1], 21.0, atol=1e-12)
+    assert_almost_equal(s[1, 0], 30.0, atol=1e-12)
+    assert_almost_equal(s[1, 1], 31.0, atol=1e-12)
+
+
+def test_slice_rows_prefix_is_cache_view() raises:
+    # The valid-region view the KV cache leans on: rows [0, t) of a taller
+    # buffer. A [5, 3] buffer sliced to its first 2 rows yields exactly those
+    # rows, decoupled from the dead rows below.
+    var a = from_rows(
+        [
+            [1.0, 2.0, 3.0],
+            [4.0, 5.0, 6.0],
+            [7.0, 8.0, 9.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+        ]
+    )
+    var s = slice_rows(a, 0, 2)
+    assert_equal(s.rows, 2)
+    assert_equal(s.cols, 3)
+    for r in range(2):
+        for c in range(3):
+            assert_almost_equal(s[r, c], a[r, c], atol=1e-12)
+
+
+def test_slice_rows_full_height_is_identity() raises:
+    # Slicing the entire height [0, R) returns a copy equal to the input.
+    var a = from_rows([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
+    var s = slice_rows(a, 0, 3)
+    assert_equal(s.rows, 3)
+    assert_equal(s.cols, 2)
+    for r in range(3):
+        for c in range(2):
+            assert_almost_equal(s[r, c], a[r, c], atol=1e-12)
+
+
+def test_slice_rows_bad_range_raises() raises:
+    var a = from_rows([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]])
+    with assert_raises(contains="slice_rows"):
+        _ = slice_rows(a, 3, 1)  # start >= end
+    with assert_raises(contains="slice_rows"):
+        _ = slice_rows(a, -1, 2)  # start < 0
+    with assert_raises(contains="slice_rows"):
+        _ = slice_rows(a, 2, 5)  # end > rows
+    with assert_raises(contains="slice_rows"):
+        _ = slice_rows(a, 2, 2)  # empty range (start == end)
 
 
 def test_concat_cols_empty_list_raises() raises:

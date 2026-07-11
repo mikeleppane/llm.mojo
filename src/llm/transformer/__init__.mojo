@@ -30,6 +30,7 @@ from .gpt import (
     GPTForward,
     position_ids,
 )
+from .kv_cache import KVCache
 from .gpt2_weights import (
     GPT2W_MAGIC,
     GPT2W_FAMILY,

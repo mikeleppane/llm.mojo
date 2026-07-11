@@ -53,6 +53,16 @@ because it is what CI runs.
 - **Default `List[T]()` arguments are legal** (`init_m: List[Tensor2D] =
   List[Tensor2D]()`), the clean way to make an optional list parameter without an
   overload.
+- **Two `mut` element args are exclusivity-clean when they come from *distinct*
+  containers.** `f(mut a: Tensor2D, mut b: Tensor2D)` called as
+  `f(cache.k[i], cache.v[i])` compiles: `cache.k` and `cache.v` are separate
+  `List`s, so the two mutable element borrows have disjoint origins and no
+  exclusivity error fires. (The KV-cached decode step threads one layer's key and
+  value buffers down through `block.step` into `attn.step` exactly this way.) The
+  case that WOULD conflict is two mutable borrows of elements of the SAME list
+  (`f(xs[i], xs[j])`) — keep the two mutated things in different containers to
+  stay clean. A simultaneous immutable `self`/`read` borrow across the same call
+  does not conflict with either mutable element borrow.
 
 ## Compile-time evaluation (`comptime`)
 

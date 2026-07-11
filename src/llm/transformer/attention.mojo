@@ -21,6 +21,7 @@ from llm.tensor.ops import (
     concat_cols,
     scale,
     slice_cols,
+    slice_rows,
     softmax_rows,
     softmax_rows_backward,
     transpose,
@@ -487,6 +488,113 @@ struct MultiHeadAttention(Copyable, Movable):
         var concatenated = concat_cols(head_outputs)  # [T, C]
 
         return self.proj.forward(concatenated)  # [T, C] -> [T, C]
+
+    def step(
+        self,
+        x: Tensor2D,
+        mut k_cache: Tensor2D,
+        mut v_cache: Tensor2D,
+        pos: Int,
+    ) raises -> Tensor2D:
+        # KV-cached single-token self-attention: one query row [1, C] against the
+        # cached past -> [1, C]. This is `forward` one row wide, reusing the SAME
+        # frozen core with T_q = 1 and T_k = pos + 1 — no new attention math.
+        #
+        # k_cache / v_cache are this layer's [capacity, C] buffers; rows
+        # 0..pos-1 already hold the K/V of the earlier positions (written by
+        # earlier steps). pos is the newest position (= the cache's length on
+        # entry). The steps:
+        #   1. qkv.forward(x) -> [1, 3C], the same fused Linear the batch path
+        #      calls, on one row.
+        #   2. slice the Q, K, V thirds ([1, C] each); WRITE the K and V thirds
+        #      into cache row `pos`.
+        #   3. view the valid region k/v[0 : pos+1] -> [t, C], t = pos + 1.
+        #   4. per head, slice_cols the head's [1, D] query and [t, D] key/value
+        #      band, and call scaled_dot_product_attention with an all-ZEROS
+        #      [1, t] mask. The mask is zeros because a query at the newest
+        #      position attends to everything cached — causality is enforced by
+        #      what is IN the cache, not by masking (the batch causal mask's last
+        #      row is all zeros for the same reason, so the added term matches: 0).
+        #   5. concat the head outputs -> [1, C] and apply the proj Linear.
+        # Reads self; mutates k_cache and v_cache (row `pos`); allocates the
+        # projections, per-head slices, and result; raises on a bad shape/config
+        # or an out-of-range pos.
+        if self.n_heads <= 0:
+            raise Error(
+                "MultiHeadAttention.step: n_heads must be positive, got "
+                + String(self.n_heads)
+            )
+        var c = self.qkv.weight.value.cols  # in_features of c_attn = C
+        if c % self.n_heads != 0:
+            raise Error(
+                "MultiHeadAttention.step: C ("
+                + String(c)
+                + ") not divisible by n_heads ("
+                + String(self.n_heads)
+                + ")"
+            )
+        if x.rows != 1:
+            raise Error(
+                "MultiHeadAttention.step: expected a single query row [1, C],"
+                " got rows="
+                + String(x.rows)
+            )
+        if k_cache.cols != c or v_cache.cols != c:
+            raise Error(
+                "MultiHeadAttention.step: cache width must be C="
+                + String(c)
+                + ", got k_cache.cols="
+                + String(k_cache.cols)
+                + " v_cache.cols="
+                + String(v_cache.cols)
+            )
+        if k_cache.rows != v_cache.rows:
+            raise Error(
+                "MultiHeadAttention.step: k/v cache height mismatch, "
+                + String(k_cache.rows)
+                + " vs "
+                + String(v_cache.rows)
+            )
+        if pos < 0 or pos >= k_cache.rows:
+            raise Error(
+                "MultiHeadAttention.step: pos "
+                + String(pos)
+                + " out of range for cache capacity "
+                + String(k_cache.rows)
+            )
+        var d_head = c // self.n_heads  # per-head width D = C / H
+
+        var qkv_row = self.qkv.forward(x)  # [1, C] -> [1, 3C]
+        var q_row = slice_cols(qkv_row, 0, c)  # [1, C]
+        var k_row = slice_cols(qkv_row, c, 2 * c)  # [1, C]
+        var v_row = slice_cols(qkv_row, 2 * c, 3 * c)  # [1, C]
+
+        # Write this position's K and V (the full pre-head-split rows) into the
+        # cache at row `pos`, matching the batch path's k_all/v_all layout.
+        for j in range(c):
+            k_cache[pos, j] = k_row[0, j]
+            v_cache[pos, j] = v_row[0, j]
+
+        # The valid region is rows 0..pos: t = pos + 1 cached positions.
+        var t = pos + 1
+        var k_valid = slice_rows(k_cache, 0, t)  # [t, C]
+        var v_valid = slice_rows(v_cache, 0, t)  # [t, C]
+
+        var head_outputs = List[Tensor2D]()
+        for h in range(self.n_heads):
+            var lo = h * d_head
+            var hi = lo + d_head
+            var q_h = slice_cols(q_row, lo, hi)  # [1, D]
+            var k_h = slice_cols(k_valid, lo, hi)  # [t, D]
+            var v_h = slice_cols(v_valid, lo, hi)  # [t, D]
+            # All-zeros [1, t] mask: the newest query attends to every cached key.
+            var result = scaled_dot_product_attention(
+                q_h, k_h, v_h, zeros_2d(1, t)
+            )
+            head_outputs.append(result^.take_output())  # [1, D]
+        var concatenated = concat_cols(head_outputs)  # [1, C]
+
+        return self.proj.forward(concatenated)  # [1, C] -> [1, C]
 
     def forward_cached(
         self, var x: Tensor2D, mask: Tensor2D

@@ -5,4 +5,4 @@ from .sampler import (
     sample_categorical,
     sample_next,
 )
-from .generate import generate
+from .generate import generate, generate_cached
