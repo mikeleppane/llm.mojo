@@ -45,12 +45,17 @@ def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
 ```
 
-Run everything (smoke test first, then the suite), or one file while iterating:
+Run the whole suite (the canonical green gate), or one file while iterating:
 
 ```bash
-pixi run test
-pixi run mojo run -I src tests/test_softmax.mojo
+pixi run test-fast                                # THE gate — locally and in CI
+pixi run mojo run -I src tests/test_softmax.mojo  # one file, iterating
 ```
+
+`pixi run test-fast` runs everything except the files that trip Mojo #6554
+(currently only `tests/test_seq_tasks.mojo`); "green" means green under
+`test-fast`. `pixi run test` is a superset that also runs those files and can
+hang — not the gate. See [AGENTS.md](../../../AGENTS.md).
 
 One file per unit under test, named `tests/test_<thing>.mojo`. `scripts/test_all.sh`
 picks up new `test_*.mojo` files automatically — no list to maintain.
@@ -136,6 +141,25 @@ tolerance is visible and reviewable. **Loosening a tolerance to make a red test
 green is an Ask-first action** (AGENTS.md) — a widened tolerance usually hides a
 real regression, not floating-point noise.
 
+### The exact-equality exceptions
+
+"Never compare floats with `==`" is a rule about *numerical* results. A separate
+class of test asserts that something is bit-for-bit identical, because
+**exactness is the contract, not an approximation of it**. Assert exact (or
+bitwise) equality on purpose in these cases, and never "fix" one by switching it
+to a tolerance — that deletes the guarantee:
+
+| Contract | Why exact |
+|---|---|
+| deterministic RNG replay | same seed must reproduce the same stream, bit for bit |
+| checkpoint round trip | a resumed run must be identical, not merely close (values are stored as their IEEE-754 bit patterns) |
+| gradient doubling | two backward passes must give exactly `2×` — an off-by-ulps doubling is a future weight-tying bug (see AGENTS.md) |
+| zero-preservation | a masked attention position must be *exactly* `0.0`, not `1e-12` |
+| integer-valued counts | token ids, vocab sizes, parameter counts are integers — compare with `==` |
+
+If a would-be exactness test can only pass with a tolerance, that is a finding
+about the code, not a reason to relax the test.
+
 ---
 
 ## Determinism
@@ -157,7 +181,7 @@ real regression, not floating-point noise.
    a 2-layer tiny model. Small inputs make failures readable and tests fast.
 3. **One invariant per test**, named for what it locks
    (`test_softmax_rows_sum_to_one`, not `test_softmax`).
-4. **Run the floor** — `pixi run fmt`, `pixi run test` — before declaring done.
+4. **Run the floor** — `pixi run fmt`, `pixi run test-fast` — before declaring done.
 
 ---
 
@@ -170,4 +194,4 @@ real regression, not floating-point noise.
 - [ ] New math has an oracle (hand-calc, finite differences, or NumPy)
 - [ ] Randomness is seeded; greedy paths asserted exactly
 - [ ] A refactor commit does not move a golden test
-- [ ] `pixi run test` green; the new file follows `tests/test_<thing>.mojo`
+- [ ] `pixi run test-fast` green; the new file follows `tests/test_<thing>.mojo`

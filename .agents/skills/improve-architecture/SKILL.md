@@ -24,20 +24,33 @@ the per-edit coding contract, cite
 [mojo-coding-guidance](../mojo-coding-guidance/SKILL.md); this skill is about
 *structure*, not line-level style.
 
-**This skill produces a plan, not edits.** Execution is a separate, approved
-step — refactors touch many files and each is its own atomic commit.
+This skill is about the **codebase's structure** — packages, imports, module
+depth, public surfaces. It is *not* about editing the `ARCHITECTURE.md` prose
+document (that is a `docs` change); keeping that file honest is a documentation
+task, though a real structural change should of course be reflected there
+afterward.
+
+**When it produces a plan, that plan is a document, not edits** — execution is a
+separate, approved step, because refactors touch many files and each is its own
+atomic commit. But don't reach for a `docs/plans/` file reflexively: a quick
+structural question ("does this import point the wrong way?", "where should this
+helper live?") is answered **inline**. Write a durable plan only when the work is
+a genuine multi-commit refactor *and* a durable plan was asked for (or the
+friction clearly warrants one) — say which you're doing before you do it.
 
 ---
 
 ## The invariant to protect: one-directional layering
 
-The dependency graph flows one way. Lower layers never import higher ones:
-
-```text
-utils  →  tensor  →  nn  →  transformer  →  { training, generation }
-config + vocab  →  nn, transformer
-tokenizer  →  data  →  training
-```
+The dependency graph flows one way — lower layers never import higher ones. The
+main line is `utils → tensor → nn → transformer → { training, generation }`;
+`config` feeds `transformer`/`training`, there is a `data → models → training`
+branch, `vocab` and `tokenizer` are current islands (nothing in `src/` imports
+them yet), and `lab` is a quarantined Part-XII leaf above `training`. The
+**authoritative** graph — every edge — is the "Dependency layering" section of
+[AGENTS.md](../../../AGENTS.md#dependency-layering--one-direction-only); read it
+there rather than trusting a copy, and grep the real `from llm.` lines to
+confirm.
 
 The first thing to check in any architecture pass: **are all imports pointing
 down?** An "up" import (`tensor` importing `nn`, `utils` importing anything) or a
