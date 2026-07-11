@@ -85,7 +85,17 @@ struct KVCache(Copyable, Movable):
             raise Error(
                 "KVCache.check_compatible: cache has "
                 + String(len(self.k))
-                + " layers but model has "
+                + " key layers but model has "
+                + String(cfg.n_layers)
+            )
+        # Validate the value-buffer count too, BEFORE the loop indexes v[i] — a
+        # publicly built cache (@fieldwise_init) could carry mismatched k/v list
+        # lengths, and that must surface as this named error, not a bounds trap.
+        if len(self.v) != cfg.n_layers:
+            raise Error(
+                "KVCache.check_compatible: cache has "
+                + String(len(self.v))
+                + " value layers but model has "
                 + String(cfg.n_layers)
             )
         if self.capacity != cfg.context_length:

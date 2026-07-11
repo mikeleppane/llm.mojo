@@ -20,6 +20,7 @@ from std.testing import (
 )
 
 from llm.config import GPTConfig
+from llm.tensor.tensor2d import Tensor2D, zeros_2d
 from llm.transformer.gpt import GPT
 from llm.transformer.kv_cache import KVCache
 from llm.utils.random import Rng
@@ -89,6 +90,20 @@ def test_check_compatible_wrong_capacity_raises() raises:
     var longer = GPTConfig(DOLL_V, DOLL_T * 2, DOLL_C, DOLL_L, DOLL_H, 0.0)
     with assert_raises(contains="capacity"):
         cache.check_compatible(longer)
+
+
+def test_check_compatible_mismatched_kv_layer_count_raises() raises:
+    # A publicly built cache (via @fieldwise_init) can carry more key buffers than
+    # value buffers. check_compatible must surface that as the NAMED value-layer
+    # error before the per-layer loop indexes v[i] into a bounds trap.
+    var k = List[Tensor2D]()
+    var v = List[Tensor2D]()
+    k.append(zeros_2d(DOLL_T, DOLL_C))
+    k.append(zeros_2d(DOLL_T, DOLL_C))  # 2 key buffers
+    v.append(zeros_2d(DOLL_T, DOLL_C))  # only 1 value buffer
+    var cache = KVCache(k^, v^, 0, DOLL_T)
+    with assert_raises(contains="value layers"):
+        cache.check_compatible(_doll_cfg())
 
 
 # --- GPT.step full-cache guard and exact-capacity success ---------------------

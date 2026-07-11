@@ -157,6 +157,14 @@ def generate_cached(
         )
     cfg.validate()
 
+    # A 0-budget call is a no-op — return BEFORE the overflow gate so it matches
+    # generate for ANY prompt length. generate never forwards on a 0 budget (its
+    # loop runs zero times), so an over-context prompt returns [] there too;
+    # gating this behind the overflow check would make the two paths disagree on
+    # exactly that case. rng is bit-untouched; the cache is never allocated.
+    if max_new_tokens == 0:
+        return List[Int]()
+
     var context_length = gpt.cfg.context_length
     if len(prompt) + max_new_tokens > context_length:
         raise Error(
@@ -171,11 +179,8 @@ def generate_cached(
             " absolute), so shorten the prompt or the budget"
         )
 
-    var emitted = List[Int]()
-    if max_new_tokens == 0:
-        return emitted^  # valid no-op, rng bit-untouched, cache never allocated
-
     # Validation passed and there is real work to do — now pay for the cache.
+    var emitted = List[Int]()
     var cache = KVCache.fresh(gpt.cfg)
 
     # Prime: feed prompt[0 .. n-2] discarding their logits, then prompt[n-1] and

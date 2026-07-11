@@ -384,6 +384,28 @@ def test_cached_zero_budget_is_noop_rng_untouched() raises:
     assert_equal(rng.state, before)  # bit-untouched
 
 
+def test_cached_zero_budget_noop_ignores_overflow() raises:
+    # A 0-budget call is a no-op for ANY prompt length — even one LONGER than
+    # context_length, which would overflow a real generation. It must return []
+    # WITHOUT raising the overflow error (the check is gated behind the no-op) and
+    # leave rng untouched, matching generate (whose loop never runs, so it never
+    # forwards the over-long prompt either).
+    var gpt = _tiny_gpt2(1)
+    var long_prompt = List[Int]()
+    for i in range(TINY_C + 3):  # longer than context_length (8)
+        long_prompt.append((i * 3) % TINY_V)
+    var cfg = SamplerConfig(0.9, 5, 0.95)
+    var r_ca = Rng(555)
+    var before = r_ca.state
+    var out_ca = generate_cached(gpt, long_prompt, 0, cfg, List[Int](), r_ca)
+    assert_equal(len(out_ca), 0)
+    assert_equal(r_ca.state, before)  # bit-untouched
+    # generate agrees: 0 budget → [] regardless of prompt length.
+    var r_un = Rng(555)
+    var out_un = generate(gpt, long_prompt, 0, cfg, List[Int](), r_un)
+    _assert_ids_equal(out_ca, out_un)
+
+
 def test_cached_stop_token_appended_then_halts() raises:
     # Append-then-halt: the triggering stop token is the last element, and the run
     # is shorter than the budget — identical to generate's semantics.

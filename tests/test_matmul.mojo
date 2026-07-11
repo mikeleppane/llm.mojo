@@ -113,11 +113,14 @@ def test_matmul_transpose_b_equals_composed_spelling() raises:
     # The load-bearing claim: matmul_transpose_b(a, b) is BIT-IDENTICAL to
     # matmul(a, transpose(b)). transpose only relabels indices, so each output
     # cell accumulates over k in the same ascending order — the results must be
-    # EXACTLY equal, not merely close (assert_equal, no tolerance). This is the
-    # exactness the KV-cache tied head inherits: the decode step scores against
-    # the [V, C] table with this op, the batch path with the composed spelling,
-    # and the two logits rows must match to the bit. Several seeded shapes,
-    # including a [1, k] decode row.
+    # EXACTLY equal, not merely close (assert_equal, no tolerance). This pins the
+    # exactness the KV-cache tied head inherits. Note the batch head actually uses
+    # the `@` operator (the ikj kernel), not this ijk `matmul`; all THREE spellings
+    # accumulate each output cell over k ascending, so all three are bit-identical
+    # (the `@`-vs-ijk equality is pinned by test_at_operator_matches_matmul). We
+    # compare against `matmul` here because it makes the k-order explicit; the real
+    # decode-vs-batch head path is covered end to end by the step parity test.
+    # Several seeded shapes, including a [1, k] decode row.
     var rng = Rng(20260711)
     var shapes = [(3, 4, 5), (1, 7, 6), (4, 4, 4), (2, 1, 3), (6, 3, 1)]
     for s in range(len(shapes)):

@@ -87,11 +87,13 @@ def main() raises:
 
     # --- the honest "before": one uncached token at the FINAL context length ---
     # The uncached path re-runs the FULL forward for every token, and that forward
-    # grows as the sequence grows — so its per-token cost peaks at the final length
-    # (prompt + budget). Timing one full gpt.forward at that length is the honest
+    # grows as the sequence grows: over a budget of N it forwards lengths
+    # len(prompt) .. len(prompt) + N - 1, so its per-token cost PEAKS at
+    # len(prompt) + N - 1 (the final token conditions on everything before it, not
+    # on itself). Timing one full gpt.forward at that peak length is the honest
     # worst-case "before" the cache is measured against (the token values do not
     # affect the matmul sizes, so a cyclically-extended prompt suffices).
-    var final_len = len(prompt) + MAX_NEW_TOKENS
+    var final_len = len(prompt) + MAX_NEW_TOKENS - 1
     var timing_ctx = List[Int]()
     for i in range(final_len):
         timing_ctx.append(prompt[i % len(prompt)])
