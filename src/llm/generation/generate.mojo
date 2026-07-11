@@ -11,12 +11,17 @@
 # That is the forward contract for the BPE part, which reuses this verbatim with
 # real GPT-2 weights and END_OF_TEXT_ID as the stop token.
 #
-# Deliberately uncached: every step recomputes the FULL forward over all T
-# positions, which is O(T^2 * steps). That waste is the motivation for the KV
-# cache two parts on; here correctness comes first and the recompute is honest.
+# generate() is deliberately uncached: every step recomputes the FULL forward
+# over all T positions, which is O(T^2 * steps). That recompute is the honest
+# baseline, and it is what the KV cache removes — see generate_cached below, which
+# caches each layer's keys and values and feeds only the new token per step,
+# producing token-for-token identical output at a fraction of the per-token cost.
+# generate() stays as the reference oracle those two paths are proven equal
+# against, so its code is untouched.
 
 from llm.generation.sampler import SamplerConfig, sample_next
 from llm.transformer.gpt import GPT
+from llm.transformer.kv_cache import KVCache
 from llm.utils.random import Rng
 
 
@@ -97,5 +102,101 @@ def generate(
         seq.append(next_id)
         if _contains(stop_tokens, next_id):
             break  # append-then-halt: the output records why it stopped
+
+    return emitted^
+
+
+def generate_cached(
+    gpt: GPT,
+    prompt: List[Int],
+    max_new_tokens: Int,
+    cfg: SamplerConfig,
+    stop_tokens: List[Int],
+    mut rng: Rng,
+) raises -> List[Int]:
+    # The KV-cached twin of generate: SAME contract, same output, a fraction of
+    # the per-token cost. It returns ONLY the new tokens; stop semantics are
+    # append-then-halt; a stop id in the PROMPT never halts; an empty stop list
+    # never stops; an empty prompt raises; a negative max_new_tokens raises; 0 is
+    # a no-op returning an empty list with rng bit-untouched; greedy draws zero
+    # rng, sampled draws exactly one per emitted token via the SAME sample_next.
+    # Within the validated length domain it is token-for-token identical to
+    # generate AND leaves rng.state identical (stream parity), so generate remains
+    # the oracle this is proven against.
+    #
+    # The KVCache is an internal detail: allocated here AFTER validation (so a bad
+    # call never pays the ~151 MB) and never escaping — callers should not have to
+    # manage inference plumbing. (KVCache and GPT.step stay public for the tests.)
+    #
+    # OVERFLOW POLICY — up-front named raise if len(prompt) + max_new_tokens >
+    # context_length. generate slides a window over its context; the cached path
+    # CANNOT slide cheaply, and this is a teaching point rather than a limitation
+    # to paper over. GPT-2's positions are ABSOLUTE learned embeddings, so evicting
+    # the oldest token shifts every survivor's position and invalidates EVERY
+    # cached K/V row — a "sliding" cached generation would have to re-prime the
+    # whole window every step, i.e. the uncached algorithm wearing a cache costume.
+    # Within the validated domain neither path's window ever slides, so the two
+    # see identical contexts and token-for-token parity is well-defined.
+    #
+    # Flow: validate -> KVCache.fresh -> PRIME the prompt token-by-token through
+    # gpt.step (discard all but the last logits row) -> LOOP: sample the last row,
+    # append, check stop, and step the emitted token to advance the cache. Priming
+    # token-by-token is the same cost order as the ONE batch forward the uncached
+    # path spends on the prompt, and routing priming through the same `step` keeps
+    # a single code path so parity covers it too. Reads gpt; allocates the cache,
+    # the output, and per-step intermediates; mutates rng (sampled path only).
+    if len(prompt) == 0:
+        raise Error(
+            "generate_cached: empty prompt — the model has no BOS token, so"
+            " seed generation with at least one real token"
+        )
+    if max_new_tokens < 0:
+        raise Error(
+            "generate_cached: max_new_tokens must be non-negative, got "
+            + String(max_new_tokens)
+        )
+    cfg.validate()
+
+    var context_length = gpt.cfg.context_length
+    if len(prompt) + max_new_tokens > context_length:
+        raise Error(
+            "generate_cached: len(prompt) + max_new_tokens = "
+            + String(len(prompt))
+            + " + "
+            + String(max_new_tokens)
+            + " exceeds context_length "
+            + String(context_length)
+            + " — the cached path cannot slide the window (GPT-2's"
+            " positions are"
+            " absolute), so shorten the prompt or the budget"
+        )
+
+    var emitted = List[Int]()
+    if max_new_tokens == 0:
+        return emitted^  # valid no-op, rng bit-untouched, cache never allocated
+
+    # Validation passed and there is real work to do — now pay for the cache.
+    var cache = KVCache.fresh(gpt.cfg)
+
+    # Prime: feed prompt[0 .. n-2] discarding their logits, then prompt[n-1] and
+    # keep its logits row — the distribution over the first token to emit.
+    var n = len(prompt)
+    for i in range(n - 1):
+        _ = gpt.step(prompt[i], cache)
+    var logits = gpt.step(prompt[n - 1], cache)  # [1, V]
+
+    for step_i in range(max_new_tokens):
+        # The next token is conditioned on the whole prefix; the cached step
+        # returns a [1, V] tensor, so the last (only) row IS that distribution —
+        # the same borrow-a-row-view sample_next generate passes.
+        var next_id = sample_next(logits.row(logits.rows - 1), cfg, rng)
+        emitted.append(next_id)
+        if _contains(stop_tokens, next_id):
+            break  # append-then-halt: the output records why it stopped
+        if step_i < max_new_tokens - 1:
+            # Advance the cache with the emitted token to get the next row. Skipped
+            # on the final iteration (no further token is sampled from it), which
+            # is also what keeps the position count within the validated capacity.
+            logits = gpt.step(next_id, cache)
 
     return emitted^

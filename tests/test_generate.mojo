@@ -17,7 +17,7 @@ from std.math import log
 from std.testing import assert_equal, assert_true, assert_raises, TestSuite
 
 from llm.config import GPTConfig
-from llm.generation.generate import generate
+from llm.generation.generate import generate, generate_cached
 from llm.generation.sampler import SamplerConfig
 from llm.tensor.ops import (
     argmax,
@@ -278,6 +278,161 @@ def _rng() -> Rng:
     # A fresh seeded generator. Greedy calls never draw from it, but generate's
     # signature takes `mut rng`, and a temporary cannot bind to a mut argument.
     return Rng(0)
+
+
+# --- generate_cached: parity with generate, and its own contract --------------
+#
+# generate_cached must be the KV-cached twin of generate: same tokens, same rng
+# stream, same contract. The parity tests use a TWO-layer doll-house so a
+# cross-layer cache-indexing bug cannot hide, and check both the emitted ids AND
+# rng.state (stream parity, not just output parity).
+
+
+def _tiny_gpt2(seed: UInt64) raises -> GPT:
+    # Two-layer doll-house (V=11, context 8, d_model 8, 2 heads, dropout 0).
+    var cfg = GPTConfig(TINY_V, TINY_C, 8, 2, 2, 0.0)
+    var rng = Rng(seed)
+    return GPT.init_random(cfg, rng)
+
+
+def test_cached_matches_uncached_greedy() raises:
+    # Greedy: identical tokens and identical (untouched) rng.state across paths.
+    var gpt = _tiny_gpt2(2)
+    var prompt: List[Int] = [7, 2, 5]
+    var r_un = Rng(4242)
+    var r_ca = Rng(4242)
+    var un = generate(gpt, prompt, 5, SamplerConfig.greedy(), List[Int](), r_un)
+    var ca = generate_cached(
+        gpt, prompt, 5, SamplerConfig.greedy(), List[Int](), r_ca
+    )
+    _assert_ids_equal(ca, un)
+    assert_equal(r_ca.state, r_un.state)  # both greedy: zero draws either way
+
+
+def test_cached_matches_uncached_sampled_with_stream_parity() raises:
+    # Sampled (temperature 0.9, top-k AND top-p engaged): identical tokens AND
+    # identical rng.state — the cached path must consume the draw stream exactly
+    # as the uncached path does, one draw per emitted token via the same
+    # sample_next.
+    var gpt = _tiny_gpt2(3)
+    var prompt: List[Int] = [1, 9, 4]
+    var cfg = SamplerConfig(0.9, 5, 0.95)  # temperature, top_k=5, top_p=0.95
+    var r_un = Rng(2024)
+    var r_ca = Rng(2024)
+    var un = generate(gpt, prompt, 5, cfg, List[Int](), r_un)
+    var ca = generate_cached(gpt, prompt, 5, cfg, List[Int](), r_ca)
+    _assert_ids_equal(ca, un)
+    assert_equal(r_ca.state, r_un.state)  # same number of draws, same order
+
+
+def test_cached_overflow_raises_up_front() raises:
+    # len(prompt) + max_new_tokens > context_length raises NAMED before any
+    # generation — the cached path cannot slide the window.
+    var gpt = _tiny_gpt2(1)
+    var prompt: List[Int] = [1, 2, 3, 4, 5]  # len 5, context is 8
+    var rng = _rng()
+    with assert_raises(contains="context_length"):
+        _ = generate_cached(
+            gpt, prompt, 4, SamplerConfig.greedy(), List[Int](), rng
+        )  # 5 + 4 = 9 > 8
+
+
+def test_cached_at_exactly_context_length_succeeds() raises:
+    # len(prompt) + max_new_tokens == context_length is the boundary that must
+    # SUCCEED, and it must still match the uncached path token-for-token.
+    var gpt = _tiny_gpt2(1)
+    var prompt: List[Int] = [1, 2, 3, 4, 5]  # len 5
+    var r_un = Rng(7)
+    var r_ca = Rng(7)
+    var un = generate(gpt, prompt, 3, SamplerConfig.greedy(), List[Int](), r_un)
+    var ca = generate_cached(
+        gpt, prompt, 3, SamplerConfig.greedy(), List[Int](), r_ca
+    )  # 5 + 3 == 8
+    assert_equal(len(ca), 3)
+    _assert_ids_equal(ca, un)
+
+
+def test_cached_empty_prompt_raises() raises:
+    var gpt = _tiny_gpt2(1)
+    var rng = _rng()
+    with assert_raises(contains="empty prompt"):
+        _ = generate_cached(
+            gpt, List[Int](), 4, SamplerConfig.greedy(), List[Int](), rng
+        )
+
+
+def test_cached_negative_budget_raises() raises:
+    var gpt = _tiny_gpt2(1)
+    var prompt: List[Int] = [3, 1, 4]
+    var rng = _rng()
+    with assert_raises(contains="max_new_tokens"):
+        _ = generate_cached(
+            gpt, prompt, -1, SamplerConfig.greedy(), List[Int](), rng
+        )
+
+
+def test_cached_zero_budget_is_noop_rng_untouched() raises:
+    # 0 budget returns an empty list and does not touch rng (even a sampled cfg
+    # draws nothing, since nothing is emitted).
+    var gpt = _tiny_gpt2(1)
+    var prompt: List[Int] = [3, 1, 4]
+    var cfg = SamplerConfig(0.9, 5, 0.95)
+    var rng = Rng(555)
+    var before = rng.state
+    var out = generate_cached(gpt, prompt, 0, cfg, List[Int](), rng)
+    assert_equal(len(out), 0)
+    assert_equal(rng.state, before)  # bit-untouched
+
+
+def test_cached_stop_token_appended_then_halts() raises:
+    # Append-then-halt: the triggering stop token is the last element, and the run
+    # is shorter than the budget — identical to generate's semantics.
+    var gpt = _tiny_gpt2(3)
+    var prompt: List[Int] = [5, 9]
+    var budget = (
+        6  # prompt 2 + 6 == context 8 (the cached path cannot overflow)
+    )
+
+    var r1 = _rng()
+    var full = generate_cached(
+        gpt, prompt, budget, SamplerConfig.greedy(), List[Int](), r1
+    )
+    var stop = full[2]
+    var expected_len = _first_index(full, stop) + 1
+
+    var stops: List[Int] = [stop]
+    var r2 = _rng()
+    var out = generate_cached(
+        gpt, prompt, budget, SamplerConfig.greedy(), stops, r2
+    )
+    assert_equal(len(out), expected_len)
+    assert_equal(out[len(out) - 1], stop)  # ends with the stop token
+    assert_true(len(out) < budget, "stop did not shorten the run")
+    for i in range(len(out)):
+        assert_equal(out[i], full[i])  # a prefix of the unstopped run
+
+
+def test_cached_stop_id_in_prompt_does_not_halt() raises:
+    # A stop id occurring only in the PROMPT must not stop anything.
+    var gpt = _tiny_gpt2(3)
+    var prompt: List[Int] = [5, 9]
+    var budget = 5
+
+    var r1 = _rng()
+    var full = generate_cached(
+        gpt, prompt, budget, SamplerConfig.greedy(), List[Int](), r1
+    )
+    assert_true(
+        _first_index(full, prompt[0]) == -1,
+        "test premise broke: prompt token was re-emitted",
+    )
+    var stops: List[Int] = [prompt[0]]
+    var r2 = _rng()
+    var out = generate_cached(
+        gpt, prompt, budget, SamplerConfig.greedy(), stops, r2
+    )
+    assert_equal(len(out), budget)  # ran to budget, prompt occurrence ignored
+    _assert_ids_equal(out, full)
 
 
 def main() raises:
