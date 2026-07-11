@@ -29,7 +29,7 @@ reviewable and reversible.
 **Working pattern:**
 
 ```text
-implement one slice → pixi run fmt → pixi run test → commit → next slice
+implement one slice → pixi run fmt → pixi run test-fast → commit → next slice
 ```
 
 Not:
@@ -86,6 +86,13 @@ Use exactly these:
 
 Behavior changed? → `feat`/`fix`. Same behavior, different structure? →
 `refactor`. Same behavior, faster? → `perf`. Only tests? → `test`.
+
+**The type is always one of the ten above.** `examples`, `skills`, and `lab` are
+**scopes, not types** (they name an *area*, not a *kind* of change): a docs edit
+to a skill is `docs(skills): …`, an example gaining a feature is
+`feat(examples): …`, and lab code is `refactor(lab): …`. Do not write
+`examples(...)` or `skills(...)` as the leading type — some early history did,
+and that grammar is retired going forward.
 
 ### Scope (required)
 
@@ -174,7 +181,7 @@ planning artifacts*, not on genuine prior art.
 ## Atomic commits
 
 One logical change per commit, each passing the floor (`pixi run fmt`,
-`pixi run test`). If the subject needs "and", split.
+`pixi run test-fast`). If the subject needs "and", split.
 
 **Good:**
 
@@ -232,11 +239,14 @@ commit, not in review.
 
 1. **Review staged changes** — `git diff --staged`. One logical change? If not,
    split.
-2. **Floor** — `pixi run fmt` (leaves no changes), then `pixi run test` (green).
-   Never commit code that fails format or tests.
+2. **Floor** — `pixi run fmt` (leaves no changes), then `pixi run test-fast`
+   (green). Never commit code that fails format or tests.
 3. **Never-commit paths** — `.pixi/`, `build/`, `checkpoints/`, `*.mojopkg`,
    `*.ckpt/*.bin/*.npy`, `__pycache__/`. These are gitignored; keep them out.
-4. **Quick secret scan** — `git diff --staged | grep -iE "password|secret|api[_-]?key|token"`.
+4. **Quick secret scan** — `git diff --staged | grep -iE "password|secret|api[_-]?key|-----BEGIN [A-Z ]*PRIVATE KEY|AKIA[0-9A-Z]{16}"`.
+   (Deliberately *not* matching the bare word "token" — this is a tokenizer
+   project, so `token`/`tokens`/`token_id` appear on nearly every line and would
+   drown the scan. Match credential *shapes*, not English words.)
 5. Choose the right **type** and **scope** (read `src/llm/*` if unsure).
 6. Write a specific **subject** and a **why** body.
 7. Handle **breaking changes** (`!` + footer).
@@ -281,6 +291,9 @@ Skip the summary for trivial one-liners.
 - **PR title** mirrors a commit subject; **PR body** mirrors a commit body
   (problem, approach, any Ask-first boundary and the answer you got). **No AI
   attribution in the PR body either.**
+- **Merge commits are exempt** from the `type(scope): subject` grammar — a
+  default `Merge …` subject (or a short descriptive one) is fine; they carry no
+  scope. The no-AI-attribution rule still applies to them.
 
 ---
 
@@ -321,6 +334,6 @@ Before every commit:
 - [ ] Breaking changes carry `!` and a `BREAKING CHANGE:` footer
 - [ ] **No AI/assistant attribution anywhere**
 - [ ] `pixi run fmt` leaves no changes
-- [ ] `pixi run test` passes
+- [ ] `pixi run test-fast` passes
 - [ ] No never-commit paths (`.pixi/`, `build/`, `checkpoints/`, `*.mojopkg`)
 - [ ] No formatter-only churn mixed with behavior changes

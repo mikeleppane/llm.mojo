@@ -33,8 +33,8 @@ The rest of this skill is the project's *coding* contract on top of that syntax.
 Before any Mojo change is done:
 
 ```bash
-pixi run fmt      # mojo format — never hand-format, let the tool decide
-pixi run test     # the file you touched must be covered and green
+pixi run fmt        # mojo format — never hand-format, let the tool decide
+pixi run test-fast  # the canonical gate; the file you touched must be covered and green
 ```
 
 `mojo format` is the arbiter of layout: line breaks, import wrapping,
@@ -113,18 +113,25 @@ Never shadow the reserved convention words `ref`, `mut`, `out`, `deinit`,
 
 This is a numerics project; the subtle bugs are numerical.
 
-- **Never compare floats with `==`.** Use `assert_almost_equal` with a tolerance
-  sized to the precision: `1e-9`–`1e-12` for `Float64` reference math,
-  `1e-4`–`1e-5` for `Float32` model math. (See
-  [test-driven-development](../test-driven-development/SKILL.md).)
+- **Never compare floats with `==` for a numerical result.** Use
+  `assert_almost_equal` with a tolerance sized to the precision: `1e-9`–`1e-12`
+  for `Float64` reference math, `1e-4`–`1e-5` when model math is `Float32`.
+  Exact/bitwise equality is right only where *exactness is the contract* — RNG
+  replay, checkpoint bit-round-trip, the gradient-doubling `2×` test,
+  zero-preservation, integer counts — and there you assert it deliberately.
+  (See [test-driven-development](../test-driven-development/SKILL.md).)
 - **Softmax and log-sum-exp are computed stably** — subtract the row max before
   `exp`. A "correct" naive softmax overflows on real logits; the stable form is
   the reference implementation, not an optimization.
 - **Be explicit about dtype.** Mojo does not implicitly convert between numeric
   *variables* — write `Float32(my_int) * scale`, `Int(my_uint)`. Literals are
   polymorphic and adapt to context (`var a: Float32 = 0.5`), so don't wrap them.
-  Decide the model's working dtype (`Float32`) and the reference dtype
-  (`Float64`) deliberately and keep tests aware of which they compare against.
+  **Today the model *and* the reference math are both `Float64`** (`Tensor2D`/
+  `Tensor3D` are `List[Float64]`). `Float32` is planned for the performance part
+  and already appears at one boundary: the released-weights loader reads GPT-2's
+  on-disk f32 payload and widens `f32 → f64` *exactly* (every float32 is a
+  float64). Keep tests aware of which dtype they compare against, and don't
+  describe model math as `Float32` until the narrowing actually lands.
 - **Guard divisions and logs.** Add the epsilon where the math needs it (layer
   norm denominator, cross-entropy `log`), and document the epsilon's value and
   why — it is exactly the kind of magic constant AGENTS.md forbids leaving
@@ -171,16 +178,15 @@ This is a numerics project; the subtle bugs are numerical.
   *and* masks), split it — the split usually reveals a hidden dependency you can
   now make explicit. Detailed guidance and refactor planning live in
   [improve-architecture](../improve-architecture/SKILL.md).
-- **Dependencies flow one direction** (the authoritative graph is in AGENTS.md):
-
-  ```text
-  utils  →  tensor  →  nn  →  transformer  →  { training, generation }
-  config + vocab  →  nn, transformer
-  tokenizer  →  data  →  training
-  ```
-
-  Never import "up" the graph. If you need something from a higher layer, it
-  belongs lower.
+- **Dependencies flow one direction.** The main line is
+  `utils → tensor → nn → transformer → { training, generation }`, with `config`
+  feeding `transformer`/`training`, a `data → models → training` branch, and the
+  quarantined `lab` above `training`. The **authoritative** allowed-dependency
+  graph — every edge, and the note that `vocab`/`tokenizer` are current islands —
+  lives in
+  [AGENTS.md](../../../AGENTS.md#dependency-layering--one-direction-only); don't
+  restate it here. Never import "up" the graph. If you need something from a
+  higher layer, it belongs lower.
 - **`__init__.mojo` is the package's public surface** — re-export the clean names
   (`from .ops import matmul, softmax_rows`) so callers write
   `from llm.tensor import matmul`, and you can move files inside the package
@@ -193,7 +199,13 @@ This is a numerics project; the subtle bugs are numerical.
 ## Language gotchas that bite in this repo
 
 These are the current-Mojo footguns most likely to hit numeric/collection code.
-The `mojo-syntax` skill has the full list; these are the ones that recur here:
+The `mojo-syntax` skill has the full list of *language* rules; the repo's
+compiler/formatter/stdlib incident catalogue for the pinned `1.0.0b2` toolchain
+(ownership transfers, `comptime` evaluation, exact-gradient accumulation, the
+`out`-reassignment formatter trap, binary I/O) lives in
+[docs/mojo-1.0.0b2-notes.md](../../../docs/mojo-1.0.0b2-notes.md) — read it
+before ownership-heavy code, `comptime`, a backward pass, or serialization. The
+few that recur most here:
 
 - **`List` has no variadic constructor.** Use bracket literals: `var v = [1, 2, 3]`,
   `var w: List[Float32] = [1.0, 2.0]`. `List[Int](1, 2, 3)` does not compile.
@@ -218,7 +230,7 @@ The `mojo-syntax` skill has the full list; these are the ones that recur here:
 
 ## Review checklist for a Mojo change
 
-- [ ] `pixi run fmt` clean, `pixi run test` green
+- [ ] `pixi run fmt` clean, `pixi run test-fast` green
 - [ ] Every tensor function states input/output shapes + mutate/allocate/raise
 - [ ] Short symbols only next to a shape comment; else descriptive names
 - [ ] No float `==`; tolerances match the precision

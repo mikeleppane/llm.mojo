@@ -8,6 +8,11 @@ written out, tested, and explained. It is the companion codebase to a written
 guide currently in preparation: every chapter's code is built and verified here
 first, so nothing gets published that doesn't compile and pass its tests.
 
+**Current status:** Parts I–XVI are complete — the from-scratch Mojo model,
+fed OpenAI's real released GPT-2 (124M) weights, generates coherent English and
+agrees with a Hugging Face reference to ~6e-5. Parts XVII+ (KV cache and
+performance) are next. Live per-part status is in [PROGRESS.md](PROGRESS.md).
+
 ## What this is
 
 - A readable, tested path from a bigram model (a lookup table that predicts
@@ -65,8 +70,8 @@ drift would break that, so the tests forbid it.
 
 - **Python-family syntax with systems-level control.** The code reads like the
   math, but ownership, value semantics, and explicit copies are part of the
-  language. The difference between borrowing and copying a KV cache is
-  visible in the source.
+  language. The difference between borrowing and copying a layer's activation
+  cache is visible in the source.
 - **Compile-time metaprogramming (`comptime`) and first-class SIMD** give a
   real path from "clear and correct" to "fast" without rewriting in another
   language. Correctness lands first; the same code is then optimized in place,
@@ -100,7 +105,9 @@ part follows the same loop:
    everything is green. Branches are kept so the guide can reference the exact
    code state of each part.
 5. **Determinism everywhere.** A self-contained seeded LCG drives every random
-   choice (init, shuffling, sampling). Same seed, same result, on any machine.
+   choice (init, shuffling, sampling). Same seed, same result under the pinned
+   toolchain on the supported platform (`linux-64` today) — the RNG owns its own
+   bit stream rather than depending on a standard-library generator.
 
 ### The interop policy
 
@@ -125,15 +132,18 @@ reference, not an optimization.
 ```text
 src/llm/          the library, one package per concern
   config.mojo       model/training configuration
-  vocab.mojo        toy vocabulary (chapter II)
+  vocab.mojo        toy vocabulary (an early chapter's example)
   tokenizer/        char tokenizer + byte-level BPE + GPT-2 tokenizer
   data/             corpus loading, train/val split, batching
-  tensor/           Tensor2D/3D/4D and ops (matmul, softmax, cross-entropy, ...)
-  nn/               linear, embedding, norms, activations, MLP
-  transformer/      masks, attention, positional encoding, blocks, the model
+  tensor/           Tensor2D/Tensor3D and ops (matmul, softmax, cross-entropy, ...)
+  nn/               parameter, linear, embedding, norms, activations, MLP, AdamW math
+  transformer/      masks, attention, positional encoding, blocks, the GPT model,
+                    released-weight loader
   models/           small self-contained models (bigram, ...)
-  training/         loss, optimizer, trainer, checkpointing
-  generation/       sampling, KV cache, generation
+  training/         loss, optimizer, LR schedule, trainer, checkpointing
+  generation/       sampling + the autoregressive generation loop
+  lab/              Part-XII encoder-decoder lab (cross-attention), quarantined
+                    off the main line
   utils/            seeded RNG, timing helpers
 examples/         runnable demonstrations
 tests/            correctness checks (TestSuite; one file per unit)
@@ -142,14 +152,18 @@ data/             committed reference data (GPT-2 vocab/merges, tiny Shakespeare
 scripts/          download scripts (provenance + checksums) and dev tooling
 ```
 
-Dependencies flow in one direction only, and lower layers never import higher
-ones:
+Dependencies flow in one direction only — lower layers never import higher ones.
+The main line is:
 
 ```text
 utils  →  tensor  →  nn  →  transformer  →  { training, generation }
-config + vocab  →  nn, transformer
-tokenizer  →  data  →  models  →  { training, generation }
 ```
+
+with `config` feeding `transformer` and `training`, a `data → models → training`
+branch, and the Part-XII `lab` sitting above `training` as a quarantined leaf.
+The **authoritative allowed-dependency graph** (every package, every edge) lives
+in [AGENTS.md](AGENTS.md#dependency-layering--one-direction-only); the design
+reasoning is in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 Two conventions do a lot of work here. Every tensor-shaped value carries a
 shape comment (`# [B, T, C]`), and every public tensor function documents four
@@ -201,11 +215,16 @@ The only prerequisite is [pixi](https://pixi.sh); it installs the pinned Mojo
 toolchain and Python environment from the lockfile.
 
 ```bash
-git clone <this repo> && cd mojo-llm-from-scratch
+git clone https://github.com/mikeleppane/llm.mojo.git && cd llm.mojo
 pixi install            # exact environment from pixi.lock
 pixi run mojo-version   # verify the pinned Mojo version
-pixi run test           # run the full test suite (offline, deterministic)
+pixi run test-fast      # the green gate (offline, deterministic)
 ```
+
+`pixi run test-fast` is the canonical gate — it runs the whole suite except one
+file that trips a Mojo compiler stall (see
+[AGENTS.md](AGENTS.md#the-6554-compile-stall-and-how-to-keep-the-tdd-loop-fast)).
+It needs no network: all reference data (~2.5 MB) is committed.
 
 Day-to-day commands:
 
@@ -215,8 +234,14 @@ pixi run mojo run -I src tests/test_matmul.mojo   # run a single test file
 pixi run mojo run -I src examples/<example>.mojo  # run an example
 ```
 
-`-I src` puts the `llm` package on the import path. The test suite needs no
-network: all reference data is committed.
+`-I src` puts the `llm` package on the import path.
+
+**Running the real GPT-2 (Part XVI).** The final demo loads OpenAI's released
+124M weights, which are *not* committed: `scripts/convert_gpt2_weights.py`
+downloads and converts them into the repo's `GPT2W v1` format (a ~475 MB file)
+once. Generation then runs in `Float64` on CPU — it holds roughly 2 GB resident
+and, without the KV cache (Part XVII, not yet built), is on the order of minutes
+per token. The point of Part XVI is fidelity, not speed; the speed comes later.
 
 ## Getting the most out of this if you are learning
 
@@ -229,8 +254,9 @@ network: all reference data is committed.
   `git log` reads as a build narrative.
 - **Break things on purpose.** Remove the row-max subtraction from softmax and
   watch the stability test fail; flip a sign in a gradient and watch the
-  finite-difference check catch it. The tests are cheap to run and localize
-  failures precisely. That is what they are for.
+  finite-difference check catch it. A focused unit test is cheap to run and
+  localizes failures precisely (the suite precompiles the `llm` package so each
+  test builds only its own file). That is what they are for.
 - **Follow the shapes.** Every operation is annotated with `[B, T, C]`-style
   comments. Most LLM implementation bugs are shape bugs; the annotations are
   how you follow the dimensions without running anything.
@@ -243,7 +269,7 @@ network: all reference data is committed.
 Working conventions (the Mojo syntax contract, quality gates, dependency
 layering, commit format) live in [AGENTS.md](AGENTS.md), with deeper
 task-specific guidance under [`.agents/skills/`](.agents/skills/). The floor
-for any change: `pixi run fmt` leaves no diff and `pixi run test` is green.
+for any change: `pixi run fmt` leaves no diff and `pixi run test-fast` is green.
 CI enforces both on every push ([ci.yml](.github/workflows/ci.yml)).
 
 ## Data and references
@@ -261,4 +287,4 @@ CI enforces both on every push ([ci.yml](.github/workflows/ci.yml)).
 
 ## License
 
-TBD.
+[MIT](LICENSE). © 2026 Mikko Leppänen.

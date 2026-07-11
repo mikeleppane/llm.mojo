@@ -31,8 +31,12 @@ findings against the source skill or AGENTS.md.
 
 ## Before reading a line
 
-1. **Reproduce the floor.** `pixi run fmt-check` and `pixi run test` must be
-   green. A red suite is finding #1 — stop and report it.
+1. **Reproduce the floor.** `pixi run fmt-check` and `pixi run test-fast` (the
+   canonical gate; see AGENTS.md) must be green. A red suite is finding #1 —
+   stop and report it. *Exception:* for a **docs-only diff** (Markdown,
+   docstrings, comments — nothing under `src/`, `tests/`, `examples/`,
+   `benchmarks/`), skip the test run; `fmt-check` and a read are enough. Run the
+   suite the moment the diff touches code.
 2. **Read the diff with its commit messages.** Does each commit do one thing with
    an honest scope and a *why* body? Does a `refactor`/`perf` commit actually
    preserve behavior (no moved golden test, no changed logits)?
@@ -63,10 +67,15 @@ not a script.
   none — it teaches the reader a lie. Trace the dimensions by hand.
 - Is softmax / log-sum-exp / layer-norm computed **stably** (max subtracted,
   epsilon present and documented)? A naive `exp` overflows on real logits.
-- Are `Float32` (model) and `Float64` (reference) used deliberately, and do tests
-  compare against the right one with the right tolerance?
-- Any float compared with `==`? Any magic constant (an epsilon, a scale, a
-  `sqrt(d_head)`) undocumented?
+- Is dtype used deliberately? Today model *and* reference math are both
+  `Float64`; `Float32` is planned and currently appears only at the
+  released-weights boundary (exact `f32 → f64` widening on load). Flag code or a
+  comment that describes model math as `Float32` before that narrowing lands.
+- Any float compared with `==` **for a numerical result**? (Exact equality is
+  correct for the exactness contracts — RNG replay, checkpoint round-trip,
+  gradient doubling, zero-preservation, integer counts — so don't flag those;
+  flag a *widened* exactness test, which deletes a guarantee.) Any magic constant
+  (an epsilon, a scale, a `sqrt(d_head)`) undocumented?
 - For a backward pass: is there a **finite-difference gradient test**? Unverified
   gradients are the #1 quiet bug — treat a missing one as a High finding.
 
@@ -81,8 +90,10 @@ not a script.
 ### 4. Architecture
 
 - Does every new import point **down** the dependency graph? Judge against the
-  **full** graph in AGENTS.md — it includes the `config + vocab → nn,
-  transformer` and `tokenizer → data → training` branches, not just the
+  **authoritative full graph** in
+  [AGENTS.md](../../../AGENTS.md#dependency-layering--one-direction-only) — it
+  includes `config → transformer/training`, the `data → models → training`
+  branch, and the quarantined `lab` leaf, not just the
   `utils → tensor → nn → transformer → {training, generation}` spine. An "up"
   import or a cycle is a High finding — cite
   [improve-architecture](../improve-architecture/SKILL.md).
