@@ -47,119 +47,42 @@ publishable until its code passes these — see *Publishing* below):
   subcommand was removed.
 - No stdlib `Tensor[T]`. This project defines its own tensors under
   `src/llm/tensor/`.
-- Never compare floats with `==`. Use `assert_almost_equal` with a tolerance.
-- You **cannot transfer a single struct field** out of a live value:
-  `s.field^` fails with "destroyed out of the middle of a value". `.copy()` the
-  field (or move the whole `s`). Owned (`var`) args likewise need `^`/`.copy()`
-  at the call site — `List`/`Dict`/user structs are not `ImplicitlyCopyable`.
-  This includes a returned struct's field: `list.append(result.output^)` on an
-  `AttentionResult` fails; use `result.output.copy()`.
-- **Binding a `List[T]` element to a local copies it** when `T` is `Copyable`
-  but not `ImplicitlyCopyable` (`Tensor2D`, user structs): `var part = parts[i]`
-  fails with "cannot be implicitly copied". Read the scalar fields you need off
-  `parts[i]` and subscript `parts[i][...]` directly, or `.copy()` when you truly
-  need to own the element.
-- **`Dict` subscript (`d[key]`) raises** on the pinned Mojo, so any function
-  that indexes a `Dict` must itself be `raises` — even a lookup guarded by
-  `if key in d` that can never actually miss. (Pretrained code and the chapter
-  drafts routinely mark such helpers non-raising; they will not compile.)
-- **`comptime` evaluates user structs and non-raising methods.** A user struct
-  constructs in a comptime context and a non-raising method runs on it at
-  compile time (`comptime cfg = GPTConfig.gpt2_124m()` then
-  `comptime assert cfg.parameter_count() == N`). This is how a pure arithmetic
-  invariant becomes a *build* failure, not just a test failure. Raising
-  functions cannot be comptime-evaluated, so the method must be a plain `def`
-  with no `raises`.
-- **A `comptime assert` only fires where its function is *called*.** An
-  uncalled function's `comptime assert` is never evaluated (a deliberately
-  false one compiles clean). Give every contract pin a live call site — a test
-  that calls it — or it enforces nothing.
-- **A comptime value that isn't `ImplicitlyCopyable` can't be read at runtime
-  directly.** `comptime T = build_list()` compiles, but a bare use site fails
-  with "cannot materialize comptime value ... because it is not
-  'ImplicitlyCopyable'". Lift it explicitly with `materialize[T]()` — the build
-  runs at compile time, the read copies the frozen result. A bare use is a
-  compile error, never a silent copy.
-- **`std.math` transcendental/root functions run in a comptime context.** Not
-  just exact integer arithmetic — `comptime SQRT_2_OVER_PI = sqrt(2.0 / pi)`
-  compiles and is bit-identical to the hand-spelled literal (verified with a
-  `comptime assert` against `0.7978845608028654`). So a derived numeric constant
-  whose derivation is its documentation can be bound at compile time, not only a
-  literal. A constant that is *fitted*, not derived (e.g. GELU's `0.044715`), has
-  no expression to bind — name and cite it instead.
-- **A struct constructor that takes `var value` and needs the value's shape must
-  read the shape *before* the move.** `self.grad = zeros_2d(value.rows,
-  value.cols)` then `self.value = value^` works; reordering (move first, read
-  after) uses a destroyed value. This is the ownership shape of every layer
-  factory here (`Parameter`, and the `init_random`/`init_default` factories that
-  build tensors then hand them to `Parameter`).
-- **A gradient that must accumulate to an *exact* double needs one `+=` per
-  backward call, not a running `+=` inside a loop.** Backward accumulates into
-  `Parameter.grad` (`+=`, never `=`) so two paths through one Parameter sum — and
-  a per-layer test pins that two backward passes yield bit-for-bit `2×` the
-  grads. That exact equality is real only if each call adds a single fully-formed
-  delta: a running `grad[j] += …` *inside* a per-row/element loop interleaves the
-  second call's partial sums with the first call's stored result, which rounds
-  differently than `2·grad1`. So accumulate the call's contribution into locals,
-  then add the finished delta to `grad` once (LayerNorm's `dγ`/`dβ`). Grads formed
-  by one matmul and added once (Linear's `dW`) already satisfy this. A gradient
-  can be numerically *correct* and still fail the doubling test — that is the test
-  earning its keep, since a doubling off by ulps is a future weight-tying bug.
-- **A Parameter fed by *two* paths in one backward call must sum them into one
-  delta before the single `+=`.** The weight-tying case the rule above warned
-  about: `GPT`'s tied token table gets gradient from the head matmul *and* the
-  embedding gather in the same `backward`. Adding them as two separate `+=` makes
-  two calls accumulate as `((h+g)+h)+g`, which is not bit-identical to `2·(h+g)`
-  (float addition is not associative), so the exact-doubling test fails. Combine
-  the paths into one `[V, C]` delta, then add it to `grad` once — one fully-formed
-  `+=` per call, per the rule above. The gradient *value* is the same either way;
-  only the doubling distinguishes them, which is why the doubling test is separate
-  from the finite-diff.
-- **A temporary cannot bind to a `mut` argument.** `f(mut rng: Rng)` called as
-  `f(Rng(0))` fails — an rvalue has no mutable storage to borrow. Bind a named
-  `var rng = Rng(0)` and pass that, even when the callee will not actually mutate
-  it on this path (e.g. an eval-mode `forward_cached` that draws no rng but whose
-  signature still takes `mut rng`).
-- **Bind a temporary's non-`ImplicitlyCopyable` field to a local before using
-  it.** `some_call(...).cache` where `cache: AttentionCache` errors ("cannot be
-  implicitly copied … consider transferring with `^`"), because the temporary is
-  destroyed and the field can't be transferred out of it. Bind the whole result
-  first (`var fwd = some_call(...); fwd.cache`), which borrows the field. Same
-  family as the single-field-transfer rule above.
-- **`mojo format` rejects a plain reassignment to a local named `out`** — `out =
-  expr` fails with `Cannot parse` even though the compiler accepts it, because
-  `out` is the argument-convention keyword and the formatter's parser reads
-  `out = …` as a malformed signature. `out += …`, `out[i] = …`, and `return out`
-  all format fine; only the bare reassignment trips it. A file can compile and
-  pass `pixi run test` yet fail `pixi run fmt-check` for this alone. Don't name a
-  reassigned local `out` (use `acc`/`result`); the same guard applies to the
-  other convention keywords (`mut`, `read`, `owned`, `ref`, `deinit`). Reserved
-  words also surprise as ordinary identifiers: `ref` cannot be a variable name at
-  all (`unexpected token in expression`).
-- **A Float64 ↔ its IEEE-754 bit pattern:** `x.to_bits[DType.uint64]()` and
-  `bitcast[DType.float64, 1](SIMD[DType.uint64, 1](bits))[0]` (import `bitcast`
-  from `std.memory`). `Float64.from_bits` does not exist on the pinned Mojo. This
-  is how the checkpoint stores exact values (a hex UInt64 per Float64) so a resume
-  round-trips bit-for-bit instead of through a re-rounded decimal.
-- **`String.split(sep)` yields `StringSlice`, not `String`**, so a helper typed
-  `List[String]` needs an explicit `String(slice)` per element; and a
-  newline-terminated file always leaves a trailing empty slice, which a parser
-  must drop (or it surfaces as a spurious blank-line error rather than the real
-  "truncated file").
-- **Default `List[T]()` arguments are legal** (`init_m: List[Tensor2D] =
-  List[Tensor2D]()`), the clean way to make an optional list parameter without an
-  overload.
-- **Raw binary file reads: `open(path, "r").read_bytes()`** returns the whole
-  file as a `List[UInt8]`. There is **no `"rb"` mode** — passing it raises
-  `invalid mode: "rb". Can only be one of {"r", "w", "rw", "a"}`; `read_bytes()`
-  is a method on the ordinary text handle, not a binary-open flag. Reconstruct a
-  little-endian float32 from four bytes with
-  `bitcast[DType.float32, 1](SIMD[DType.uint32, 1](b0 | b1<<8 | b2<<16 | b3<<24))[0]`
-  and widen with `Float64(f32)` — the widening is EXACT (every float32 is a
-  float64), so a released-weights loader round-trips the on-disk f32 bit-for-bit
-  (the GPT2W loader pins this with a probe). Scan for the header's newline and
-  break at it rather than reading the whole file into a `String` — a 498 MB
-  payload should never materialize as one string.
+- Never compare floats with `==` **for a numerical result** — use
+  `assert_almost_equal` with a dtype-sized tolerance. Exact/bitwise equality is
+  correct only where *exactness itself is the contract*: deterministic RNG
+  replay, a checkpoint bit-for-bit round trip, the gradient-doubling test (two
+  backward passes give exactly `2×`), zero-preservation (a masked position is
+  exactly `0.0`), and integer-valued counts. In those cases assert exact
+  equality on purpose and say why — do not "fix" such a test by loosening it to
+  a tolerance (that hides the very regression it guards). See
+  [test-driven-development](.agents/skills/test-driven-development/SKILL.md).
+
+Beyond this contract, the pinned toolchain (`1.0.0b2`) has a set of
+compiler/formatter/stdlib gotchas that have each cost real debugging time. They
+are **catalogued in [docs/mojo-1.0.0b2-notes.md](docs/mojo-1.0.0b2-notes.md)** —
+consult it before non-trivial Mojo. The categories, so you know whether your task
+is affected without opening the file:
+
+- **Ownership, copies, transfers** — you can't `^` a single field out of a live
+  value; binding a `List[T]` element copies it; read a `var value`'s shape before
+  moving it; a temporary can't bind to a `mut` arg or have its field used
+  in-place.
+- **`comptime`** — it evaluates user structs and non-raising methods (how a
+  parameter-count invariant becomes a *build* failure); a `comptime assert` only
+  fires where its function is called; a non-`ImplicitlyCopyable` comptime value
+  needs `materialize[T]()`; `std.math` transcendentals are comptime-legal.
+- **Raising** — `Dict` subscript raises, so any `Dict`-indexing helper must be
+  `raises` even when the key can't miss.
+- **Exact-gradient accumulation** — one fully-formed `+=` per backward call (not
+  a running `+=` in a loop), and sum a two-path Parameter into one delta, or the
+  bit-exact gradient-doubling test fails.
+- **Formatter and reserved words** — `mojo format` rejects a bare reassignment to
+  a local named `out` (or any convention keyword); `ref` can't be a variable name
+  at all. A file can pass `test-fast` yet fail `fmt-check` for this alone.
+- **Binary and string I/O** — the `Float64 ↔ bits` bitcast idiom (no
+  `Float64.from_bits`); `String.split` yields `StringSlice` + a trailing empty
+  slice; there is no `"rb"` open mode (use `read_bytes()`), and don't materialize
+  a ~500 MB payload as one `String`.
 
 ## Toolchain and the quality floor
 
@@ -175,13 +98,23 @@ pixi run hello          # examples/hello.mojo
 
 ```bash
 pixi run fmt            # mojo format (rewrites in place)
-pixi run test           # smoke test first, then the whole suite
+pixi run test-fast      # the canonical green gate (see below)
 ```
 
+`pixi run test-fast` is **the** gate — locally and in CI. It runs the smoke test
+first, then every test *except* the files in `SLOW_6554` (currently only
+`tests/test_seq_tasks.mojo`), which trip Mojo #6554 and can hang a run for
+minutes. "The suite is green" always means green under `test-fast`. `pixi run
+test` is a strict superset that *also* runs those files; it is **not** the gate
+(it can hang) — run it only when you are changing a SLOW_6554 file, and prefer
+running that file standalone. The one currently excluded file is a Part XII lab
+test; the lab is a frozen teaching layer, so this is a known, accepted coverage
+gap rather than missing coverage of the main line.
+
 CI runs `pixi run fmt-check` (format then `git diff --exit-code`, so it fails on
-a diff instead of editing) and `pixi run test`. Locally you fix formatting with
-`pixi run fmt`; never commit code that fails format or tests. Run a single test
-directly while iterating:
+a diff instead of editing) and `pixi run test-fast`. Locally you fix formatting
+with `pixi run fmt`; never commit code that fails format or tests. Run a single
+test directly while iterating:
 
 ```bash
 pixi run mojo run -I src tests/test_softmax.mojo
@@ -227,37 +160,40 @@ at `-O0` on a precompiled package. Mitigations, in order of preference:
   starts stalling, split it into smaller test files (each gets a smaller table)
   rather than piling more `def test_*` into one module. Prefer append-helper
   builders over long inline `[a, b, …]` `List[Int]` literals.
-- **Don't run known-slow files in the red/green loop.** `SKIP_SLOW=1 pixi run
-  test` (aka `pixi run test-fast`) skips the files listed in `SLOW_6554` in
-  `scripts/test_all.sh` and still runs everything else; the default `pixi run
-  test` keeps full coverage for CI. Run a skipped file standalone only when you're
-  actually changing it: `pixi run mojo run --no-optimization -I build tests/<file>`.
+- **Don't run known-slow files in the red/green loop.** `pixi run test-fast`
+  (`SKIP_SLOW=1`) skips the files listed in `SLOW_6554` in `scripts/test_all.sh`
+  and still runs everything else — this is the canonical gate, locally and in CI.
+  `pixi run test` is the superset that also runs the SLOW_6554 files; run it (or
+  better, the single file standalone) only when you're actually changing one:
+  `pixi run mojo run --no-optimization -I build tests/<file>`.
 - When you add a file that trips the stall, append it to `SLOW_6554` and note the
   standalone run time, so the loop stays fast for the next part.
 
 The standing `SLOW_6554` member is **`tests/test_seq_tasks.mojo`** (a Part XII lab
 test), and its #6554 stall is severe enough to effectively **hang** a run, not just
 cost a slow minute — so in practice **never invoke it**, and take the pre-merge
-green gate with `pixi run test-fast` (`SKIP_SLOW=1`), which runs the whole suite
-except that one file. "The suite is green" always means green with
+green gate with `pixi run test-fast`, which runs the whole suite except that one
+file (this is also what CI runs). "The suite is green" always means green with
 `test_seq_tasks` excluded; do not try to fix, delete, or wait it out (it is a
-frozen lab layer anyway).
+frozen lab layer anyway). Because the lab is quarantined off the main line, this
+one excluded file is an accepted coverage gap, not a hole in the model's tests.
 
 ## Layout
 
 ```text
 src/llm/          the library — reusable implementation, one package per concern
   config.mojo       model/training configuration
-  vocab.mojo        vocabulary
-  tokenizer/        char + BPE tokenizers
+  vocab.mojo        toy whitespace vocabulary (an early chapter's example)
+  tokenizer/        char + BPE + GPT-2 tokenizers
   data/             text datasets, batch iteration
   tensor/           Tensor2D/Tensor3D and ops (matmul, softmax, ...)
-  nn/               parameter, linear, embedding, norm, activation, mlp
-  transformer/      masks, attention, positional, block, model
+  nn/               parameter, linear, embedding, norm, activation, mlp, optim (AdamW math)
+  transformer/      masks, attention, positional, block, gpt, gpt2_weights (loader)
   models/           standalone models (bigram); not nn layers, not the GPT
-  training/         loss, optimizer, trainer, checkpoint
-  generation/       sampler, kv_cache, generate
-  utils/            random, math, timing, logging
+  training/         loss, optimizer, schedule, trainer, checkpoint
+  generation/       sampler, generate  (KV cache is Part XVII — not yet built)
+  lab/              Part-XII encoder-decoder lab — quarantined off the main line
+  utils/            random (seeded RNG), timing
 examples/         runnable demonstrations (not core logic)
 tests/            correctness checks (TestSuite)
 benchmarks/       performance measurement (after correctness)
@@ -282,12 +218,31 @@ Dependencies flow from foundational to high-level. **Lower layers never import
 higher layers.** A cycle (e.g. `utils` importing `transformer`) makes code
 impossible to test in isolation — treat one as a bug.
 
+**This is the authoritative allowed-dependency graph.** Every arrow is an
+*allowed import direction* — a package may import from lower layers, never from a
+higher one. It reflects the actual import edges in `src/llm/` (grep the
+`from llm.` lines to check). README, ARCHITECTURE.md, and the skills all defer to
+this graph rather than restating it.
+
 ```text
-utils  →  tensor  →  nn  →  transformer  →  { training, generation }
-config + vocab  →  nn, transformer
-tokenizer  →  data  →  training
-tensor, data  →  models  →  { training, generation }
+Layer 0  utils   config   vocab*   tokenizer*      (no internal imports)
+Layer 1  tensor (uses utils)        data (uses utils)
+Layer 2  nn (uses tensor)           models (uses tensor, data)
+Layer 3  transformer (uses nn, config)
+Layer 4  training (uses transformer, models, data, config)   generation (uses transformer)
+Layer 5  lab (uses transformer, training, nn)   — quarantined Part-XII encoder-decoder
 ```
+
+Notes on the graph:
+
+- **`config`** feeds `transformer` and `training` (not `nn`). **`utils`** and
+  **`tensor`** are the widely-shared foundation.
+- **`vocab`** and **`tokenizer`** are self-contained today (`*`): nothing under
+  `src/` imports them yet — each is exercised only by its own test/example until
+  the guide reaches the chapter that consumes it. They are still Layer 0 (they
+  import nothing internal).
+- **`lab`** is a frozen teaching layer that sits *above* `training`; nothing
+  imports `lab`. Keeping it at the top is what lets it be quarantined.
 
 When you add an import that points "up" the graph, stop: the dependency belongs
 somewhere else, or the thing you need should move down. See
@@ -356,7 +311,8 @@ as modules emerge):
 | `nn` | `src/llm/nn/` |
 | `transformer` | `src/llm/transformer/` |
 | `models` | `src/llm/models/` (standalone models, e.g. bigram) |
-| `training` | `src/llm/training/` (loss, optimizer, trainer) |
+| `lab` | `src/llm/lab/` (Part-XII encoder-decoder lab, quarantined) |
+| `training` | `src/llm/training/` (loss, optimizer, schedule, trainer) |
 | `checkpoint` | checkpoint save/load format |
 | `generation` | `src/llm/generation/` |
 | `utils` | `src/llm/utils/` |
@@ -370,6 +326,15 @@ as modules emerge):
 
 Use a module's own scope when a change touches one module. Reserve broad edits
 for when they genuinely span the spine.
+
+**Grammar: the *type* is one of the fixed set** (`feat`, `fix`, `refactor`,
+`perf`, `docs`, `test`, `bench`, `build`, `ci`, `chore` — see
+[git-conventions](.agents/skills/git-conventions/SKILL.md)). `examples`,
+`skills`, and `lab` are **scopes, not types** — so a docs change to a skill is
+`docs(skills): …`, an example gains a feature as `feat(examples): …`, and lab
+code is refactored as `refactor(lab): …`. Never use `examples` or `skills` as a
+leading type. **Merge commits** are exempt from the `type(scope): subject`
+grammar — keep the default `Merge …` subject (or a short descriptive one).
 
 ## Ask first (do not do these silently)
 
@@ -394,7 +359,7 @@ This repo backs a written series, so an extra gate applies to guide code:
 1. Write the chapter; audit every Mojo snippet against the syntax contract above
    and the `mojo-syntax` skill. Mark pseudocode as ```text```, not ```mojo```.
 2. Extract runnable code into `examples/` and `tests/`.
-3. `pixi run fmt` → `pixi run test` → build representative examples.
+3. `pixi run fmt` → `pixi run test-fast` → build representative examples.
 4. Only then commit. A chapter with unverified `mojo` code blocks is not done.
 
 ## Skills index
