@@ -1,26 +1,28 @@
 # Progress
 
 Build status per part of the from-scratch Transformer. "Test command" is what
-proves the part green on a fresh checkout (`pixi install` first).
+proves the part green on a fresh checkout (`pixi install` first). `pixi run
+test-fast` is the canonical gate — it runs the whole suite except one
+#6554-stalling lab file; see [AGENTS.md](AGENTS.md).
 
 | Part | Title | Status | Test command | Date |
 |------|-------|--------|--------------|------|
-| I | Foundations & config | ✅ green | `pixi run test` | 2026-07-03 |
-| II | Vocabulary | ✅ green | `pixi run test` | 2026-07-03 |
-| III | Tensors & ops | ✅ green | `pixi run test` | 2026-07-03 |
-| IV | Utilities (rng, math) | ✅ green (`Rng` + float draws, timing) | `pixi run test` | 2026-07-03 |
-| V | Tokenization | ✅ green | `pixi run test` | 2026-07-03 |
-| VI | Dataset pipeline | ✅ green | `pixi run test` | 2026-07-03 |
-| VII | Tiny bigram LM | ✅ green | `pixi run test` | 2026-07-03 |
-| VIII | Architecture family | ✅ green (preset + exact param count + comptime pin) | `pixi run test` | 2026-07-03 |
-| IX | NN building blocks | ✅ green (Parameter, Linear, Embedding, LayerNorm, GELU, Dropout, MLP — forward only) | `pixi run test` | 2026-07-04 |
-| X | Attention | ✅ green (additive masks, scaled-dot-product core self+cross, fused-QKV multi-head — forward only) | `pixi run test` | 2026-07-04 |
-| XI | Backpropagation by hand | ✅ green (every layer's backward finite-difference-checked; explicit per-layer caches; grads accumulate) | `pixi run test` | 2026-07-04 |
-| XII | Encoder-decoder lab | ✅ green (cross-attention + pre-LN blocks assembled into a seq2seq model in `src/llm/lab/`; trains copy/reverse to exact-match with a memory ablation; all lab code quarantined off the main line) | `pixi run test` | 2026-07-04 |
-| XIII | The GPT-2 model | ✅ green (pre-LN `TransformerBlock` + weight-tied `GPT`; three-site dropout; residual-init scaling; walk reconciles with the 124,439,808 formula) | `pixi run test` | 2026-07-04 |
-| XIV | Training | ✅ green (AdamW with decoupled decay + selective weight decay; warmup/cosine schedule; global-norm clipping; bit-exact checkpoints with a proven resume gate; `train_gpt` over `BatchLoader`; the parameter walk promoted to a load-bearing registry) | `pixi run test` | 2026-07-05 |
-| XV | Generation | ✅ green (top-k + top-p distribution filters in probability space; one `SamplerConfig` policy — greedy/temperature/top-k/top-p — with temperature 0 = argmax drawing zero rng; the autoregressive `generate` loop with sliding-window crop and append-then-halt stop tokens; LCG-replay sampled goldens; a memorize-then-speak capstone; the Shakespeare checkpoint speaking four ways) | `pixi run test` | 2026-07-05 |
-| XVI | Loading real GPT-2 weights (the MVP) | ✅ green (offline safetensors→`GPT2W v1` converter with every Conv1D transpose + buffer skip in one place; native `load_gpt2` builds the GPT fieldwise from the f32 payload, exact f32→f64 widening, named header validation; doll-house sentinel parity in-suite + f64 goldens at 124M; **the from-scratch Mojo forward, fed OpenAI's real weights, generates coherent English** — HF-f32 agreement 6e-5) | `pixi run test` | 2026-07-05 |
+| I | Foundations & config | ✅ green | `pixi run test-fast` | 2026-07-03 |
+| II | Vocabulary | ✅ green | `pixi run test-fast` | 2026-07-03 |
+| III | Tensors & ops | ✅ green | `pixi run test-fast` | 2026-07-03 |
+| IV | Utilities (rng, math) | ✅ green (`Rng` + float draws, timing) | `pixi run test-fast` | 2026-07-03 |
+| V | Tokenization | ✅ green | `pixi run test-fast` | 2026-07-03 |
+| VI | Dataset pipeline | ✅ green | `pixi run test-fast` | 2026-07-03 |
+| VII | Tiny bigram LM | ✅ green | `pixi run test-fast` | 2026-07-03 |
+| VIII | Architecture family | ✅ green (preset + exact param count + comptime pin) | `pixi run test-fast` | 2026-07-03 |
+| IX | NN building blocks | ✅ green (Parameter, Linear, Embedding, LayerNorm, GELU, Dropout, MLP — forward only) | `pixi run test-fast` | 2026-07-04 |
+| X | Attention | ✅ green (additive masks, scaled-dot-product core self+cross, fused-QKV multi-head — forward only) | `pixi run test-fast` | 2026-07-04 |
+| XI | Backpropagation by hand | ✅ green (every layer's backward finite-difference-checked; explicit per-layer caches; grads accumulate) | `pixi run test-fast` | 2026-07-04 |
+| XII | Encoder-decoder lab | ✅ green (cross-attention + pre-LN blocks assembled into a seq2seq model in `src/llm/lab/`; trains copy/reverse to exact-match with a memory ablation; all lab code quarantined off the main line) | `pixi run test-fast` | 2026-07-04 |
+| XIII | The GPT-2 model | ✅ green (pre-LN `TransformerBlock` + weight-tied `GPT`; three-site dropout; residual-init scaling; walk reconciles with the 124,439,808 formula) | `pixi run test-fast` | 2026-07-04 |
+| XIV | Training | ✅ green (AdamW with decoupled decay + selective weight decay; warmup/cosine schedule; global-norm clipping; bit-exact checkpoints with a proven resume gate; `train_gpt` over `BatchLoader`; the parameter walk promoted to a load-bearing registry) | `pixi run test-fast` | 2026-07-05 |
+| XV | Generation | ✅ green (top-k + top-p distribution filters in probability space; one `SamplerConfig` policy — greedy/temperature/top-k/top-p — with temperature 0 = argmax drawing zero rng; the autoregressive `generate` loop with sliding-window crop and append-then-halt stop tokens; LCG-replay sampled goldens; a memorize-then-speak capstone; the Shakespeare checkpoint speaking four ways) | `pixi run test-fast` | 2026-07-05 |
+| XVI | Loading real GPT-2 weights (the MVP) | ✅ green (offline safetensors→`GPT2W v1` converter with every Conv1D transpose + buffer skip in one place; native `load_gpt2` builds the GPT fieldwise from the f32 payload, exact f32→f64 widening, named header validation; doll-house sentinel parity in-suite + f64 goldens at 124M; **the from-scratch Mojo forward, fed OpenAI's real weights, generates coherent English** — HF-f32 agreement 6e-5) | `pixi run test-fast` | 2026-07-05 |
 | XVII+ | KV cache + performance | not started | — | — |
 
 ## Notes

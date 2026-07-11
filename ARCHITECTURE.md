@@ -6,9 +6,10 @@ lists the working rules; this document covers the design: the system's parts,
 the boundaries between them, and the reasoning behind each decision, with
 examples from the actual code.
 
-Packages appear as their roadmap part lands, so some of what is described here
-is design intent for parts still in flight. [PROGRESS.md](PROGRESS.md) tracks
-what exists today.
+Parts I–XVI have landed: the full GPT-2 (124M) model, training, generation, and
+loading OpenAI's real released weights all exist and are tested. What remains
+(the KV cache and the performance work, Parts XVII+) is called out as *planned*
+where it appears. [PROGRESS.md](PROGRESS.md) tracks what exists today per part.
 
 ## The goal, and the three constraints that shape everything
 
@@ -91,29 +92,48 @@ src/llm/
   vocab.mojo        toy whitespace vocabulary (an early chapter's example)
   tokenizer/        char tokenizer, byte-level BPE, GPT-2 tokenizer
   data/             corpus loading, splits, windowing, batching
-  tensor/           Tensor2D/3D/4D, matmul, softmax, cross-entropy, init
-  nn/               linear, embedding, norms, activations, MLP
-  transformer/      masks, attention, positional encoding, blocks, the model
+  tensor/           Tensor2D/3D, matmul, softmax, cross-entropy, init
+  nn/               parameter, linear, embedding, norms, activations, MLP, AdamW math
+  transformer/      masks, attention, positional encoding, blocks, the GPT model,
+                    the released-weight loader
   models/           small self-contained models (bigram)
-  training/         loss metrics, optimizers, trainer, checkpoints
-  generation/       sampling, KV cache, generation loop
+  training/         loss, optimizer, LR schedule, trainer, checkpoints
+  generation/       sampling and the autoregressive generation loop
+  lab/              Part-XII encoder-decoder lab (cross-attention), quarantined
   utils/            seeded RNG, timing helpers
 ```
 
+Tensors currently go up to rank 3 (`Tensor2D`, `Tensor3D`); the four-dimensional
+attention shapes below are realized by indexing and looping over those, not by a
+dedicated `Tensor4D`. The KV cache lives in the roadmap (Part XVII), not yet in
+`generation/`.
+
 Dependencies flow in one direction. A package may import from packages to its
-left in the graph below, never from the right:
+left in the graph below, never from the right. The **authoritative** version of
+this graph — with every edge and the reasoning — is the "Dependency layering"
+section of [AGENTS.md](AGENTS.md#dependency-layering--one-direction-only); this
+diagram mirrors it:
 
 ```mermaid
 flowchart LR
     utils --> tensor --> nn --> transformer
+    utils --> data
+    tensor --> models
+    data --> models
+    config --> transformer
+    config --> training
+    data --> training
+    models --> training
     transformer --> training
     transformer --> generation
-    config --> nn
-    vocab --> nn
-    tokenizer --> data --> models
-    models --> training
-    models --> generation
+    transformer --> lab
+    training --> lab
 ```
+
+`vocab` and `tokenizer` import nothing internal and are not yet imported by any
+`src/` package (each is exercised only by its own test/example today), so they
+are omitted from the edges above. `lab` is a quarantined Part-XII leaf that sits
+above `training`; nothing imports it.
 
 The rule exists because a cycle makes code impossible to test in isolation: if
 `utils` imported `tensor`, you could not test the RNG without compiling the
@@ -191,20 +211,20 @@ deliberately simple: a struct with dimensions and a flat `List[Float64]` in
 row-major order.
 
 ```mojo
-@fieldwise_init
-struct Tensor2D(Copyable):
+struct Tensor2D(Copyable, Movable, Writable):
     var rows: Int
     var cols: Int
-    var data: List[Float64]
+    var data: List[Float64]  # flat row-major [rows, cols]
 
     def offset(self, row: Int, col: Int) -> Int:
         return row * self.cols + col
 
-    # fast, unchecked access for hot loops
-    def __getitem__(self, row: Int, col: Int) -> Float64:
+    # Fast, unchecked access for hot loops. Returns a reference into the buffer,
+    # so one method serves read, write, and += (no separate setter).
+    def __getitem__(ref self, row: Int, col: Int) -> ref[self.data] Float64:
         return self.data[self.offset(row, col)]
 
-    # checked access for tests and debugging; forces a raises context
+    # Checked access for tests and debugging; forces a raises context.
     def at(self, row: Int, col: Int) raises -> Float64:
         if row < 0 or row >= self.rows or col < 0 or col >= self.cols:
             raise Error("Tensor2D index out of range")
@@ -216,10 +236,13 @@ is checked on demand. The offset arithmetic is public and tested directly
 (`offset(1, 2, 3) == 23` for a `[2, 3, 4]` tensor), because pinning the
 memory layout in a test catches stride bugs before they become model bugs.
 Higher ranks repeat the same pattern: `Tensor3D` uses
-`(i * d1 + j) * d2 + k`, and the attention-era `Tensor4D` extends it once
-more. The `List`-backed storage is a correctness-phase decision; the
-performance part replaces it with `UnsafePointer` behind the same interface,
-with the existing tests as the safety net.
+`(i * d1 + j) * d2 + k`. There is no `Tensor4D` — attention's four-dimensional
+`[B, H, T, D]` shapes are handled by indexing and looping over `Tensor2D`/
+`Tensor3D`, which keeps the storage story simple; a dedicated rank-4 tensor can
+arrive later if batching or the performance work needs it. The `List`-backed
+storage is itself a correctness-phase decision; the performance part replaces it
+with `UnsafePointer` behind the same interface, with the existing tests as the
+safety net.
 
 ### Integer data stays integer
 
@@ -357,7 +380,7 @@ flowchart TD
         C["BPE merge loop"]
         D["backward passes"]
         E["optimizer"]
-        F["sampling and KV cache"]
+        F["sampling and generation (KV cache: planned)"]
     end
 
     subgraph plumbing["Python interop (plumbing)"]
@@ -389,7 +412,10 @@ be the verified code. Referees live in test files, never in `src/`.
 ## Determinism
 
 Every random choice takes an explicit seed, and identical seeds produce
-identical results on any machine. Concretely: batch order for an epoch is a
+identical results under the pinned toolchain on the supported platform
+(`linux-64` today) — the project owns its RNG rather than leaning on a
+standard-library generator whose stream could shift between versions.
+Concretely: batch order for an epoch is a
 Fisher-Yates permutation of window start offsets driven by `Rng(seed)`, so
 "same seed, same batches" is an exact equality test, not a statistical claim.
 Greedy generation is deterministic and asserted token for token. Golden
@@ -401,20 +427,24 @@ Determinism is what makes the guide reproducible (a reader gets the same loss
 curve the chapter shows) and what makes failures bisectable (a regression
 reproduces on the first try).
 
-## The model, when it arrives
+## The model
 
-The main line builds up to the GPT-2 architecture in `transformer/`:
+The main line builds up to the GPT-2 architecture in `transformer/`, which now
+exists end to end. The forward pass processes one sequence at a time — ids come
+in as a `List[Int]` and logits come out as a `Tensor2D [T, V]` — so the batch
+dimension `B` in the shape letters below is the conceptual notation, not a
+materialized tensor axis:
 
 ```mermaid
 flowchart TD
-    IDS["token ids [B, T]"] --> TE["token embedding [V, C]"]
+    IDS["token ids [T]"] --> TE["token embedding [V, C]"]
     POS["positions 0..T-1"] --> PE["positional embedding [1024, C]"]
-    TE --> ADD["x = tok + pos [B, T, C]"]
+    TE --> ADD["x = tok + pos [T, C]"]
     PE --> ADD
     ADD --> BLK["12 x pre-LN block:<br/>x = x + attn(LN(x))<br/>x = x + mlp(LN(x))"]
     BLK --> LN["final LayerNorm"]
     LN --> HEAD["LM head [C, V]<br/>(weights tied to token embedding)"]
-    HEAD --> LOGITS["logits [B, T, V]"]
+    HEAD --> LOGITS["logits [T, V]"]
 ```
 
 Gradients are hand-written per-layer backward passes rather than a tape-based
@@ -423,9 +453,52 @@ actually computes, and a reader can verify a `linear_backward` against the
 chain rule directly, while an autograd hides the mechanics it is supposed to
 teach. The cost is more code per layer; the mitigation is that every backward
 is finite-difference checked, and the highest-risk ones are also checked
-against NumPy. Before the full model, a small encoder-decoder built from the
-same blocks trains on copy and reverse tasks, which is the cheapest way to
-prove cross-attention and the training loop end to end.
+against NumPy.
+
+Four contracts inside the model do a disproportionate amount of the work and are
+worth calling out, because they are where a subtle change breaks everything
+downstream at once.
+
+**The parameter walk is the registry.** With no framework parameter dictionary,
+the model's fixed traversal order — `wte` once, `wpe`, each block's twelve
+parameters in layer order, then `ln_f` — *is* the registry. The optimizer state
+(Adam's `m`/`v`), gradient-norm clipping, the checkpoint format, and
+export/import all index that one order, so every walk method must visit the same
+parameters in the same order. The per-block twelve are authored in a single
+place (`transformer/block.mojo`) so the order lives once; order drift between
+methods is the named failure mode, guarded by shape/count reconciliation, a
+decay-partition inventory, a checkpoint round trip, and an against-oracle
+optimizer run.
+
+**Weight tying is one Parameter reached by two paths.** The token embedding and
+the LM head share a single `[V, C]` Parameter. In one backward call it receives
+gradient from *both* the head matmul and the embedding gather; those two
+contributions are summed into one delta and accumulated with a single `+=`, so
+that two backward passes produce a bit-for-bit `2×` gradient (an exact-doubling
+test pins this — one of the exactness contracts, not a tolerance comparison).
+
+**Forward caches are explicit; backward boundaries are hand-drawn.** Each layer's
+`forward` returns the intermediate values its `backward` needs (a per-layer cache
+struct that is moved, not copied), rather than a global tape. The boundary
+between a layer's forward and backward is something a reader can see and a test
+can check in isolation.
+
+**Two weight formats, kept distinct.** A *trainer checkpoint* stores the full
+training state (parameters plus optimizer `m`/`v`, step count, RNG) bit-for-bit
+so a run resumes exactly; the *released-weight loader* reads OpenAI's published
+GPT-2 into the `GPT2W v1` format — a one-way import of the f32 payload, widened
+`f32 → f64` exactly on read — with no optimizer state. Conflating the two is a
+category error the module boundaries prevent.
+
+Before the full model, a small **encoder-decoder lab** (`src/llm/lab/`, Part XII)
+built from the same blocks trains on copy and reverse tasks — the cheapest way to
+prove cross-attention and the training loop end to end. The lab is quarantined
+off the main line: nothing in the model imports it, and its one heavy test is the
+file CI's gate skips (see [AGENTS.md](AGENTS.md)).
+
+Generation today is **uncached**: each new token reruns the forward pass over the
+whole sequence. That is the correct, readable baseline; the KV cache (Part XVII,
+planned) is the optimization measured against it.
 
 ## Performance, last
 
