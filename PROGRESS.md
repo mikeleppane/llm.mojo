@@ -23,7 +23,8 @@ test-fast` is the canonical gate — it runs the whole suite except one
 | XIV | Training | ✅ green (AdamW with decoupled decay + selective weight decay; warmup/cosine schedule; global-norm clipping; bit-exact checkpoints with a proven resume gate; `train_gpt` over `BatchLoader`; the parameter walk promoted to a load-bearing registry) | `pixi run test-fast` | 2026-07-05 |
 | XV | Generation | ✅ green (top-k + top-p distribution filters in probability space; one `SamplerConfig` policy — greedy/temperature/top-k/top-p — with temperature 0 = argmax drawing zero rng; the autoregressive `generate` loop with sliding-window crop and append-then-halt stop tokens; LCG-replay sampled goldens; a memorize-then-speak capstone; the Shakespeare checkpoint speaking four ways) | `pixi run test-fast` | 2026-07-05 |
 | XVI | Loading real GPT-2 weights (the MVP) | ✅ green (offline safetensors→`GPT2W v1` converter with every Conv1D transpose + buffer skip in one place; native `load_gpt2` builds the GPT fieldwise from the f32 payload, exact f32→f64 widening, named header validation; doll-house sentinel parity in-suite + f64 goldens at 124M; **the from-scratch Mojo forward, fed OpenAI's real weights, generates coherent English** — HF-f32 agreement 6e-5) | `pixi run test-fast` | 2026-07-05 |
-| XVII+ | KV cache + performance | not started | — | — |
+| XVII | The KV cache | ✅ green (per-layer `KVCache` of preallocated `[context_length, C]` key/value buffers; additive `step` methods on attention/block/gpt that feed ONE token and reuse the cached past, reusing the frozen `scaled_dot_product_attention` with a zeros `[1, t]` mask; `matmul_transpose_b` for the tied head with no per-token transpose; `generate_cached` twin of `generate` with an up-front overflow raise; **step-vs-forward logits BIT-IDENTICAL at every prefix**, generation + rng-stream parity, and the 124M greedy text character-identical to Part XVI at ~8.3× (0.78 vs 6.49 s/token) — the ALGORITHM fix, arithmetic still scalar f64) | `pixi run test-fast` | 2026-07-11 |
+| XVIII+ | Performance (SIMD, arithmetic) | not started | — | — |
 
 ## Notes
 
@@ -194,6 +195,15 @@ test-fast` is the canonical gate — it runs the whole suite except one
 | File | Covers |
 |------|--------|
 | `tests/test_gpt2_weights.mojo` | doll-house (V11 T8 C8 L1 H2) load reconciles dims + `parameter_count_actual`; asymmetric sentinels pin the SQUARE proj kernel is not transposed (proj.w[0,1]≠proj.w[1,0]) and each of the 16 tensors landed in its named walk slot; a probe pins float32(0.1) widens to its exact f64 bit pattern; five named header errors (bad magic, wrong version, bad dims, truncated, trailing); file→loader→forward matches the NumPy f64 reference at 1e-9; a loaded model generates 3 tokens greedily. Fixture + goldens from `tests/oracles/gpt2_weights_reference.py`, frozen inline |
+
+### The KV cache (Part XVII)
+
+| File | Covers |
+|------|--------|
+| `tests/test_kv_cache.mojo` | `fresh` shapes/length/capacity; `check_compatible` named raises (wrong layer count, width, capacity); `GPT.step` fills to exactly capacity then raises NAMED when full (failed step does not advance length); **the centerpiece — step-vs-forward EXACT logits parity at every prefix on a TWO-layer doll-house** (`assert_equal`, all V columns, no tolerance); `reset` replays bit-identically; a bad token id raises and leaves `length` trustworthy |
+| `tests/test_generate.mojo` (extended) | `generate_cached == generate` token-for-token AND `rng.state` identical (stream parity) — greedy and a temperature-0.9 top-k+top-p config on a two-layer doll-house; up-front overflow raise and the ==context_length success; contract parity (empty prompt, negative budget, zero-budget no-op with rng untouched, append-then-halt, prompt stop-ids ignored) |
+| `tests/test_matmul.mojo` (extended) | `matmul_transpose_b` hand-computed; **EXACTLY equals `matmul(a, transpose(b))`** on seeded shapes incl. a `[1, k]` row (`assert_equal`); contraction-width-mismatch raise |
+| `tests/test_slicing.mojo` (extended) | `slice_rows` hand-checked, prefix-as-cache-view, full-height identity, bad-range raises |
 
 ### Training (Part XIV)
 
