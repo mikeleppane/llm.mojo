@@ -167,6 +167,31 @@ struct TransformerBlock(Copyable, Movable):
         var mlp_out = self.mlp.forward(self.ln2.forward(a))  # [T, C]
         return add(a, mlp_out)  # residual 2: a + mlp(ln2(a))
 
+    def step(
+        self,
+        x: Tensor2D,
+        mut k_cache: Tensor2D,
+        mut v_cache: Tensor2D,
+        pos: Int,
+    ) raises -> Tensor2D:
+        # KV-cached single-token block: the SAME pre-LN wiring as `forward`, one
+        # row wide. [1, C] residual in -> [1, C] out. ln1/ln2/mlp are the existing
+        # row-wise forwards (LayerNorm normalizes per row, the MLP is per row), and
+        # the self-attention sublayer is the cached `attn.step`, which appends this
+        # position's K/V to the two cache buffers and attends over the whole valid
+        # region:
+        #     a   = x + attn.step(ln1(x), k_cache, v_cache, pos)
+        #     out = a + mlp(ln2(a))
+        # The skip path (x, a) is identical to `forward`. Reads self; mutates the
+        # two cache buffers (via attn.step); allocates the intermediates and
+        # result; raises on a shape/config mismatch or an out-of-range pos.
+        var attn_out = self.attn.step(
+            self.ln1.forward(x), k_cache, v_cache, pos
+        )  # [1, C]
+        var a = add(x, attn_out)  # residual 1: x + attn(ln1(x))
+        var mlp_out = self.mlp.forward(self.ln2.forward(a))  # [1, C]
+        return add(a, mlp_out)  # residual 2: a + mlp(ln2(a))
+
     def forward_cached(
         self,
         x: Tensor2D,

@@ -41,7 +41,12 @@ from llm.nn.dropout import dropout_backward, dropout_cached
 from llm.nn.embedding import Embedding, EmbeddingCache
 from llm.nn.layernorm import LayerNorm, LayerNormCache
 from llm.nn.optim import adamw_update, sgd_update
-from llm.tensor.ops import add, cross_entropy_rows, transpose
+from llm.tensor.ops import (
+    add,
+    cross_entropy_rows,
+    matmul_transpose_b,
+    transpose,
+)
 from llm.tensor.tensor2d import Tensor2D, zeros_2d
 from llm.transformer.block import (
     _grad_scale,
@@ -52,6 +57,7 @@ from llm.transformer.block import (
     ParamShape,
     TransformerBlock,
 )
+from llm.transformer.kv_cache import KVCache
 from llm.transformer.masks import causal_mask
 from llm.utils.random import Rng
 
@@ -183,6 +189,63 @@ struct GPT(Copyable, Movable):
         var h = self.ln_f.forward(x)  # [T, C]
         # Tied head: logits = h @ wte.table^T. transpose(table) is [C, V].
         return h @ transpose(self.wte.table.value)  # [T, V]
+
+    def step(self, token_id: Int, mut cache: KVCache) raises -> Tensor2D:
+        # KV-cached single-token forward: feed ONE new token, reusing the cached
+        # K/V of every earlier position, and return its logits row [1, V]. This is
+        # `forward` for a sequence of length 1 sitting at absolute position
+        # `cache.length` — same embeddings, same blocks, same tied head, so the
+        # logits are BIT-IDENTICAL to the last row of forward(ids[0..pos]) run on
+        # the full prefix. It reuses the frozen primitives in the same order; it
+        # re-derives no math.
+        #
+        # Flow:
+        #   1. check the cache matches this model; raise NAMED if it is already
+        #      full (all context_length positions consumed).
+        #   2. pos = cache.length; embed = wte[token_id] + wpe[pos], each gathered
+        #      as a one-element id list -> [1, C]. (The batch path adds the same
+        #      two rows for position pos.)
+        #   3. thread [1, C] through every block's `step`, passing that layer's
+        #      k/v cache buffers; each block appends its K/V at row `pos`.
+        #   4. h = ln_f(x); logits = h @ wte.table^T via matmul_transpose_b — the
+        #      tied head without materializing the [C, V] transpose per token.
+        #   5. bump cache.length ONCE, after every layer wrote row `pos`.
+        # Takes NO rng and consumes zero draws: there is no rng parameter to
+        # misuse, so the eval-path zero-draw invariant is structural, not merely
+        # tested. Reads self; mutates the cache (its buffers and length); allocates
+        # the intermediates and logits; raises (named) on an incompatible or full
+        # cache, or a bad token id (via the embedding), in which case the cache is
+        # left untouched — length is only advanced after a fully successful pass,
+        # so a caller can always trust it.
+        cache.check_compatible(self.cfg)
+        if cache.length >= cache.capacity:
+            raise Error(
+                "GPT.step: KV cache full — all "
+                + String(cache.capacity)
+                + " context_length positions consumed"
+            )
+        var pos = cache.length
+
+        # Token + positional embedding of the single new position. A bad token id
+        # raises here, BEFORE any cache row is written or length is advanced.
+        var token_ids: List[Int] = [token_id]
+        var pos_ids: List[Int] = [pos]
+        var x = add(
+            self.wte.forward(token_ids),
+            self.wpe.forward(pos_ids),
+        )  # [1, C]
+
+        for i in range(len(self.blocks)):
+            x = self.blocks[i].step(x, cache.k[i], cache.v[i], pos)  # [1, C]
+
+        var h = self.ln_f.forward(x)  # [1, C]
+        # Tied head: logits = h @ wte.table^T, computed without the per-token
+        # [C, V] transpose the batch spelling allocates.
+        var logits = matmul_transpose_b(h, self.wte.table.value)  # [1, V]
+
+        # Every layer has now written row `pos`; commit the new length once.
+        cache.length += 1
+        return logits^
 
     def loss(self, ids: List[Int], targets: List[Int]) raises -> Float64:
         # Mean cross-entropy of the inference-path logits against the targets:
