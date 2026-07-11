@@ -80,6 +80,30 @@ def slice_cols(a: Tensor2D, start: Int, end: Int) raises -> Tensor2D:
     return out^
 
 
+def slice_rows(a: Tensor2D, start: Int, end: Int) raises -> Tensor2D:
+    # Extract the contiguous row band [start, end) with every column:
+    # [R, C] -> [end - start, C]. The row mirror of slice_cols — the KV-cache
+    # decode path uses it to view the filled prefix `[0, length)` of a
+    # capacity-sized buffer as a `[t, C]` tensor. Raises unless
+    # 0 <= start < end <= R (an empty or reversed range is a caller bug, not a
+    # silent zero-height result). Allocates the result.
+    if not (0 <= start and start < end and end <= a.rows):
+        raise Error(
+            "slice_rows: need 0 <= start < end <= rows, got start="
+            + String(start)
+            + " end="
+            + String(end)
+            + " rows="
+            + String(a.rows)
+        )
+    var height = end - start
+    var out = zeros_2d(height, a.cols)
+    for r in range(height):
+        for c in range(a.cols):
+            out[r, c] = a[start + r, c]
+    return out^
+
+
 def concat_cols(parts: List[Tensor2D]) raises -> Tensor2D:
     # Join tensors side by side along columns, in list order:
     # k tensors [R, C_i] -> [R, sum(C_i)]. The head-merge primitive — H head
@@ -156,6 +180,36 @@ def matvec(a: Tensor2D, x: Span[Float64, _]) raises -> List[Float64]:
         for k in range(a.cols):
             acc += a[i, k] * x[k]
         out.append(acc)
+    return out^
+
+
+def matmul_transpose_b(a: Tensor2D, b: Tensor2D) raises -> Tensor2D:
+    # c = a @ b^T WITHOUT materializing b^T: [M, K] @ [N, K]^T -> [M, N] with
+    #     c[i, j] = sum_k a[i, k] * b[j, k].
+    # Both a and b share the contraction width K as their COLUMN count (b is
+    # stored un-transposed), so the guard is a.cols == b.cols, not a.cols ==
+    # b.rows. The inner sum walks k ascending — the SAME order as
+    # matmul(a, transpose(b)), which computes the same c[i, j] = sum_k a[i, k] *
+    # transpose(b)[k, j] = sum_k a[i, k] * b[j, k] over k ascending. Transpose
+    # only relabels indices; it does not reorder the accumulation, so the two
+    # spellings are BIT-IDENTICAL (a test pins the exact equality), and this one
+    # never allocates the [K, N] transpose. The tied LM head uses it to score one
+    # decode row against the [V, C] embedding table without a ~309 MB per-token
+    # transpose copy. Raises on a contraction-width mismatch; allocates the result.
+    if a.cols != b.cols:
+        raise Error(
+            "matmul_transpose_b shape mismatch: a.cols="
+            + String(a.cols)
+            + " must equal b.cols="
+            + String(b.cols)
+        )
+    var out = zeros_2d(a.rows, b.rows)
+    for i in range(a.rows):
+        for j in range(b.rows):
+            var acc = 0.0
+            for k in range(a.cols):
+                acc += a[i, k] * b[j, k]
+            out[i, j] = acc
     return out^
 
 
