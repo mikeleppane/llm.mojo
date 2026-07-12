@@ -12,7 +12,7 @@
 # every position.
 
 from llm.nn.parameter import Parameter
-from llm.tensor.ops import matmul_transpose_b, transpose
+from llm.tensor.ops import matmul_transpose_a, matmul_transpose_b
 from llm.tensor.tensor2d import Tensor2D, zeros_2d
 from llm.utils.random import Rng
 
@@ -164,7 +164,9 @@ struct Linear(Copyable, Movable):
                 + " must equal in_features "
                 + String(in_features)
             )
-        var d_weight = transpose(d_out) @ cache.x  # [out, in]
+        var d_weight = matmul_transpose_a(
+            d_out, cache.x
+        )  # d_out^T @ x [out, in]
         for o in range(out_features):
             for i in range(in_features):
                 self.weight.grad[o, i] = self.weight.grad[o, i] + d_weight[o, i]
