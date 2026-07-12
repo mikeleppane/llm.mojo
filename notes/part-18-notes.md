@@ -164,6 +164,147 @@ tokens, so D1's near-tie re-pin clause does not trigger; the frozen 124M 1e-6
 logit goldens remain the arbiter and pass. Nucleus text also identical (stream
 parity holds).
 
-<!-- gated stages (threading / fused decode / matmul_transpose_a) below -->
+### Stage 2 — threading (D4 gate: OPEN)
+
+The day-one spike proved `parallelize` usable, so the gate opened. Both reduction
+kernels thread above a ~1M multiply-add threshold (below it the dispatch costs
+more than it saves, so c_proj and the tiny attention products stay serial):
+`matmul_transpose_b` partitions the output columns, the `@` operator partitions
+the output rows. Both are Class A by construction — a static partition, each
+output element computed entirely by one worker in the unchanged order, no shared
+accumulators — so bit-identical to serial and run-to-run stable. Two determinism
+tests pin it (a kernel-level two-call exact check at n=4096, and a generate_cached
+determinism test sized so the tied head crosses the threshold).
+
+**Kernels (median µs, decode m=1), Stage 1 -> Stage 2:**
+
+| kernel   | Stage 1 | Stage 2 (threaded) | speedup |
+|----------|---------|--------------------|---------|
+| c_attn   | 155     | 31                 | 5.0×    |
+| mlp_up   | 235     | 41                 | 5.7×    |
+| mlp_down | 232     | 46                 | 5.0×    |
+| tiedhead | 12319   | 4753               | 2.6×    |
+| c_attn batch [64] | 10059 | 876          | 11.5×   |
+| tiedhead batch [64] | 789810 | 148533     | 5.3×    |
+| c_proj (serial, sub-threshold) | 49 | ~70 (noise) | — |
+
+The tied head's 2.6× is bandwidth-bound (32 cores pull more aggregate RAM
+bandwidth on the 300 MB table, but not linearly). The compute-bound Linear
+kernels hit 100-115 GFLOP/s.
+
+### D6 — matmul_transpose_a (gate: OPEN, profile evidence below)
+
+Profiling the backward products AFTER the matmul itself was vectorized showed the
+`transpose()` allocation — a slow strided element-copy — had become the majority
+of each product's time:
+
+| backward product (doll-house) | transpose µs | full (transpose+@) µs | transpose frac |
+|-------------------------------|--------------|-----------------------|----------------|
+| mlp_fc  d_out^T @ x           | 176          | 271                   | **65%**        |
+| c_attn  d_out^T @ x           | 133          | 202                   | **66%**        |
+| tiedhead d_logits^T @ h       | 89           | 140                   | **64%**        |
+| mlp_fc @ 124M widths          | 1120         | 4010                  | **28%**        |
+
+So the gate opened. `matmul_transpose_a(a, b) = a^T @ b` computes these directly
+(no transpose copy), accumulating over the shared row dimension in the SAME
+ascending order as `transpose(a) @ b` — Class A, bit-identical, pinned by an
+exact-equality test and by every backward test (the exact gradient-doubling and
+finite-difference checks) staying green. Retrofitted the big-transpose backward
+sites: Linear dW, the tied head d_table, attention dV and dK. The two small
+`d_out @ transpose(v)` products (v is ~[64,64], a negligible transpose) stay on
+the Class A `@` path — routing them through the Class B matmul_transpose_b would
+change backward bits for no real gain, and D6 is Class A throughout.
+
+### Stage 3 — fused decode attention (D5 gate: SKIPPED, profile evidence below)
+
+D5 gates on whether the KV-cache slice/copy volume dominates decode. It does not
+at representative contexts, and the cheaper allocation-hygiene fix (contiguous
+memcpy in slice/concat, Class A) addressed the copy cost without a fused-attention
+rewrite:
+
+| KV copies per layer (slice_rows + slice_cols) | element-loop | memcpy | 
+|-----------------------------------------------|--------------|--------|
+| context 32 (the demo)                         | 46.7 µs      | 5.0 µs |
+| context 512                                   | 798 µs       | 152 µs |
+
+At the demo's context 32 the copies were ~0.56 ms/token (~2% of a 28 ms token)
+BEFORE hygiene, and ~0.06 ms after — nowhere near dominant. They grow with
+context, but the memcpy hygiene (5-9× cheaper) keeps them subdominant far longer,
+and re-spelling attention in a fused step under XVII's exact-parity constraint is
+not justified by the profile. Stage 3 is SKIPPED; a fused decode step remains the
+right lever only once contexts are long enough that even the memcpy'd copies
+dominate — future work, with XVII's parity test as the tripwire. Either outcome is
+valid per the plan; this is the evidence for choosing the skip.
+
+### Allocation hygiene (Class A, evidence: the D5 copy table above)
+
+slice_rows / slice_cols / concat_cols copied element by element; each output row
+is a contiguous run, so one memcpy per row replaces the inner loop. Same bytes
+(the exact-value slicing tests pass unchanged), 5-9× cheaper copies, and it lifted
+the training step further (24.6 -> 20.2 ms) by speeding the attention head splits.
+zeros_2d bulk allocation was already done on main (verified, not redone).
+
+## Final table — baseline -> final (the payoff arc)
+
+**Decode-shape kernels (median µs, m=1):**
+
+| kernel   | baseline | Stage 1 SIMD | Stage 2 +threads | total |
+|----------|----------|--------------|------------------|-------|
+| c_attn   | 2155     | 155          | 31               | 69×   |
+| c_proj   | 715      | 49           | 49 (serial)      | 15×   |
+| mlp_up   | 2903     | 235          | 41               | 71×   |
+| mlp_down | 2898     | 232          | 46               | 63×   |
+| tiedhead | 49545    | 12319        | 4753             | 10×   |
+
+**End-to-end (124M) and training step — baseline -> final:**
+
+| metric                         | baseline      | final          | speedup |
+|--------------------------------|---------------|----------------|---------|
+| one uncached token (len 32)    | 6.371 s       | 0.161 s        | 39.5×   |
+| greedy, KV-cached              | 0.784 s/token | 0.0249 s/token | **31.5×** |
+| nucleus (top-p 0.9)            | 0.797 s/token | 0.0341 s/token | 23.4×   |
+| training step (doll-house)     | 367.76 ms     | 20.18 ms       | **18.2×** |
+
+The blog's three-act arc, greedy s/token: Part XVI scalar+no-cache ~9.3 ->
+Part XVII cache 0.784 -> Part XVIII cache+SIMD+threads **0.0249** — ~373× since
+the uncached forward, on the same 124M weights and the same text.
+
+**Greedy and nucleus text: character-identical to the baseline/XVII golden at
+every stage.** The Class B reassociation (matmul_transpose_b/matvec/_simd_dot,
+~1e-13 relative) flipped no greedy argmax over the 25 tokens across any stage, so
+D1's near-tie re-pin clause never fired; the frozen 124M 1e-6 logit goldens remain
+the arbiter and pass unchanged.
+
+## Class A / Class B inventory of every changed path
+
+- **Class B (reassociating, 1e-12-relative tested):** `_simd_dot`, and through it
+  `matvec` and `matmul_transpose_b`. The only reassociating change; confined to
+  the contiguous-row dot kernel where the decode win lives.
+- **Class A (order-preserving, exact-equality tested):** the `@` operator's
+  SIMD-over-j and its threading; `matmul_transpose_b`'s column threading;
+  `matmul_transpose_a` and its backward retrofits; the Linear/score/tied-head
+  call-site retrofits (bit-identical operand-for-operand to the spellings they
+  replace); the slice/concat memcpy hygiene. `matmul` is untouched — the scalar
+  oracle every fast kernel is tested against.
+
+## Goldens that failed during development
+
+None failed unexpectedly. The one deliberate test change was converting
+`test_matmul_transpose_b_equals_composed_spelling` from exact (`assert_equal`) to
+1e-12 relative when matmul_transpose_b became Class B — a contract change, not a
+regression, documented at the top of these notes and mandated by D1.4 for every
+Class B kernel. Every other test passed unchanged at every stage, including XVII's
+exact step-vs-forward parity and the exact gradient-doubling backward tests.
+
+## Deviations from plan
+
+- The `@` operator threading and `matmul_transpose_a` both turned out to be
+  bit-identical to the scalar spelling (no FMA-contraction divergence on this
+  toolchain), so their Class A exact-equality tests use `assert_equal`, as the
+  plan hoped rather than merely tolerated.
+- Stage 3 (fused decode) skipped on profile evidence (copies subdominant, memcpy
+  hygiene sufficient) — an explicitly-valid outcome, not a cut corner.
+- The gate is `pixi run test-fast` throughout (excludes test_seq_tasks per the
+  standing #6554 rule).
 
 
