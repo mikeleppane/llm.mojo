@@ -138,6 +138,17 @@ def test_dropout_boundary_values() raises:
     GPTConfig(4096, 128, 256, 4, 4, 0.9).validate()
 
 
+def test_dropout_rejects_non_finite() raises:
+    """A NaN or +inf dropout raises: the negated range guard rejects unordered
+    values a bare `< 0 or >= 1` would pass (every NaN comparison is false)."""
+    var nan_p: Float64 = FloatLiteral.nan
+    with assert_raises(contains="dropout"):
+        GPTConfig(4096, 128, 256, 4, 4, nan_p).validate()
+    var inf_p: Float64 = FloatLiteral.infinity
+    with assert_raises(contains="dropout"):
+        GPTConfig(4096, 128, 256, 4, 4, inf_p).validate()
+
+
 def test_writable_summary() raises:
     """The config's written summary includes its field values."""
     var cfg = GPTConfig(4096, 128, 256, 4, 4, 0.0)
@@ -164,6 +175,18 @@ def test_training_config_rejects_bad_batch() raises:
     var tc = TrainingConfig(0, 0.0003, 1000, 42)
     with assert_raises(contains="batch_size"):
         tc.validate()
+
+
+def test_training_config_rejects_non_finite_lr() raises:
+    """A NaN or +inf learning rate raises: isfinite guards a non-finite value
+    that would otherwise poison every optimizer step (NaN fails every compare,
+    +inf passes a bare `> 0`)."""
+    var nan_lr: Float64 = FloatLiteral.nan
+    with assert_raises(contains="learning_rate"):
+        TrainingConfig(32, nan_lr, 1000, 42).validate()
+    var inf_lr: Float64 = FloatLiteral.infinity
+    with assert_raises(contains="learning_rate"):
+        TrainingConfig(32, inf_lr, 1000, 42).validate()
 
 
 def main() raises:

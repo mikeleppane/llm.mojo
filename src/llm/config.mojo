@@ -6,6 +6,8 @@ have a `validate()` that raises early naming the offending field, so a bad
 config fails at the edge instead of as a shape mismatch deep inside a matmul.
 """
 
+from std.math import isfinite
+
 
 @fieldwise_init
 struct GPTConfig(Copyable, Movable, Writable):
@@ -53,7 +55,10 @@ struct GPTConfig(Copyable, Movable, Writable):
             raise Error("n_heads must be positive")
         if self.d_model % self.n_heads != 0:
             raise Error("d_model must be divisible by n_heads")
-        if self.dropout < 0.0 or self.dropout >= 1.0:
+        # Negated range so a non-finite dropout raises too: every comparison with
+        # NaN is false, so a bare `dropout < 0 or dropout >= 1` would let NaN (and
+        # +inf, which is >= 1) slip through to corrupt the run.
+        if not (self.dropout >= 0.0 and self.dropout < 1.0):
             raise Error("dropout must be in [0, 1)")
 
     def token_embedding_parameter_count(self) -> Int:
@@ -152,7 +157,9 @@ struct TrainingConfig(Copyable, Movable):
         """
         if self.batch_size <= 0:
             raise Error("batch_size must be positive")
-        if self.learning_rate <= 0.0:
+        # isfinite rejects NaN and +inf; the `> 0` bound alone passes both (NaN
+        # fails every compare, +inf is > 0) and would poison every optimizer step.
+        if not (isfinite(self.learning_rate) and self.learning_rate > 0.0):
             raise Error("learning_rate must be positive")
         if self.max_steps <= 0:
             raise Error("max_steps must be positive")
