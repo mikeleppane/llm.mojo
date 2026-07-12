@@ -20,7 +20,9 @@ BIN="checkpoints/gpt2-124m.bin"
 GOLDENS="data/gauntlet/goldens.txt"
 
 if [[ -f "$BIN" ]]; then
-    want="$(grep -oE 'sha256=[0-9a-f]{64}' "$GOLDENS" | head -1 | cut -d= -f2)"
+    # `|| true` so a missing header does not trip `set -o pipefail` (grep exits 1)
+    # and kill the script before the friendly diagnostic below can run.
+    want="$(grep -oE 'sha256=[0-9a-f]{64}' "$GOLDENS" | head -1 | cut -d= -f2 || true)"
     if [[ -z "$want" ]]; then
         echo "run_gauntlet: no sha256 header in $GOLDENS — regenerate it via" \
             "scripts/gpt2_gauntlet_reference.py" >&2
