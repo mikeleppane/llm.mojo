@@ -205,8 +205,91 @@ def _ints_after(line: String, prefix: String) raises -> List[Int]:
     return out^
 
 
+def _finish_golden(
+    var name: String,
+    var tokens: List[Int],
+    argmax: Int,
+    var top5: List[Int],
+    var probe_idx: List[Int],
+    var probe_val: List[Float64],
+    has_nll: Bool,
+    n_tokens: Int,
+    n_argmax: Int,
+    n_top5: Int,
+    n_probe: Int,
+    n_nll: Int,
+    nll: Float64,
+) raises -> Golden:
+    """Validate one fully-scanned golden block, then build it.
+
+    A validation gate must not be able to silently disable itself: a truncated or
+    malformed goldens.txt (a missing or duplicated field, a short top-5) would
+    otherwise leave a default (empty list, has_nll=False) and let the prompt still
+    PASS with that check skipped. So every block must carry each field EXACTLY once
+    with the right shape, and the NLL field must be `none` iff the prompt is a
+    single token — anything else is a NAMED error, not a silent pass.
+
+    Raises:
+        Error: On a missing/duplicated field, a wrong top-5 count, an empty
+            tokens/probe list, or an NLL/single-token inconsistency, naming the id.
+    """
+    if (
+        n_tokens != 1
+        or n_argmax != 1
+        or n_top5 != 1
+        or n_probe != 1
+        or n_nll != 1
+    ):
+        raise Error(
+            "gauntlet: golden '"
+            + name
+            + "' must carry tokens/argmax/top5/probe/nll each exactly once"
+            " (saw "
+            + String(n_tokens)
+            + "/"
+            + String(n_argmax)
+            + "/"
+            + String(n_top5)
+            + "/"
+            + String(n_probe)
+            + "/"
+            + String(n_nll)
+            + ") — regenerate goldens.txt from the script"
+        )
+    if len(tokens) == 0:
+        raise Error("gauntlet: golden '" + name + "' has no tokens")
+    if len(top5) != 5:
+        raise Error(
+            "gauntlet: golden '"
+            + name
+            + "' top5 must list 5 ids, got "
+            + String(len(top5))
+        )
+    if len(probe_idx) == 0:
+        raise Error("gauntlet: golden '" + name + "' has no probe values")
+    # nll:none is legal ONLY for a single-token prompt (no next-token pair).
+    if (len(tokens) == 1) != (not has_nll):
+        raise Error(
+            "gauntlet: golden '"
+            + name
+            + "' nll must be 'none' iff the prompt is a single token (tokens="
+            + String(len(tokens))
+            + ", has_nll="
+            + String(has_nll)
+            + ")"
+        )
+    return Golden(
+        name^, tokens^, argmax, top5^, probe_idx^, probe_val^, has_nll, nll
+    )
+
+
 def parse_goldens(content: String) raises -> List[Golden]:
     """Parse goldens.txt blocks into Golden records (see that file's own header).
+
+    Each field line is counted so _finish_golden can reject a block that is missing
+    or duplicates a field; field lines are guarded by `have` so a stray field-
+    prefixed line before the first record cannot populate block 0; and any
+    unrecognized line inside a block is a NAMED error, never silently dropped.
     """
     var lines = _split_lines(content)
     var out = List[Golden]()
@@ -219,13 +302,18 @@ def parse_goldens(content: String) raises -> List[Golden]:
     var probe_val = List[Float64]()
     var has_nll = False
     var nll = 0.0
+    var n_tokens = 0
+    var n_argmax = 0
+    var n_top5 = 0
+    var n_probe = 0
+    var n_nll = 0
 
     for i in range(len(lines)):
         var line = lines[i]
         if line.startswith(SEPARATOR_PREFIX):
             if have:
                 out.append(
-                    Golden(
+                    _finish_golden(
                         name.copy(),
                         tokens.copy(),
                         argmax,
@@ -233,6 +321,11 @@ def parse_goldens(content: String) raises -> List[Golden]:
                         probe_idx.copy(),
                         probe_val.copy(),
                         has_nll,
+                        n_tokens,
+                        n_argmax,
+                        n_top5,
+                        n_probe,
+                        n_nll,
                         nll,
                     )
                 )
@@ -244,13 +337,23 @@ def parse_goldens(content: String) raises -> List[Golden]:
             probe_val = List[Float64]()
             has_nll = False
             nll = 0.0
+            n_tokens = 0
+            n_argmax = 0
+            n_top5 = 0
+            n_probe = 0
+            n_nll = 0
             have = True
+        elif not have:
+            continue  # header comment lines before the first record — ignored
         elif line.startswith("tokens: "):
             tokens = _ints_after(line, "tokens: ")
+            n_tokens += 1
         elif line.startswith("argmax: "):
             argmax = Int(String(line.removeprefix("argmax: ")))
+            n_argmax += 1
         elif line.startswith("top5: "):
             top5 = _ints_after(line, "top5: ")
+            n_top5 += 1
         elif line.startswith("probe: "):
             var rest = String(line.removeprefix("probe: "))
             var pairs = rest.split(" ")
@@ -263,6 +366,7 @@ def parse_goldens(content: String) raises -> List[Golden]:
                     raise Error("gauntlet: malformed probe pair '" + pair + "'")
                 probe_idx.append(Int(String(kv[0])))
                 probe_val.append(atof(String(kv[1])))
+            n_probe += 1
         elif line.startswith("nll: "):
             var v = String(line.removeprefix("nll: "))
             if v == "none":
@@ -270,10 +374,18 @@ def parse_goldens(content: String) raises -> List[Golden]:
             else:
                 has_nll = True
                 nll = atof(v)
-        # blank / unknown lines within a block are ignored.
+            n_nll += 1
+        else:
+            raise Error(
+                "gauntlet: unexpected line inside golden '"
+                + name
+                + "': '"
+                + line
+                + "'"
+            )
     if have:
         out.append(
-            Golden(
+            _finish_golden(
                 name.copy(),
                 tokens.copy(),
                 argmax,
@@ -281,6 +393,11 @@ def parse_goldens(content: String) raises -> List[Golden]:
                 probe_idx.copy(),
                 probe_val.copy(),
                 has_nll,
+                n_tokens,
+                n_argmax,
+                n_top5,
+                n_probe,
+                n_nll,
                 nll,
             )
         )
