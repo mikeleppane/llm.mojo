@@ -1,3 +1,5 @@
+"""Training loops, optimizers, schedules, and checkpointing."""
+
 from .checkpoint import (
     CheckpointState,
     save_checkpoint,

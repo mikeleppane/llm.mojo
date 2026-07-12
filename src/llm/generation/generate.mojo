@@ -1,23 +1,21 @@
-# The autoregressive generation loop.
-#
-# This is where the model finally speaks: turn the last logits row into a next
-# token, append it, and repeat, cropping the context to the model's window and
-# stopping on request. There is NO new math here — GPT.forward, the temperature
-# softmax, argmax, and the inverse-CDF sampler all exist and are tested. Part XV
-# is pure assembly over them.
-#
-# generate() is ids-in / ids-out and binds to NOTHING but the GPT struct: no
-# tokenizer, no config beyond what GPT already carries, no checkpoint knowledge.
-# That is the forward contract for the BPE part, which reuses this verbatim with
-# real GPT-2 weights and END_OF_TEXT_ID as the stop token.
-#
-# generate() is deliberately uncached: every step recomputes the FULL forward
-# over all T positions, which is O(T^2 * steps). That recompute is the honest
-# baseline, and it is what the KV cache removes — see generate_cached below, which
-# caches each layer's keys and values and feeds only the new token per step,
-# producing token-for-token identical output at a fraction of the per-token cost.
-# generate() stays as the reference oracle those two paths are proven equal
-# against, so its code is untouched.
+"""The autoregressive generation loop.
+
+Turn the last logits row into a next token, append it, and repeat, cropping the
+context to the model's window and stopping on request. There is no new math here:
+GPT.forward, the temperature softmax, argmax, and the inverse-CDF sampler all
+exist; this is assembly over them.
+
+generate() is ids-in / ids-out and binds to nothing but the GPT struct: no
+tokenizer, no config beyond what GPT already carries, no checkpoint knowledge, so
+it is reused verbatim with real GPT-2 weights and an end-of-text stop token.
+
+generate() is deliberately uncached: every step recomputes the full forward over
+all T positions, which is O(T^2 * steps). That recompute is the honest baseline;
+generate_cached below caches each layer's keys and values and feeds only the new
+token per step, producing token-for-token identical output at a fraction of the
+per-token cost. generate() stays as the reference oracle the two paths are proven
+equal against.
+"""
 
 from llm.generation.sampler import SamplerConfig, sample_next
 from llm.transformer.gpt import GPT
@@ -26,8 +24,17 @@ from llm.utils.random import Rng
 
 
 def _contains(values: List[Int], target: Int) -> Bool:
-    # Linear-scan membership. Stop lists hold 0-3 entries in practice, so no set
-    # structure is warranted. Reads only; allocates nothing.
+    """Test list membership by linear scan.
+
+    Stop lists hold 0-3 entries in practice, so no set structure is warranted.
+
+    Args:
+        values: The list to scan.
+        target: The value to look for.
+
+    Returns:
+        True if target is in values. Allocates nothing.
+    """
     for i in range(len(values)):
         if values[i] == target:
             return True
@@ -42,31 +49,39 @@ def generate(
     stop_tokens: List[Int],
     mut rng: Rng,
 ) raises -> List[Int]:
-    # Autoregressively extend `prompt` by up to `max_new_tokens` tokens under the
-    # policy `cfg`, halting early if an emitted token is in `stop_tokens`.
-    #
-    # Returns ONLY the newly generated tokens (the caller owns the prompt; the
-    # full text is decode(prompt + returned)). Reads gpt; allocates the output and
-    # per-step intermediates; mutates rng.
-    #
-    # rng-draw count: zero if cfg is greedy (temperature 0), otherwise exactly one
-    # per emitted token — so a greedy call leaves rng.state bit-untouched and can
-    # be dropped into a seeded pipeline without perturbing it.
-    #
-    # Raises (named): an empty prompt (the model has no BOS convention — seed
-    # generation with at least one real token); a negative max_new_tokens; or an
-    # invalid cfg. max_new_tokens == 0 is a valid no-op returning an empty list.
-    #
-    # Per step: crop the running sequence to its LAST min(len, context_length)
-    # tokens (the sliding window — without it, step context_length + 1 would raise
-    # on the positional-embedding bounds), run the full inference forward, take the
-    # last logits row, sample the next id, append it, and check for a stop token.
-    #
-    # Stop semantics: the triggering token IS appended, THEN the loop halts, so the
-    # output self-documents why it stopped (its last element is the stop token);
-    # callers that don't want it strip one element. A stop id occurring in the
-    # PROMPT never halts anything — only emitted tokens are checked. An empty
-    # stop_tokens list never stops early.
+    """Autoregressively extend `prompt` by up to `max_new_tokens` tokens.
+
+    Halts early if an emitted token is in `stop_tokens`. rng-draw count: zero if
+    cfg is greedy (temperature 0), otherwise exactly one per emitted token, so a
+    greedy call leaves rng.state bit-untouched.
+
+    Per step: crop the running sequence to its last min(len, context_length)
+    tokens (the sliding window, without which step context_length + 1 would raise
+    on the positional-embedding bounds), run the full inference forward, take the
+    last logits row, sample the next id, append it, and check for a stop token.
+    Stop semantics: the triggering token is appended, then the loop halts, so the
+    output self-documents why it stopped; callers that don't want it strip one
+    element. A stop id in the prompt never halts; an empty stop_tokens list never
+    stops early.
+
+    Args:
+        gpt: The model to generate from (read only).
+        prompt: The seed tokens; must be non-empty.
+        max_new_tokens: Maximum tokens to emit; must be non-negative. 0 is a
+            valid no-op returning an empty list.
+        cfg: The decoding policy.
+        stop_tokens: Emitted ids that halt generation once appended.
+        rng: The random stream; mutated on the sampled path.
+
+    Returns:
+        Only the newly generated tokens; the full text is
+        decode(prompt + returned). Allocates the output and per-step
+        intermediates.
+
+    Raises:
+        Error: On an empty prompt (the model has no BOS convention), a negative
+            max_new_tokens, or an invalid cfg.
+    """
     if len(prompt) == 0:
         raise Error(
             "generate: empty prompt — the model has no BOS token, so seed"
@@ -114,37 +129,45 @@ def generate_cached(
     stop_tokens: List[Int],
     mut rng: Rng,
 ) raises -> List[Int]:
-    # The KV-cached twin of generate: SAME contract, same output, a fraction of
-    # the per-token cost. It returns ONLY the new tokens; stop semantics are
-    # append-then-halt; a stop id in the PROMPT never halts; an empty stop list
-    # never stops; an empty prompt raises; a negative max_new_tokens raises; 0 is
-    # a no-op returning an empty list with rng bit-untouched; greedy draws zero
-    # rng, sampled draws exactly one per emitted token via the SAME sample_next.
-    # Within the validated length domain it is token-for-token identical to
-    # generate AND leaves rng.state identical (stream parity), so generate remains
-    # the oracle this is proven against.
-    #
-    # The KVCache is an internal detail: allocated here AFTER validation (so a bad
-    # call never pays the ~151 MB) and never escaping — callers should not have to
-    # manage inference plumbing. (KVCache and GPT.step stay public for the tests.)
-    #
-    # OVERFLOW POLICY — up-front named raise if len(prompt) + max_new_tokens >
-    # context_length. generate slides a window over its context; the cached path
-    # CANNOT slide cheaply, and this is a teaching point rather than a limitation
-    # to paper over. GPT-2's positions are ABSOLUTE learned embeddings, so evicting
-    # the oldest token shifts every survivor's position and invalidates EVERY
-    # cached K/V row — a "sliding" cached generation would have to re-prime the
-    # whole window every step, i.e. the uncached algorithm wearing a cache costume.
-    # Within the validated domain neither path's window ever slides, so the two
-    # see identical contexts and token-for-token parity is well-defined.
-    #
-    # Flow: validate -> KVCache.fresh -> PRIME the prompt token-by-token through
-    # gpt.step (discard all but the last logits row) -> LOOP: sample the last row,
-    # append, check stop, and step the emitted token to advance the cache. Priming
-    # token-by-token is the same cost order as the ONE batch forward the uncached
-    # path spends on the prompt, and routing priming through the same `step` keeps
-    # a single code path so parity covers it too. Reads gpt; allocates the cache,
-    # the output, and per-step intermediates; mutates rng (sampled path only).
+    """The KV-cached twin of generate: same contract and output, lower cost.
+
+    Within the validated length domain it is token-for-token identical to
+    generate and leaves rng.state identical (stream parity), so generate remains
+    the oracle this is proven against. The KVCache is an internal detail:
+    allocated here after validation (so a bad call never pays the ~151 MB) and
+    never escaping.
+
+    Overflow policy: an up-front named raise if len(prompt) + max_new_tokens >
+    context_length. The cached path cannot slide the window cheaply because
+    GPT-2's positions are absolute learned embeddings, so evicting the oldest
+    token shifts every survivor's position and invalidates every cached K/V row.
+    Within the validated domain neither path's window ever slides, so the two see
+    identical contexts and parity is well-defined.
+
+    Flow: validate, KVCache.fresh, prime the prompt token-by-token through
+    gpt.step (discarding all but the last logits row), then loop: sample the last
+    row, append, check stop, and step the emitted token to advance the cache.
+    Priming token-by-token is the same cost order as the one batch forward the
+    uncached path spends on the prompt, and routing it through the same `step`
+    keeps a single code path so parity covers it too.
+
+    Args:
+        gpt: The model to generate from (read only).
+        prompt: The seed tokens; must be non-empty.
+        max_new_tokens: Maximum tokens to emit; must be non-negative. 0 is a
+            no-op returning an empty list with rng bit-untouched.
+        cfg: The decoding policy.
+        stop_tokens: Emitted ids that halt generation once appended.
+        rng: The random stream; mutated on the sampled path only.
+
+    Returns:
+        Only the newly generated tokens. Allocates the cache, the output, and
+        per-step intermediates.
+
+    Raises:
+        Error: On an empty prompt, a negative max_new_tokens, an invalid cfg, or
+            len(prompt) + max_new_tokens exceeding context_length.
+    """
     if len(prompt) == 0:
         raise Error(
             "generate_cached: empty prompt — the model has no BOS token, so"

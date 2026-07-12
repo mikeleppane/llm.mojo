@@ -1,17 +1,11 @@
-# Finite-difference check for softmax_rows_backward — the row Jacobian's VJP.
-#
-# softmax_rows_backward(W, dW) must return dS = dL/dscores given W = softmax(S)
-# and dW = dL/dW. We verify it as a vector-Jacobian product: pick a fixed
-# cotangent dW, form the scalar loss L(scores) = sum(dW * softmax_rows(scores)),
-# and compare the analytic dS to a central finite difference of L. Checking the
-# whole Jacobian action through one projection (not one output at a time) is the
-# D5 convention this part uses everywhere.
-#
-# Finite-difference convention (used in every backward test in this part):
-#   1. scalar loss L = sum(d_out * f(x)) with a fixed cotangent d_out,
-#   2. central differences with h = 1e-5 (the step-size study's sweet spot),
-#   3. mixed tolerance |analytic - numeric| <= 1e-7 + 1e-5 * |numeric|
-#      (central-diff truncation ~h^2 plus a cancellation floor).
+"""Finite-difference check for softmax_rows_backward — the row Jacobian's VJP.
+
+softmax_rows_backward(W, dW) must return dS = dL/dscores given W = softmax(S) and
+dW = dL/dW. We verify it as a vector-Jacobian product: pick a fixed cotangent dW,
+form L(scores) = sum(dW * softmax_rows(scores)), and compare the analytic dS to a
+central finite difference of L (h = 1e-5, tolerance
+|analytic - numeric| <= 1e-7 + 1e-5 * |numeric|).
+"""
 
 from std.testing import (
     assert_almost_equal,
@@ -25,8 +19,17 @@ from llm.tensor.tensor2d import Tensor2D, from_rows, zeros_2d
 
 
 def assert_grad_close(analytic: Float64, numeric: Float64) raises:
-    # The D5 mixed tolerance. Not assert_almost_equal's max()-form: this pins the
-    # additive convention |a - n| <= 1e-7 + 1e-5 * |n| exactly.
+    """Assert |analytic - numeric| <= 1e-7 + 1e-5 * |numeric|.
+
+    Pins the additive convention exactly, not assert_almost_equal's max()-form.
+
+    Args:
+        analytic: Backprop gradient.
+        numeric: Finite-difference estimate.
+
+    Raises:
+        Error: If the two are not within the mixed tolerance.
+    """
     assert_true(
         abs(analytic - numeric) <= 1e-7 + 1e-5 * abs(numeric),
         String("grad mismatch: analytic=")
@@ -37,7 +40,15 @@ def assert_grad_close(analytic: Float64, numeric: Float64) raises:
 
 
 def projected_loss(scores: Tensor2D, cotangent: Tensor2D) -> Float64:
-    # L = sum(cotangent * softmax_rows(scores)) — the VJP projection.
+    """L = sum(cotangent * softmax_rows(scores)) — the VJP projection.
+
+    Args:
+        scores: Input scores.
+        cotangent: Fixed cotangent dW.
+
+    Returns:
+        The scalar projected loss.
+    """
     var w = softmax_rows(scores)
     var total = 0.0
     for i in range(w.rows):
@@ -47,8 +58,10 @@ def projected_loss(scores: Tensor2D, cotangent: Tensor2D) -> Float64:
 
 
 def test_softmax_backward_matches_finite_difference() raises:
-    # Asymmetric 3x4 scores and an asymmetric cotangent: symmetric data could
-    # hide a sign or axis error, so nothing here is symmetric.
+    """`softmax_rows_backward` matches a central finite difference of the VJP loss.
+    """
+    # Asymmetric 3x4 scores and cotangent: symmetric data could hide a sign or
+    # axis error, so nothing here is symmetric.
     var scores = from_rows(
         [
             [0.5, -1.0, 2.0, 0.25],
@@ -81,10 +94,9 @@ def test_softmax_backward_matches_finite_difference() raises:
 
 
 def test_uniform_weights_row() raises:
-    # A uniform row is softmax's maximum-entropy point, where the Jacobian is
-    # best conditioned: dS_j = p (dW_j - mean(dW)) with p = 1/n. So each row of
-    # the output has mean zero (it is a mean-subtraction scaled by p), a clean
-    # analytic check independent of the finite-difference path.
+    """On a uniform row the output has mean zero: dS_j = p (dW_j - mean(dW))."""
+    # The uniform row is softmax's maximum-entropy point (best-conditioned
+    # Jacobian), a clean analytic check independent of the finite-difference path.
     var w = from_rows([[0.25, 0.25, 0.25, 0.25]])
     var cotangent = from_rows([[1.0, -2.0, 3.0, -0.5]])
     var ds = softmax_rows_backward(w, cotangent)
@@ -101,6 +113,7 @@ def test_uniform_weights_row() raises:
 
 
 def test_shape_mismatch_raises() raises:
+    """`softmax_rows_backward` raises when W and dW shapes differ."""
     var w = zeros_2d(3, 4)
     var bad = zeros_2d(3, 5)
     with assert_raises(contains="shape mismatch"):

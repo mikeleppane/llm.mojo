@@ -1,18 +1,15 @@
-# Tests for GPT — the assembled decoder-only model.
-#
-# forward math: shape, named length errors at the edge, the tied head pinned
-# against a manual h @ wte^T (no bias), positions actually used, and a full
-# tiny-config forward golden from tests/oracles/gpt_reference.py (independent
-# NumPy oracle, shared `fill` weight pattern). Behavioral causality at the model
-# level pins the causal mask reaches every block. init: loss ~ log V, same-seed
-# determinism, the residual-init std bands (proj/down at 0.02/sqrt(2L), qkv/up at
-# 0.02 — scaling the wrong matrices fails a band). Inventory: the walk equals the
-# Part VIII formula on two tiny configs (one asymmetric) and counts the tied wte
-# exactly once. zero_grad/apply_sgd reach every Parameter.
-#
-# The oracle model is built from explicit `fill` weights (NO residual scaling —
-# that is an init concern, tested separately), so the golden isolates the forward
-# wiring.
+"""Tests for GPT — the assembled decoder-only model.
+
+Forward math: shape, named length errors at the edge, the tied head pinned
+against a manual h @ wte^T (no bias), positions actually used, and a full
+tiny-config forward golden from tests/oracles/gpt_reference.py (independent NumPy
+oracle). Causality pins the causal mask reaching every block. Init: loss ~ log V,
+same-seed determinism, and the residual-init std bands (proj/down at 0.02/sqrt(2L),
+qkv/up at 0.02). Inventory: the parameter walk equals the config formula and counts
+the tied wte exactly once. zero_grad/apply_sgd reach every Parameter. The oracle
+model uses explicit `fill` weights (no residual scaling), isolating the forward
+wiring.
+"""
 
 from std.math import log, sqrt
 
@@ -33,8 +30,10 @@ from llm.utils.random import Rng
 
 
 def fill(rows: Int, cols: Int, base: Int) raises -> Tensor2D:
-    # Bit-identical to gpt_reference.py's `fill`:
-    #   v = (((k + base) * 37 + 11) mod 101) / 100 - 0.5,  k = row-major index.
+    """Deterministic sentinel weights, bit-identical to gpt_reference.py's `fill`.
+
+    v = (((k + base) * 37 + 11) mod 101) / 100 - 0.5, k = row-major index.
+    """
     var t = zeros_2d(rows, cols)
     for r in range(rows):
         for c in range(cols):
@@ -44,8 +43,8 @@ def fill(rows: Int, cols: Int, base: Int) raises -> Tensor2D:
 
 
 def build_block_off(off: Int) raises -> TransformerBlock:
-    # A block (C=4, H=2, d_hidden=6) from `fill` with per-layer base offset `off`,
-    # matching gpt_reference.py's block construction.
+    """A block (C=4, H=2, d_hidden=6) from `fill` with per-layer base offset `off`, matching gpt_reference.py.
+    """
     var ln1 = LayerNorm(
         Parameter(fill(1, 4, 10 + off)), Parameter(fill(1, 4, 20 + off))
     )
@@ -73,9 +72,10 @@ def build_block_off(off: Int) raises -> TransformerBlock:
 
 
 def build_tiny_gpt() raises -> GPT:
-    # The oracle's tiny model: V=5, C=4, H=2, L=2, context_length=8, dropout=0,
-    # weights from `fill` (wte base 1000, wpe base 2000, ln_f 3000/4000, block l
-    # base offset 10000*(l+1)). Built directly (no residual scaling).
+    """The oracle's tiny model (V=5, C=4, H=2, L=2, context_length=8, dropout=0) from `fill`, built directly with no residual scaling.
+
+    Weight bases: wte 1000, wpe 2000, ln_f 3000/4000, block l offset 10000*(l+1).
+    """
     var cfg = GPTConfig(5, 8, 4, 2, 2, 0.0)
     var wte = Embedding(Parameter(fill(5, 4, 1000)))
     var wpe = Embedding(Parameter(fill(8, 4, 2000)))
@@ -89,8 +89,8 @@ def build_tiny_gpt() raises -> GPT:
 
 
 def gpt_logits_golden() raises -> Tensor2D:
-    # Frozen from tests/oracles/gpt_reference.py (`gpt_logits`), tiny GPT forward
-    # at ids=[1,3,4], tied head.
+    """Frozen tiny-GPT forward logits at ids=[1,3,4] with the tied head, from tests/oracles/gpt_reference.py.
+    """
     var t = zeros_2d(3, 5)
     var vals = [
         0.2954537191957601,
@@ -124,14 +124,15 @@ def ids345() raises -> List[Int]:
 
 
 def test_forward_shape() raises:
+    """Forward output is [T, V]."""
     var gpt = build_tiny_gpt()
     var logits = gpt.forward(ids345())
     assert_true(logits.rows == 3 and logits.cols == 5, "logits must be [T, V]")
 
 
 def test_forward_oracle_golden() raises:
-    # Full tiny-model forward golden — position off-by-one, a wrong block order, a
-    # missing residual, or an untied head all fail it.
+    """The full tiny-model forward matches the golden; a position off-by-one, wrong block order, missing residual, or untied head all fail it.
+    """
     var gpt = build_tiny_gpt()
     var logits = gpt.forward(ids345())
     var expected = gpt_logits_golden()
@@ -141,8 +142,8 @@ def test_forward_oracle_golden() raises:
 
 
 def test_tied_head_is_manual_matmul_no_bias() raises:
-    # The head must be exactly h @ wte.table^T with NO bias. Recompute h = ln_f of
-    # the block stack and check logits == matmul(h, transpose(table)).
+    """The head is exactly h @ wte.table^T with no bias, checked against an independent recomputation of h.
+    """
     var gpt = build_tiny_gpt()
     var ids = ids345()
     var logits = gpt.forward(ids)
@@ -157,9 +158,8 @@ def test_tied_head_is_manual_matmul_no_bias() raises:
 
 
 def test_forward_cached_eval_equals_forward() raises:
-    # Model-level train-equals-eval: forward_cached(training=False) reproduces the
-    # inference forward EXACTLY and consumes no rng (dropout is the identity with
-    # no draw). Completes the three-level equivalence (attention, block, model).
+    """Eval-mode forward_cached reproduces the inference forward exactly and consumes no rng.
+    """
     var gpt = build_tiny_gpt()
     var ids = ids345()
     var y_inf = gpt.forward(ids)
@@ -175,6 +175,7 @@ def test_forward_cached_eval_equals_forward() raises:
 
 
 def test_length_zero_raises() raises:
+    """A zero-length input raises the named length error."""
     var gpt = build_tiny_gpt()
     var empty = List[Int]()
     var raised = False
@@ -190,6 +191,7 @@ def test_length_zero_raises() raises:
 
 
 def test_length_over_context_raises() raises:
+    """An input longer than context_length raises the named length error."""
     var gpt = build_tiny_gpt()  # context_length = 8
     var ids = List[Int]()
     for _ in range(9):  # T=9 > 8
@@ -207,8 +209,8 @@ def test_length_over_context_raises() raises:
 
 
 def test_model_causality() raises:
-    # Perturbing input position j leaves logits rows < j unchanged: the causal
-    # mask reaches every block, so an earlier position never sees a later one.
+    """Perturbing input position j leaves logits rows < j unchanged: the causal mask reaches every block.
+    """
     var gpt = build_tiny_gpt()
     var ids = ids345()
     var base = gpt.forward(ids)
@@ -224,8 +226,8 @@ def test_model_causality() raises:
 
 
 def test_positions_are_used() raises:
-    # wpe adds a position-dependent vector, so the same token at two positions
-    # gets different logits. Feed [t, t] and check row 0 != row 1.
+    """The same token at two positions gives different logits, proving wpe adds a position-dependent vector.
+    """
     var gpt = build_tiny_gpt()
     var ids = List[Int]()
     ids.append(2)
@@ -239,8 +241,8 @@ def test_positions_are_used() raises:
 
 
 def test_init_loss_near_log_v() raises:
-    # A freshly initialized GPT (0.02-scale weights, tied head) has near-uniform
-    # logits, so the initial loss is close to log V.
+    """A freshly initialized GPT has near-uniform logits, so its initial loss is close to log V.
+    """
     var cfg = GPTConfig(20, 16, 16, 2, 2, 0.0)
     var rng = Rng(42)
     var gpt = GPT.init_random(cfg, rng)
@@ -258,8 +260,7 @@ def test_init_loss_near_log_v() raises:
 
 
 def test_same_seed_identical_model() raises:
-    # A seed reproduces the model bit-for-bit: two init_random with the same seed
-    # produce identical logits.
+    """Two init_random with the same seed produce identical logits."""
     var cfg = GPTConfig(12, 8, 8, 2, 2, 0.0)
     var rng_a = Rng(7)
     var gpt_a = GPT.init_random(cfg, rng_a)
@@ -291,10 +292,10 @@ def sample_std(t: Tensor2D) -> Float64:
 
 
 def test_residual_init_std_bands() raises:
-    # proj and down weights are drawn at 0.02 then scaled by 1/sqrt(2L); qkv and
-    # up stay at 0.02. L=3 -> proj/down std ~ 0.02/sqrt(6) = 0.008165. The bands
-    # are wide enough for sampling noise but tight enough that scaling the WRONG
-    # matrices (qkv/up) would fail — 0.008 is far outside the qkv/up band.
+    """The proj/down weights land in the 0.02/sqrt(2L) band and qkv/up in the 0.02 band; scaling the wrong matrices would fail a band.
+    """
+    # L=3 -> proj/down std ~ 0.02/sqrt(6) = 0.008165. Bands are wide enough for
+    # sampling noise but tight enough that 0.008 is far outside the qkv/up band.
     var cfg = GPTConfig(10, 16, 32, 3, 4, 0.0)
     var rng = Rng(123)
     var gpt = GPT.init_random(cfg, rng)
@@ -323,6 +324,7 @@ def test_residual_init_std_bands() raises:
 
 
 def test_walk_equals_formula_symmetric() raises:
+    """The parameter walk equals the config formula on a symmetric config."""
     var cfg = GPTConfig(10, 8, 16, 2, 2, 0.0)
     var rng = Rng(1)
     var gpt = GPT.init_random(cfg, rng)
@@ -336,7 +338,8 @@ def test_walk_equals_formula_symmetric() raises:
 
 
 def test_walk_equals_formula_asymmetric() raises:
-    # Asymmetric config (V!=ctx, C not a power of two, L=3, H=3), dropout nonzero.
+    """The parameter walk equals the config formula on an asymmetric config (V!=ctx, C not a power of two, L=3, H=3, dropout nonzero).
+    """
     var cfg = GPTConfig(7, 5, 12, 3, 3, 0.1)
     var rng = Rng(2)
     var gpt = GPT.init_random(cfg, rng)
@@ -350,8 +353,8 @@ def test_walk_equals_formula_asymmetric() raises:
 
 
 def test_tied_wte_counted_once() raises:
-    # The walk counts wte's V*C once (the tied head owns no Parameter). If it were
-    # double-counted, the walk would exceed the formula by exactly V*C.
+    """The walk counts wte's V*C once (the tied head owns no Parameter); double-counting would exceed the formula by exactly V*C.
+    """
     var cfg = GPTConfig(9, 6, 8, 2, 2, 0.0)
     var rng = Rng(3)
     var gpt = GPT.init_random(cfg, rng)
@@ -369,18 +372,16 @@ def test_tied_wte_counted_once() raises:
 def assert_all_moved(
     before: Tensor2D, after: Tensor2D, lr: Float64, name: String
 ) raises:
-    # Every entry must have moved by exactly -lr (grad was 1.0 everywhere). A
-    # Parameter that apply_sgd skipped keeps its old value and fails here — the
-    # whole point of the coverage test.
+    """Assert every entry moved by exactly -lr (grad was 1.0 everywhere); a Parameter apply_sgd skipped keeps its old value and fails here.
+    """
     for r in range(before.rows):
         for c in range(before.cols):
             assert_almost_equal(after[r, c], before[r, c] - lr, atol=1e-12)
 
 
 def snapshot_params(gpt: GPT) raises -> List[Tensor2D]:
-    # Every Parameter's value tensor, in a fixed order matching zero_grad /
-    # apply_sgd: wte, wpe, then per block (ln1 w/b, qkv w/b, proj w/b, ln2 w/b,
-    # up w/b, down w/b), then ln_f w/b.
+    """Every Parameter's value tensor, in a fixed order: wte, wpe, then per block (ln1 w/b, qkv w/b, proj w/b, ln2 w/b, up w/b, down w/b), then ln_f w/b.
+    """
     var out = List[Tensor2D]()
     out.append(gpt.wte.table.value.copy())
     out.append(gpt.wpe.table.value.copy())
@@ -403,10 +404,11 @@ def snapshot_params(gpt: GPT) raises -> List[Tensor2D]:
 
 
 def test_zero_grad_and_apply_sgd_reach_every_parameter() raises:
-    # After zero_grad every grad is exactly zero; after a step with every grad set
-    # to 1.0 EVERY parameter value moves by exactly -lr. Checking all 26 tensors
-    # (weights AND biases) is the point: a dropped sgd_update call — e.g.
-    # forgetting ln_f.bias — leaves that tensor unmoved and fails here.
+    """After zero_grad every grad is zero; after a step with every grad set to 1.0 every one of the 26 parameter tensors moves by exactly -lr.
+
+    Checking all tensors (weights and biases) is the point: a dropped sgd_update
+    call — e.g. forgetting ln_f.bias — leaves that tensor unmoved and fails here.
+    """
     var cfg = GPTConfig(8, 6, 8, 2, 2, 0.0)
     var rng = Rng(5)
     var gpt = GPT.init_random(cfg, rng)
@@ -438,7 +440,7 @@ def test_zero_grad_and_apply_sgd_reach_every_parameter() raises:
 
 
 def _set_all_grads_one(mut gpt: GPT):
-    # Fill every parameter grad with 1.0 so apply_sgd must move every value.
+    """Fill every parameter grad with 1.0 so apply_sgd must move every value."""
     gpt.wte.table.grad.fill(1.0)
     gpt.wpe.table.grad.fill(1.0)
     gpt.ln_f.weight.grad.fill(1.0)

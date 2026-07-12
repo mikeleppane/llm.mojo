@@ -1,19 +1,16 @@
-# The moment the arithmetic becomes a model: build the real GPT-2 124M preset,
-# count its ACTUAL floats, and reconcile with the published figure.
-#
-# Part VIII committed 124,439,808 as pure arithmetic on the config
-# (GPTConfig.parameter_count(), comptime-pinned). This example allocates the
-# preset for real and walks every Parameter, summing value.size(), then asserts
-# the walked total equals both that formula and the literal 124,439,808 — the
-# formula meeting the real tensors at last.
-#
-# Run MANUALLY — it allocates ~1 GB of Float64 weights plus the same again in
-# gradient buffers (~2 GB resident) and draws ~124M normal samples, so it is NOT
-# in the test suite (the walk-equals-formula invariant is pinned there on tiny
-# configs, which transfer the comptime pin to the real tensors without the
-# allocation). Here it is shown at full size as the chapter's closing figure.
-#
-#   pixi run mojo run -I src examples/gpt2_inventory.mojo
+"""Build the real GPT-2 124M preset, count its actual floats, and reconcile.
+
+Allocates the preset for real and walks every Parameter, summing value.size(),
+then asserts the walked total equals both GPTConfig.parameter_count() and the
+literal 124,439,808.
+
+Run manually: it allocates ~1 GB of Float64 weights plus the same again in
+gradient buffers (~2 GB resident) and draws ~124M normal samples, so it is not in
+the test suite (where the walk-equals-formula invariant is pinned on tiny configs
+without the allocation).
+
+    pixi run mojo run -I src examples/gpt2_inventory.mojo
+"""
 
 from llm.config import GPTConfig
 from llm.transformer.gpt import GPT
@@ -21,9 +18,18 @@ from llm.utils.random import Rng
 
 
 def block_parameter_count(gpt: GPT, i: Int) -> Int:
-    # Sum the 12 Parameters of block i: two LayerNorms (weight+bias), the fused
-    # qkv and the proj Linears (weight+bias), and the MLP up/down Linears
-    # (weight+bias).
+    """Sum the 12 Parameters of transformer block i.
+
+    Covers two LayerNorms (weight+bias), the fused qkv and proj Linears
+    (weight+bias), and the MLP up/down Linears (weight+bias).
+
+    Args:
+        gpt: The model.
+        i: Block index.
+
+    Returns:
+        The block's parameter count.
+    """
     var total = 0
     total += gpt.blocks[i].ln1.weight.value.size()
     total += gpt.blocks[i].ln1.bias.value.size()
@@ -41,6 +47,8 @@ def block_parameter_count(gpt: GPT, i: Int) -> Int:
 
 
 def main() raises:
+    """Allocate the 124M preset and assert the walked count matches the formula.
+    """
     var cfg = GPTConfig.gpt2_124m()
     print(cfg)
     print("Allocating the 124M preset (~2 GB resident)...")
@@ -72,7 +80,7 @@ def main() raises:
     print("walked total                     ", walked)
     print("formula (GPTConfig)              ", cfg.parameter_count())
 
-    # The reconciliation: the walk of real tensors == the Part VIII formula ==
+    # The reconciliation: the walk of real tensors == the config formula ==
     # the published GPT-2 124M figure.
     if walked != cfg.parameter_count():
         raise Error(

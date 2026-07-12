@@ -1,10 +1,11 @@
-# Tests for categorical sampling and a bigram plausibility pin.
-#
-# The sampler is where determinism and support-respect matter: the same seed must
-# replay the same draws, zero-probability tokens must never appear, and a
-# degenerate one-hot must always pick its single support point. The plausibility
-# pin turns the "bigram-plausible" roadmap criterion into a hard assertion: on
-# the full corpus, the count model's most likely successor of 'q' is 'u'.
+"""Tests for categorical sampling and a bigram plausibility pin.
+
+The sampler is where determinism and support-respect matter: the same seed
+replays the same draws, zero-probability tokens never appear, and a degenerate
+one-hot always picks its single support point. The plausibility pin is a hard
+assertion: on the full corpus, the count model's most likely successor of 'q'
+is 'u'.
+"""
 
 from std.testing import assert_equal, assert_true, assert_raises, TestSuite
 
@@ -17,7 +18,7 @@ from llm.utils.random import Rng
 
 
 def test_degenerate_distribution() raises:
-    # A one-hot distribution always returns its single support index.
+    """A one-hot distribution always returns its single support index."""
     var rng = Rng(1)
     var probs: List[Float64] = [0.0, 0.0, 1.0, 0.0]
     for _ in range(20):
@@ -25,7 +26,7 @@ def test_degenerate_distribution() raises:
 
 
 def test_seed_deterministic() raises:
-    # Same seed -> identical draw sequence; a different seed diverges somewhere.
+    """Same seed gives an identical draw sequence; a different seed diverges."""
     var probs: List[Float64] = [0.25, 0.25, 0.25, 0.25]
     var a = Rng(7)
     var b = Rng(7)
@@ -46,7 +47,7 @@ def test_seed_deterministic() raises:
 
 
 def test_draws_respect_support() raises:
-    # A zero-probability entry is never selected across many draws.
+    """A zero-probability entry is never selected across many draws."""
     var probs: List[Float64] = [0.5, 0.0, 0.5]
     var rng = Rng(3)
     for _ in range(1000):
@@ -54,6 +55,8 @@ def test_draws_respect_support() raises:
 
 
 def test_invalid_probs_raise() raises:
+    """`sample_categorical` raises on an empty distribution or one not summing to 1.
+    """
     var rng = Rng(1)
     with assert_raises(contains="empty"):
         _ = sample_categorical(List[Float64](), rng)
@@ -62,27 +65,27 @@ def test_invalid_probs_raise() raises:
 
 
 def test_negative_probability_raises() raises:
+    """`sample_categorical` raises on a negative probability."""
     var rng = Rng(1)
     with assert_raises(contains="negative"):
         _ = sample_categorical([1.5, -0.5], rng)  # sums to 1 but invalid
 
 
 def test_sum_slack_never_selects_zero_entry() raises:
-    # A distribution that sums to a hair under 1 (within the accept tolerance)
-    # must still never draw a zero-probability entry: the draw is scaled by the
-    # actual total, so u can't land in the [sum, 1) gap and fall through to the
-    # last index. Rng(953094) is a seed that returned the zero entry before the
-    # fix.
+    """A distribution summing just under 1 still never draws a zero entry."""
+    # The draw is scaled by the actual total, so u can't land in the [sum, 1) gap
+    # and fall through to the last index. Rng(953094) returned the zero entry
+    # before the fix.
     var probs: List[Float64] = [0.9999995, 0.0]
     var r = Rng(953094)
     assert_equal(sample_categorical(probs, r), 0)
 
 
 def test_draw_frequencies_track_probabilities() raises:
-    # The one invariant the determinism/support tests can't see: drawn mass is
-    # proportional to probability. 10k draws from [0.25, 0.75] should split near
-    # 1:3. Catches an inverse-CDF that is in-support but systematically skewed
-    # (e.g. a `<` vs `<=` off-by-one).
+    """Drawn mass is proportional to probability (10k draws from [0.25, 0.75]).
+    """
+    # Catches an inverse-CDF that is in-support but systematically skewed (e.g. a
+    # `<` vs `<=` off-by-one).
     var probs: List[Float64] = [0.25, 0.75]
     var rng = Rng(2024)
     var ones = 0
@@ -95,9 +98,8 @@ def test_draw_frequencies_track_probabilities() raises:
 
 
 def test_bigram_plausibility_pin() raises:
-    # The "bigram-plausible" criterion, made deterministic: on the full corpus,
-    # the count model's argmax successor of 'q' is 'u'. No training, no sampling
-    # randomness — just the counts.
+    """On the full corpus, the count model's argmax successor of 'q' is 'u'."""
+    # No training, no sampling randomness — just the counts.
     var text = load_text("data/tinyshakespeare/input.txt")
     var tok = CharTokenizer.from_text(text)
     var ids = tok.encode(text)

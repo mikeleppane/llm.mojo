@@ -1,16 +1,4 @@
-# Tests for the KV cache and the cached decode step.
-#
-# The load-bearing test here is step-vs-forward EXACT parity at every prefix: the
-# cached path must produce BIT-IDENTICAL logits to the uncached batch forward,
-# not merely close. That exactness is earned — every stage of the eval forward is
-# row-independent (LayerNorm per row, Linear per row, GELU/residual elementwise),
-# and the one stage where positions interact, attention, reads cached K/V rows
-# that are bit-identical to what the batch path would recompute, using the same
-# frozen core in the same op order. So exact equality is the right assertion and
-# any mismatch is a real bug — a position off-by-one, a slice bound, a reordered
-# sum. Loosening to a tolerance would hide exactly that bug class; it is
-# forbidden here. The doll-house uses TWO layers on purpose, so a cross-layer
-# cache-indexing bug cannot hide behind a single-layer coincidence.
+"""Tests for the KV cache and the cached decode step, centered on step-vs-forward bit-identical parity at every prefix (a two-layer doll-house so a cross-layer cache-indexing bug cannot hide)."""
 
 from std.testing import (
     assert_equal,
@@ -44,8 +32,8 @@ def _doll_gpt(seed: UInt64) raises -> GPT:
 
 
 def _fixed_sequence() -> List[Int]:
-    # A fixed 8-token sequence, every id in [0, V). Distinct-ish so a wrong token
-    # or position would shift the logits visibly.
+    """A fixed 8-token sequence, every id in [0, V), distinct-ish so a wrong token or position shifts the logits visibly.
+    """
     return [3, 7, 0, 10, 4, 4, 9, 1]
 
 
@@ -53,6 +41,8 @@ def _fixed_sequence() -> List[Int]:
 
 
 def test_fresh_shapes_length_capacity() raises:
+    """A fresh cache has length 0, capacity T, and per-layer [context_length, C] K/V buffers.
+    """
     var cfg = _doll_cfg()
     var cache = KVCache.fresh(cfg)
     assert_equal(cache.length, 0)
@@ -70,6 +60,8 @@ def test_fresh_shapes_length_capacity() raises:
 
 
 def test_check_compatible_wrong_layer_count_raises() raises:
+    """A config whose layer count differs from the cache's makes check_compatible raise.
+    """
     var cache = KVCache.fresh(_doll_cfg())
     var deeper = GPTConfig(DOLL_V, DOLL_T, DOLL_C, DOLL_L + 1, DOLL_H, 0.0)
     with assert_raises(contains="layers"):
@@ -77,8 +69,8 @@ def test_check_compatible_wrong_layer_count_raises() raises:
 
 
 def test_check_compatible_wrong_width_raises() raises:
-    # Same layer count and capacity, different d_model — must trip the per-layer
-    # width guard (both stay divisible by n_heads).
+    """Same layer count and capacity but a different d_model trips the per-layer width guard.
+    """
     var cache = KVCache.fresh(_doll_cfg())
     var wider = GPTConfig(DOLL_V, DOLL_T, DOLL_C * 2, DOLL_L, DOLL_H, 0.0)
     with assert_raises(contains="width"):
@@ -86,6 +78,8 @@ def test_check_compatible_wrong_width_raises() raises:
 
 
 def test_check_compatible_wrong_capacity_raises() raises:
+    """A config whose context length differs from the cache's capacity makes check_compatible raise.
+    """
     var cache = KVCache.fresh(_doll_cfg())
     var longer = GPTConfig(DOLL_V, DOLL_T * 2, DOLL_C, DOLL_L, DOLL_H, 0.0)
     with assert_raises(contains="capacity"):
@@ -93,9 +87,8 @@ def test_check_compatible_wrong_capacity_raises() raises:
 
 
 def test_check_compatible_mismatched_kv_layer_count_raises() raises:
-    # A publicly built cache (via @fieldwise_init) can carry more key buffers than
-    # value buffers. check_compatible must surface that as the NAMED value-layer
-    # error before the per-layer loop indexes v[i] into a bounds trap.
+    """A cache with more key buffers than value buffers surfaces the named value-layer error before the per-layer loop indexes v[i] out of bounds.
+    """
     var k = List[Tensor2D]()
     var v = List[Tensor2D]()
     k.append(zeros_2d(DOLL_T, DOLL_C))
@@ -110,7 +103,8 @@ def test_check_compatible_mismatched_kv_layer_count_raises() raises:
 
 
 def test_step_fills_to_capacity_then_raises_when_full() raises:
-    # Feeding exactly context_length tokens succeeds; the next step raises NAMED.
+    """Feeding exactly context_length tokens succeeds; the next step raises and does not advance length.
+    """
     var gpt = _doll_gpt(11)
     var ids = _fixed_sequence()
     var cache = KVCache.fresh(_doll_cfg())
@@ -127,11 +121,8 @@ def test_step_fills_to_capacity_then_raises_when_full() raises:
 
 
 def test_step_matches_forward_at_every_prefix() raises:
-    # For every prefix length t in 1..T, the batch forward's LAST logits row over
-    # ids[0:t] must equal the t-th cached step's logits row EXACTLY, every one of
-    # the V columns, no tolerance. Two layers, so a cross-layer cache-indexing bug
-    # cannot hide. This is the part's proof that caching changes the algorithm,
-    # not the arithmetic.
+    """For every prefix length t, the batch forward's last logits row over ids[0:t] equals the t-th cached step's logits row exactly across all V columns; caching changes the algorithm, not the arithmetic.
+    """
     var gpt = _doll_gpt(20260711)
     var ids = _fixed_sequence()
     var cache = KVCache.fresh(_doll_cfg())
@@ -158,9 +149,8 @@ def test_step_matches_forward_at_every_prefix() raises:
 
 
 def test_reset_replays_bit_identically() raises:
-    # Run a step sequence, capture the logits; reset; replay the same tokens. The
-    # second pass must be bit-identical to the first — reset must leave no live
-    # state behind, and the dead rows past length must never be read.
+    """After reset, replaying the same tokens reproduces the first pass bit-for-bit: reset leaves no live state and dead rows past length are never read.
+    """
     var gpt = _doll_gpt(99)
     var ids = _fixed_sequence()
     var cache = KVCache.fresh(_doll_cfg())
@@ -186,9 +176,8 @@ def test_reset_replays_bit_identically() raises:
 
 
 def test_bad_token_id_raises_and_leaves_length_unchanged() raises:
-    # A token id outside [0, V) raises via the embedding gather. length must not
-    # advance on the raise path, so a caller can always trust it after a failed
-    # step. The bad id (== V) is checked BEFORE any cache row is written.
+    """A token id outside [0, V) raises without advancing length, and the cache stays usable for the next valid step.
+    """
     var gpt = _doll_gpt(5)
     var cache = KVCache.fresh(_doll_cfg())
     # Advance a couple of good steps first, so a nonzero length is on the line.

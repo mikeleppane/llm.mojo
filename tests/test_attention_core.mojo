@@ -1,11 +1,11 @@
-# Tests for scaled_dot_product_attention — the self/cross attention core.
-#
-# The oracle goldens (Cases A-D) come from tests/oracles/attention_reference.py,
-# run once and frozen here. The rest are structural properties that catch the
-# classic attention bugs without an oracle: a wrong normalization axis, a
-# multiplied-instead-of-added mask, a forgotten or squared scale, and the
-# fully-blocked-row NaN. Nothing here recomputes the weights in a second path —
-# causality is proven on AttentionResult.weights directly.
+"""Tests for scaled_dot_product_attention, the self/cross attention core.
+
+Oracle goldens come from tests/oracles/attention_reference.py, run once and
+frozen here. The rest are structural properties that catch the classic attention
+bugs without an oracle: a wrong normalization axis, a multiplied-instead-of-added
+mask, a forgotten or squared scale, and the fully-blocked-row NaN. Causality is
+proven directly on AttentionResult.weights.
+"""
 
 from std.math import isnan, isinf
 
@@ -25,9 +25,8 @@ from llm.transformer.masks import MASKED_SCORE, causal_mask, no_mask
 
 
 def test_case_a_cross_shaped_oracle() raises:
-    # Golden from tests/oracles/attention_reference.py, Case A: T_q=3, T_k=4,
-    # D=2, D_v=2, no mask. T_q != T_k is the cross-attention property; the output
-    # shape must be [T_q, D_v] = [3, 2], not [T_k, ...].
+    """Cross-shaped oracle golden (T_q=3, T_k=4): weights [3,4] and output [3,2]
+    match attention_reference.py."""
     var q = from_rows([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])  # [3, 2]
     var k = from_rows(
         [[1.0, 0.0], [0.0, 1.0], [1.0, 1.0], [-1.0, 1.0]]
@@ -73,14 +72,8 @@ def test_case_a_cross_shaped_oracle() raises:
 
 
 def test_case_d_hand_worked_2x2() raises:
-    # Hand-worked, D=1 so scale = 1/sqrt(1) = 1 (also frozen as Case D):
-    #   q=[[1],[0]], k=[[1],[2]], v=[[3],[5]]
-    #   scores = q @ k^T = [[1, 2], [0, 0]]
-    #   row 0 weights = softmax([1, 2]) = [1/(1+e), e/(1+e)]
-    #                 = [0.26894142, 0.73105858]
-    #   row 1 weights = softmax([0, 0]) = [0.5, 0.5]
-    #   output row 0  = 0.26894142*3 + 0.73105858*5 = 4.46211716
-    #   output row 1  = 0.5*3 + 0.5*5                = 4.0
+    """Hand-worked D=1 case (scale=1): softmax rows [0.269, 0.731] and [0.5, 0.5],
+    output [4.462, 4.0]."""
     var q = from_rows([[1.0], [0.0]])
     var k = from_rows([[1.0], [2.0]])
     var v = from_rows([[3.0], [5.0]])
@@ -94,8 +87,7 @@ def test_case_d_hand_worked_2x2() raises:
 
 
 def test_weight_rows_sum_to_one() raises:
-    # The softmax invariant must survive all the plumbing: every query row's
-    # weights sum to 1. Uses the cross-shaped Case A geometry.
+    """Every query row's weights sum to 1 (the softmax invariant survives)."""
     var q = from_rows([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
     var k = from_rows([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0], [-1.0, 1.0]])
     var v = from_rows([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0], [2.0, -1.0]])
@@ -108,9 +100,7 @@ def test_weight_rows_sum_to_one() raises:
 
 
 def test_causal_weights_zero_above_diagonal() raises:
-    # With a causal mask, every weight strictly above the diagonal is 0 within
-    # tolerance — proven directly on the returned weights, not inferred from the
-    # output. T_q = T_k = 4. Uses arbitrary q/k/v; only the mask matters here.
+    """Under a causal mask, every weight strictly above the diagonal is 0."""
     var q = from_rows(
         [[1.0, 2.0], [0.5, -1.0], [3.0, 0.0], [-2.0, 1.5]]
     )  # [4, 2]
@@ -128,9 +118,8 @@ def test_causal_weights_zero_above_diagonal() raises:
 
 
 def test_identical_values_pass_through() raises:
-    # If every row of v is the same vector, the output equals that vector at
-    # every query position regardless of q/k/mask — because the weights sum to 1.
-    # A wrong normalization axis (columns instead of rows) breaks this instantly.
+    """Identical v rows pass through: output equals that vector at every position
+    (weights sum to 1)."""
     var q = from_rows([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])  # [3, 2]
     var k = from_rows([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0], [5.0, 5.0]])
     var same = from_rows(
@@ -143,10 +132,8 @@ def test_identical_values_pass_through() raises:
 
 
 def test_diagonal_only_mask_selects_self() raises:
-    # A mask that blocks everything except the diagonal collapses each query's
-    # weights to a one-hot on its own position, so output row i == v row i
-    # exactly. Any multiplicative-mask confusion (mask * scores instead of
-    # mask + scores) fails here loudly.
+    """A diagonal-only mask makes weights one-hot on self, so output row i == v row
+    i (additive, not multiplicative, masking)."""
     var q = from_rows([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])  # [3, 2]
     var k = from_rows([[0.5, 0.5], [1.0, 0.0], [0.0, 1.0]])  # [3, 2]
     var v = from_rows([[10.0, 11.0], [20.0, 21.0], [30.0, 31.0]])  # [3, 2]
@@ -165,18 +152,9 @@ def test_diagonal_only_mask_selects_self() raises:
 
 
 def test_fully_blocked_row_is_finite_no_nan() raises:
-    # The load-bearing guarantee of a finite MASKED_SCORE: a query whose entire
-    # row is blocked produces NO NaN/inf (with -inf, stable softmax would compute
-    # -inf - -inf = NaN and poison everything). The weights stay finite and sum
-    # to 1.
-    #
-    # A subtlety worth naming: additive masking is shift-invariant under softmax,
-    # so adding -1e9 to EVERY key of a row cancels in the max-subtraction and the
-    # row degrades to softmax(unmasked scores) — uniform ONLY when those scores
-    # tie, not in general. Here query 0 is q = [0, 0], so every dot product (and
-    # thus every score) is 0; the degraded row is genuinely uniform (1/3 each),
-    # and we can pin that exactly. The finiteness assertions below are the part
-    # that holds for ANY blocked row regardless of the underlying scores.
+    """A fully blocked query row stays finite (no NaN/inf) and sums to 1; here the
+    scores tie (q=[0,0]) so it degrades to uniform 1/3. A finite MASKED_SCORE is
+    what avoids the -inf - -inf = NaN a stable softmax would hit."""
     var q = from_rows([[0.0, 0.0], [0.0, 1.0]])  # [2, 2]; row 0 all zeros
     var k = from_rows([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])  # [3, 2]
     var v = from_rows([[2.0, 0.0], [0.0, 4.0], [6.0, 6.0]])  # [3, 2]
@@ -204,11 +182,9 @@ def test_fully_blocked_row_is_finite_no_nan() raises:
 
 
 def test_fully_blocked_nontied_row_stays_finite_not_uniform() raises:
-    # Companion to the tied case: when a fully-blocked row's underlying scores do
-    # NOT tie, the row does not go uniform — additive masking is shift-invariant,
-    # so it degrades to softmax(unmasked scores). The guarantee that still holds
-    # is finiteness and rows summing to 1. Here query 0 has distinct dot products
-    # against the keys, so its blocked-row weights are unequal but finite.
+    """A fully blocked row with non-tied scores stays finite and sums to 1, but is
+    NOT uniform (additive masking degrades it to softmax of the unmasked scores).
+    """
     var q = from_rows([[2.0, 1.0]])  # [1, 2]; non-degenerate query
     var k = from_rows([[3.0, 0.0], [0.0, 3.0], [1.0, 1.0]])  # distinct dots
     var v = from_rows([[1.0, 0.0], [0.0, 1.0], [2.0, 2.0]])  # [3, 2]
@@ -229,12 +205,8 @@ def test_fully_blocked_nontied_row_stays_finite_not_uniform() raises:
 
 
 def test_scale_is_inv_sqrt_dhead() raises:
-    # Golden from Case B: q has a single 1 in column 0, so dot(q, k_row) is
-    # k_row[0] regardless of D. The two dot products stay fixed at 8 and 2 while
-    # D goes 2 -> 4, so only the 1/sqrt(D) factor moves the weights:
-    #   D=2: softmax([8, 2] / sqrt(2)) -> [0.98583396, 0.01416604]
-    #   D=4: softmax([8, 2] / sqrt(4)) -> [0.95257413, 0.04742587]
-    # A squared scale, a 1/sqrt(d_model) scale, or no scale gives other numbers.
+    """The scale is 1/sqrt(d_head): with dots fixed at [8,2], D 2->4 shifts weights
+    only via 1/sqrt(D). Oracle-frozen values."""
     var k2 = from_rows([[8.0, 7.0], [2.0, 3.0]])  # dots = 8, 2
     var v2 = from_rows([[1.0], [0.0]])
     var q2 = from_rows([[1.0, 0.0]])  # D=2
@@ -252,11 +224,8 @@ def test_scale_is_inv_sqrt_dhead() raises:
 
 
 def test_scale_before_mask_order() raises:
-    # Golden from Case C: same q/k/v as Case A but with a small finite mask. The
-    # pinned order scales the raw scores THEN adds the mask; adding the mask
-    # before scaling would divide these small entries by sqrt(2) too and give
-    # different weights. Small finite entries (not -1e9) make the orders diverge
-    # observably.
+    """Scores are scaled before the mask is added: small finite mask entries make
+    the two orders diverge observably. Oracle-frozen values."""
     var q = from_rows([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
     var k = from_rows([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0], [-1.0, 1.0]])
     var v = from_rows([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0], [2.0, -1.0]])
@@ -295,6 +264,7 @@ def test_scale_before_mask_order() raises:
 
 
 def test_shape_mismatches_raise() raises:
+    """Mismatched q/k width, v/k length, or mask shape each raise."""
     var q = from_rows([[1.0, 0.0], [0.0, 1.0]])  # [2, 2]
     var k = from_rows([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])  # [3, 2]
     var v = from_rows([[1.0], [0.0], [1.0]])  # [3, 1]

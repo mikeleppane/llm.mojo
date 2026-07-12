@@ -1,34 +1,18 @@
-# TransformerBlock — GPT-2's pre-LN decoder block (self-attention only).
-#
-# Two sublayers, each a pre-LN residual (the layout GPT-2 uses; the original
-# Transformer paper is post-LN, ln(x + sublayer(x))):
-#
-#     a   = x + attn(ln1(x), mask)         # masked self-attention sublayer
-#     out = a + mlp(ln2(a))                # position-wise feed-forward sublayer
-#
-# This is the decoder-only block the real GPT stacks — no cross-attention (there
-# is no encoder to attend to). The encoder-decoder lab rehearsed this exact
-# residual wiring; here it is written fresh on the main line with the two things
-# the lab deferred: config-driven construction and dropout in GPT-2's places.
-#
-# The residual backward rule (the one new gradient idea the block assembly
-# teaches): for out = h + f(ln(h)) the upstream gradient reaches h by BOTH paths,
-# which SUM:
-#
-#     d_h = d_out + ln.backward(f.backward(d_out))
-#
-# — d_out straight down the skip connection, plus the branch term. Dropping the
-# skip term (d_h = branch only) is the classic residual bug; it is off by exactly
-# the identity d_out, which the block-level finite-difference of d_x catches. No
-# new tensor op is needed — `add` does both the forward residual and the backward
-# sum.
-#
-# Dropout (training path only): GPT-2 puts residual dropout on each sublayer's
-# output BEFORE the residual add — x + dropout(sublayer(ln(x))). The skip path x
-# is NEVER dropped. Attention-weight dropout lives one level down, inside the
-# self-attention train core. The plain `forward` is the inference path: no
-# dropout, no rng — applying dropout at inference is made unrepresentable, not
-# merely tested against.
+"""TransformerBlock: GPT-2's pre-LN decoder block (self-attention only).
+
+Two sublayers, each a pre-LN residual (GPT-2's layout; the original Transformer
+paper is post-LN):
+
+    a   = x + attn(ln1(x), mask)         # masked self-attention sublayer
+    out = a + mlp(ln2(a))                # position-wise feed-forward sublayer
+
+Decoder-only: no cross-attention. The residual backward sums both paths,
+d_h = d_out + ln.backward(f.backward(d_out)); dropping the skip d_out term is the
+classic residual bug. Residual dropout (training path only) is applied to each
+sublayer's output before the residual add — the skip path x is never dropped;
+attention-weight dropout lives one level down in the self-attention train core.
+The plain `forward` is the inference path with no dropout and no rng.
+"""
 
 from llm.nn.dropout import dropout_backward, dropout_cached
 from llm.nn.layernorm import LayerNorm, LayerNormCache
@@ -45,26 +29,36 @@ from llm.transformer.attention import (
 )
 from llm.utils.random import Rng
 
-# The number of Parameters one block owns, walked in the fixed order below (ln1
-# weight/bias, attn qkv weight/bias, attn proj weight/bias, ln2 weight/bias, mlp
-# up weight/bias, mlp down weight/bias). Every walk method visits exactly these
-# twelve in exactly this order — the contract the optimizer, gradient clipping,
-# and the checkpoint format all lean on.
+# The number of Parameters one block owns, walked in a fixed order (ln1 w/b, attn
+# qkv w/b, attn proj w/b, ln2 w/b, mlp up w/b, mlp down w/b). Every walk method
+# visits exactly these twelve in this order — the contract the optimizer,
+# gradient clipping, and the checkpoint format all lean on.
 comptime BLOCK_PARAM_COUNT = 12
 
 
 @fieldwise_init
 struct ParamShape(Copyable, Movable):
-    # A single parameter tensor's shape, produced by the walk. A named pair
-    # rather than a bare tuple so `.rows`/`.cols` read clearly at every use site
-    # (sizing optimizer state, validating a checkpoint header).
+    """A single parameter tensor's [rows, cols] shape, produced by the walk.
+
+    A named pair rather than a bare tuple so `.rows`/`.cols` read clearly at
+    every use site (sizing optimizer state, validating a checkpoint header).
+    """
+
     var rows: Int
     var cols: Int
 
 
 def _grad_sum_sq(p: Parameter) -> Float64:
-    # Sum of squares of one Parameter's gradient — a partial contribution to the
-    # global gradient norm. Reads p.grad; allocates nothing; cannot raise.
+    """Sum of squares of one Parameter's gradient (partial global-norm term).
+
+    Reads p.grad; allocates nothing; cannot raise.
+
+    Args:
+        p: Parameter whose gradient is summed.
+
+    Returns:
+        The scalar sum of squared gradient entries.
+    """
     var s = 0.0
     for i in range(p.grad.rows):
         for j in range(p.grad.cols):
@@ -74,17 +68,31 @@ def _grad_sum_sq(p: Parameter) -> Float64:
 
 
 def _grad_scale(mut p: Parameter, factor: Float64):
-    # Multiply one Parameter's gradient in place by `factor` (gradient clipping).
-    # Mutates p.grad; allocates nothing; cannot raise.
+    """Multiply one Parameter's gradient in place by `factor` (gradient clipping).
+
+    Mutates p.grad; allocates nothing; cannot raise.
+
+    Args:
+        p: Parameter whose gradient is scaled.
+        factor: Scale applied to every gradient entry.
+    """
     for i in range(p.grad.rows):
         for j in range(p.grad.cols):
             p.grad[i, j] = p.grad[i, j] * factor
 
 
 def _load_value(mut p: Parameter, src: Tensor2D) raises:
-    # Copy `src` into one Parameter's value in place (checkpoint restore).
-    # Mutates p.value; allocates nothing; raises on a shape mismatch (a header
-    # that passed validation but a tensor that did not — a corrupt file).
+    """Copy `src` into one Parameter's value in place (checkpoint restore).
+
+    Mutates p.value; allocates nothing.
+
+    Args:
+        p: Parameter whose value is overwritten.
+        src: Source tensor, must match p.value's shape.
+
+    Raises:
+        Error: If src's shape does not match the parameter (a corrupt file).
+    """
     if src.rows != p.value.rows or src.cols != p.value.cols:
         raise Error(
             "import_parameters: tensor shape ("
@@ -104,14 +112,15 @@ def _load_value(mut p: Parameter, src: Tensor2D) raises:
 
 @fieldwise_init
 struct BlockCache(Copyable, Movable):
-    # One sub-cache per stage, in forward order, plus the two residual-dropout
-    # masks. The self-attention stage caches ln1 then the train-core MHA cache
-    # (which carries attention-weight dropout inside it); the feed-forward stage
-    # caches ln2 then the MLP. Each residual dropout contributes its mask and
-    # scale so backward reproduces the exact forward map (all-ones / unit in eval).
-    # The residual adds carry no parameters, so the skip path needs no cache — it
-    # is reconstructed in backward as the additive d_out term. Valid only for the
-    # forward call that produced it.
+    """One sub-cache per stage in forward order, plus the two residual-dropout masks.
+
+    The self-attention stage caches ln1 then the train-core MHA cache (which
+    carries attention-weight dropout); the feed-forward stage caches ln2 then the
+    MLP. Each residual dropout contributes its mask and scale so backward
+    reproduces the exact forward map. The residual adds carry no parameters, so
+    the skip path needs no cache. Valid only for the forward call that produced it.
+    """
+
     var ln1_cache: LayerNormCache
     var attn_cache: MHATrainCache
     var attn_drop_mask: Tensor2D  # [T, C], attention sublayer residual dropout
@@ -124,19 +133,28 @@ struct BlockCache(Copyable, Movable):
 
 @fieldwise_init
 struct BlockForward(Copyable, Movable):
-    # forward_cached's output plus the cache its backward consumes.
+    """Bundle forward_cached's output with the cache its backward consumes."""
+
     var output: Tensor2D  # [T, C]
     var cache: BlockCache
 
     def take_cache(deinit self) -> BlockCache:
-        # Consume this forward and hand back just the (large) cache, dropping the
-        # output. The model loop reads the block output, passing it on to the next block, then
-        # moves this whole cache into its list instead of deep-copying it.
+        """Consume this forward and return just the (large) cache.
+
+        The model loop reads the output first, then moves this cache into its
+        list instead of deep-copying it.
+
+        Returns:
+            The block cache, moved out.
+        """
         return self.cache^
 
 
 @fieldwise_init
 struct TransformerBlock(Copyable, Movable):
+    """GPT-2 pre-LN decoder block: masked self-attention then a feed-forward MLP.
+    """
+
     var ln1: LayerNorm  # pre-attention norm
     var attn: MultiHeadAttention  # masked self-attention
     var ln2: LayerNorm  # pre-MLP norm
@@ -146,12 +164,24 @@ struct TransformerBlock(Copyable, Movable):
     def init_random(
         mut rng: Rng, d_model: Int, n_heads: Int, d_hidden: Int
     ) raises -> TransformerBlock:
-        # A GPT-2 block with default LayerNorms (weight ones, bias zeros) and
-        # attention + MLP drawn from GPT-2's normal(0, 0.02). Draw order is
-        # attention (qkv then proj) then MLP (up then down); the LayerNorms are
-        # parameter-free at init, so they consume no draws. A given generator state
-        # reproduces the same block. Mutates rng; allocates the sublayers; raises
-        # on invalid dims (via the sublayer factories).
+        """Build a GPT-2 block: default LayerNorms and normal(0, 0.02) attn + MLP.
+
+        Draw order is attention (qkv then proj) then MLP (up then down); the
+        LayerNorms are parameter-free at init and draw nothing, so a given
+        generator state reproduces the same block.
+
+        Args:
+            rng: Random generator; advanced by the draws.
+            d_model: Model width C.
+            n_heads: Number of attention heads.
+            d_hidden: MLP hidden width.
+
+        Returns:
+            A fresh block. Allocates the sublayers.
+
+        Raises:
+            Error: On invalid dims (via the sublayer factories).
+        """
         var ln1 = LayerNorm.init_default(d_model)
         var attn = MultiHeadAttention.init_random(rng, d_model, n_heads)
         var ln2 = LayerNorm.init_default(d_model)
@@ -159,9 +189,18 @@ struct TransformerBlock(Copyable, Movable):
         return TransformerBlock(ln1^, attn^, ln2^, mlp^)
 
     def forward(self, x: Tensor2D, mask: Tensor2D) raises -> Tensor2D:
-        # Inference path: pre-LN block with NO dropout and no rng. [T, C] + mask
-        # [T, T] -> [T, C]. Reads self only; allocates the intermediates and result;
-        # raises on a shape/config mismatch (via the sublayers).
+        """Inference path: pre-LN block with no dropout and no rng.
+
+        Args:
+            x: Residual stream, shape [T, C].
+            mask: Additive attention mask, shape [T, T].
+
+        Returns:
+            The block output [T, C]. Reads self only; allocates.
+
+        Raises:
+            Error: On a shape/config mismatch (via the sublayers).
+        """
         var attn_out = self.attn.forward(self.ln1.forward(x), mask)  # [T, C]
         var a = add(x, attn_out)  # residual 1: x + attn(ln1(x))
         var mlp_out = self.mlp.forward(self.ln2.forward(a))  # [T, C]
@@ -174,17 +213,27 @@ struct TransformerBlock(Copyable, Movable):
         mut v_cache: Tensor2D,
         pos: Int,
     ) raises -> Tensor2D:
-        # KV-cached single-token block: the SAME pre-LN wiring as `forward`, one
-        # row wide. [1, C] residual in -> [1, C] out. ln1/ln2/mlp are the existing
-        # row-wise forwards (LayerNorm normalizes per row, the MLP is per row), and
-        # the self-attention sublayer is the cached `attn.step`, which appends this
-        # position's K/V to the two cache buffers and attends over the whole valid
-        # region:
-        #     a   = x + attn.step(ln1(x), k_cache, v_cache, pos)
-        #     out = a + mlp(ln2(a))
-        # The skip path (x, a) is identical to `forward`. Reads self; mutates the
-        # two cache buffers (via attn.step); allocates the intermediates and
-        # result; raises on a shape/config mismatch or an out-of-range pos.
+        """KV-cached single-token block: the same pre-LN wiring as `forward`, one row wide.
+
+        The self-attention sublayer is the cached `attn.step`, which appends this
+        position's K/V to the buffers and attends over the whole valid region:
+
+            a   = x + attn.step(ln1(x), k_cache, v_cache, pos)
+            out = a + mlp(ln2(a))
+
+        Args:
+            x: Residual stream for the new position, shape [1, C].
+            k_cache: This layer's key buffer, mutated at row `pos`.
+            v_cache: This layer's value buffer, mutated at row `pos`.
+            pos: The newest position (the cache's length on entry).
+
+        Returns:
+            The block output [1, C]. Reads self; mutates the cache buffers;
+            allocates.
+
+        Raises:
+            Error: On a shape/config mismatch or an out-of-range pos.
+        """
         var attn_out = self.attn.step(
             self.ln1.forward(x), k_cache, v_cache, pos
         )  # [1, C]
@@ -200,21 +249,31 @@ struct TransformerBlock(Copyable, Movable):
         training: Bool,
         mut rng: Rng,
     ) raises -> BlockForward:
-        # Training path: the same pre-LN block, capturing each stage's cache and
-        # applying GPT-2's dropout. Attention-weight dropout runs inside the
-        # self-attention train core; residual dropout is applied to each sublayer's
-        # output BEFORE the residual add (the skip x / a is never dropped). rng is
-        # threaded attention-core-first, then the attention residual dropout, then
-        # the MLP residual dropout — the fixed order a seed replays. With
-        # training = False (or p = 0) every dropout site is the identity with an
-        # all-ones mask and NO rng consumed, so this computes exactly what forward
-        # computes. Reads self; allocates the intermediates, caches, and result;
-        # mutates rng only in the training/p>0 branch; raises on a shape/config
-        # mismatch or an out-of-range p. The cache is valid only for this call.
-        # ln1 keeps its own copy of x because x is the residual stream, still
-        # needed at the `x + ...` add below. Each stage's forward is split into
-        # (output, cache): the output moves into the next stage, the cache moves
-        # into this block's cache — no [T, *] activation is copied.
+        """Training path: the pre-LN block capturing each stage's cache, with dropout.
+
+        Attention-weight dropout runs inside the self-attention train core;
+        residual dropout is applied to each sublayer's output before the residual
+        add (the skip is never dropped). rng is threaded attention-core-first,
+        then attention residual, then MLP residual — the fixed order a seed
+        replays. With training = False (or p = 0) every dropout site is the
+        identity with no rng consumed, so this equals `forward`.
+
+        Args:
+            x: Residual stream, shape [T, C]; moved into the ln1 cache.
+            mask: Additive attention mask, shape [T, T].
+            p: Dropout probability.
+            training: Whether to apply dropout and draw from rng.
+            rng: Random generator; mutated only in the training/p>0 branch.
+
+        Returns:
+            The output [T, C] and the cache its backward consumes, valid only for
+            this call. Allocates the intermediates and caches.
+
+        Raises:
+            Error: On a shape/config mismatch or an out-of-range p.
+        """
+        # Each stage's forward is split into (output, cache): the output moves to
+        # the next stage, the cache into this block's cache — no [T, *] copy.
         var ln1_fwd = self.ln1.forward_cached(
             x.copy()
         )  # x is the residual, kept
@@ -268,18 +327,24 @@ struct TransformerBlock(Copyable, Movable):
     def backward(
         mut self, cache: BlockCache, d_out: Tensor2D
     ) raises -> Tensor2D:
-        # Reverse the two pre-LN residuals, outer (MLP) first. For
-        # out = a + dropout(mlp(ln2(a))) the gradient reaches a by both paths:
-        #   d_mlp_out = dropout_backward(mlp_drop, d_out)     (undo residual dropout)
-        #   d_a = d_out + ln2.backward(mlp.backward(d_mlp_out))   (skip + branch)
-        # Then for a = x + dropout(attn(ln1(x))) the same rule reaches x:
-        #   d_attn_out = dropout_backward(attn_drop, d_a)
-        #   d_x = d_a + ln1.backward(attn.backward_train(d_attn_out))  (skip + branch)
-        # The bare d_out / d_a terms are the skip connections — the residual bug is
-        # to drop them. Residual dropout is undone on the BRANCH only; the skip
-        # never saw dropout. Mutates every sublayer's parameter grads (+=);
-        # allocates and returns d_x [T, C]; raises on a shape mismatch (via the
-        # sublayers).
+        """Reverse the two pre-LN residuals, outer (MLP) first.
+
+        For out = a + dropout(mlp(ln2(a))) the gradient reaches a by both paths:
+        undo the residual dropout, then d_a = d_out + ln2.backward(mlp.backward(
+        d_mlp_out)) (skip + branch). Then for a = x + dropout(attn(ln1(x))) the
+        same rule reaches x. The bare d_out / d_a skip terms must not be dropped
+        (the residual bug); residual dropout is undone on the branch only.
+
+        Args:
+            cache: The forward cache from forward_cached.
+            d_out: Upstream gradient, shape [T, C].
+
+        Returns:
+            d_x [T, C]. Mutates every sublayer's parameter grads (+=); allocates.
+
+        Raises:
+            Error: On a shape mismatch (via the sublayers).
+        """
         var d_mlp_out = dropout_backward(
             cache.mlp_drop_mask, cache.mlp_drop_inv_keep, d_out
         )
@@ -297,9 +362,10 @@ struct TransformerBlock(Copyable, Movable):
         return add(d_a, d_x_branch)  # skip + branch
 
     def zero_grad(mut self):
-        # Reset every Parameter's grad to zero — the block's full inventory: ln1
-        # (weight, bias), attn (qkv weight/bias, proj weight/bias), ln2, mlp (up
-        # weight/bias, down weight/bias). Mutates in place; cannot raise.
+        """Reset every Parameter's grad to zero (the block's 12 parameters).
+
+        Mutates in place; cannot raise.
+        """
         self.ln1.weight.zero_grad()
         self.ln1.bias.zero_grad()
         self.attn.qkv.weight.zero_grad()
@@ -314,10 +380,14 @@ struct TransformerBlock(Copyable, Movable):
         self.mlp.down.bias.zero_grad()
 
     def apply_sgd(mut self, lr: Float64):
-        # One plain-SGD step on every Parameter — the same inventory zero_grad
-        # walks, in the same order. Delegates to nn.optim.sgd_update (transformer/
-        # may import nn/, which owns the Parameter-level update math). Mutates
-        # parameter values in place; allocates nothing; cannot raise.
+        """One plain-SGD step on every Parameter, in walk order.
+
+        Delegates to nn.optim.sgd_update. Mutates parameter values in place;
+        allocates nothing; cannot raise.
+
+        Args:
+            lr: Learning rate.
+        """
         sgd_update(self.ln1.weight, lr)
         sgd_update(self.ln1.bias, lr)
         sgd_update(self.attn.qkv.weight, lr)
@@ -332,8 +402,13 @@ struct TransformerBlock(Copyable, Movable):
         sgd_update(self.mlp.down.bias, lr)
 
     def parameter_shapes(self, mut out: List[ParamShape]):
-        # Append this block's 12 parameter shapes in walk order. Reads self;
-        # grows `out`; cannot raise.
+        """Append this block's 12 parameter shapes in walk order.
+
+        Reads self; grows `out`; cannot raise.
+
+        Args:
+            out: List the shapes are appended to.
+        """
         out.append(
             ParamShape(self.ln1.weight.value.rows, self.ln1.weight.value.cols)
         )
@@ -387,10 +462,15 @@ struct TransformerBlock(Copyable, Movable):
         )
 
     def parameter_decay_flags(self, mut out: List[Bool]):
-        # Append this block's 12 weight-decay flags in walk order, the GPT-family
-        # partition: the four weight MATRICES (qkv, proj, mlp up, mlp down) decay;
-        # the four biases and the four LayerNorm vectors (ln1/ln2 weight and bias)
-        # do not. Reads nothing; grows `out`; cannot raise.
+        """Append this block's 12 weight-decay flags in walk order.
+
+        The GPT-family partition: the four weight matrices (qkv, proj, mlp up,
+        mlp down) decay; the four biases and four LayerNorm vectors do not.
+        Grows `out`; cannot raise.
+
+        Args:
+            out: List the flags are appended to.
+        """
         out.append(False)  # ln1.weight  (LayerNorm vector)
         out.append(False)  # ln1.bias    (LayerNorm vector)
         out.append(True)  # attn.qkv.weight  (matrix)
@@ -405,10 +485,13 @@ struct TransformerBlock(Copyable, Movable):
         out.append(False)  # mlp.down.bias
 
     def grad_norm_sq(self) -> Float64:
-        # Sum of squares over this block's 12 gradients — a partial contribution
-        # to the model's global gradient norm (the whole-model vector norm is the
-        # sqrt of the sum of these across every Parameter). Reads self; allocates
-        # nothing; cannot raise.
+        """Sum of squares over this block's 12 gradients (partial global-norm term).
+
+        Reads self; allocates nothing; cannot raise.
+
+        Returns:
+            The scalar sum of squared gradient entries.
+        """
         var s = 0.0
         s += _grad_sum_sq(self.ln1.weight)
         s += _grad_sum_sq(self.ln1.bias)
@@ -425,8 +508,13 @@ struct TransformerBlock(Copyable, Movable):
         return s
 
     def scale_grads(mut self, factor: Float64):
-        # Multiply every gradient in this block by `factor` in place (gradient
-        # clipping). Mutates self's grads; allocates nothing; cannot raise.
+        """Multiply every gradient in this block by `factor` in place (clipping).
+
+        Mutates self's grads; allocates nothing; cannot raise.
+
+        Args:
+            factor: Scale applied to every gradient entry.
+        """
         _grad_scale(self.ln1.weight, factor)
         _grad_scale(self.ln1.bias, factor)
         _grad_scale(self.attn.qkv.weight, factor)
@@ -441,9 +529,13 @@ struct TransformerBlock(Copyable, Movable):
         _grad_scale(self.mlp.down.bias, factor)
 
     def export_parameters(self, mut out: List[Tensor2D]):
-        # Append copies of this block's 12 parameter VALUES in walk order (for
-        # checkpoint IO — copies are fine at IO time). Reads self; grows `out`;
-        # cannot raise.
+        """Append copies of this block's 12 parameter values in walk order.
+
+        For checkpoint IO. Reads self; grows `out`; cannot raise.
+
+        Args:
+            out: List the value copies are appended to.
+        """
         out.append(self.ln1.weight.value.copy())
         out.append(self.ln1.bias.value.copy())
         out.append(self.attn.qkv.weight.value.copy())
@@ -458,10 +550,14 @@ struct TransformerBlock(Copyable, Movable):
         out.append(self.mlp.down.bias.value.copy())
 
     def export_gradients(self, mut out: List[Tensor2D]):
-        # Append copies of this block's 12 parameter GRADIENTS in walk order
-        # (symmetric to export_parameters; used for per-layer gradient inspection
-        # and to drive the walk-consistency check against apply_adamw). Reads
-        # self; grows `out`; cannot raise.
+        """Append copies of this block's 12 parameter gradients in walk order.
+
+        Symmetric to export_parameters, for per-layer gradient inspection. Reads
+        self; grows `out`; cannot raise.
+
+        Args:
+            out: List the gradient copies are appended to.
+        """
         out.append(self.ln1.weight.grad.copy())
         out.append(self.ln1.bias.grad.copy())
         out.append(self.attn.qkv.weight.grad.copy())
@@ -478,9 +574,20 @@ struct TransformerBlock(Copyable, Movable):
     def import_parameters(
         mut self, params: List[Tensor2D], start: Int
     ) raises -> Int:
-        # Copy params[start : start+12] into this block's 12 parameter values in
-        # walk order, returning the next offset (start + 12). Mutates self's
-        # values; allocates nothing; raises on a shape mismatch (via _load_value).
+        """Copy params[start : start+12] into this block's values in walk order.
+
+        Mutates self's values; allocates nothing.
+
+        Args:
+            params: Full parameter list in walk order.
+            start: Offset of this block's first parameter.
+
+        Returns:
+            The next offset (start + 12).
+
+        Raises:
+            Error: On a shape mismatch (via _load_value).
+        """
         _load_value(self.ln1.weight, params[start + 0])
         _load_value(self.ln1.bias, params[start + 1])
         _load_value(self.attn.qkv.weight, params[start + 2])
@@ -507,13 +614,30 @@ struct TransformerBlock(Copyable, Movable):
         eps: Float64,
         weight_decay: Float64,
     ) raises -> Int:
-        # One AdamW step on this block's 12 parameters, indexing the caller's m/v
-        # state lists at [start : start+12] in walk order, returning the next
-        # offset. The four weight matrices receive `weight_decay`; the biases and
-        # LayerNorm vectors receive 0.0 (the GPT-family selective-decay partition,
-        # the same one parameter_decay_flags reports). Mutates self's values and
-        # the m/v entries; allocates nothing; raises on a bad t or a mis-shaped
-        # state tensor (via adamw_update).
+        """One AdamW step on this block's 12 parameters, in walk order.
+
+        Indexes the caller's m/v state at [start : start+12]. The four weight
+        matrices receive `weight_decay`; the biases and LayerNorm vectors receive
+        0.0 (the GPT-family selective-decay partition). Mutates self's values and
+        the m/v entries; allocates nothing.
+
+        Args:
+            m: First-moment state list.
+            v: Second-moment state list.
+            start: Offset of this block's first parameter.
+            t: AdamW step counter (1-based).
+            lr: Learning rate.
+            beta1: First-moment decay.
+            beta2: Second-moment decay.
+            eps: Numerical epsilon.
+            weight_decay: Decay applied to the weight matrices only.
+
+        Returns:
+            The next offset (start + 12).
+
+        Raises:
+            Error: On a bad t or a mis-shaped state tensor (via adamw_update).
+        """
         adamw_update(
             self.ln1.weight,
             m[start + 0],

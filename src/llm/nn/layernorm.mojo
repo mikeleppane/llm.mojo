@@ -1,38 +1,34 @@
-# LayerNorm — normalize each row to zero mean, unit variance, then scale/shift.
-#
-# For each row over its C features:
-#
-#     y = (x - mean) / sqrt(var + eps) * weight + bias
-#
-# The variance is the *biased* estimator — sum of squared deviations divided by
-# C, not C-1 — which is what GPT-2 (and PyTorch's nn.LayerNorm) computes. The
-# distinction is not cosmetic: an unbiased (÷C-1) variance shifts every activation
-# and would drift the model off GPT-2 parity, so the oracle test freezes biased
-# goldens and rejects the unbiased ones.
-#
-# eps sits *inside* the square root (sqrt(var + eps), not sqrt(var) + eps) — the
-# standard placement — so a constant row (variance 0) normalizes to zero instead
-# of dividing by zero. weight initializes to ones and bias to zeros, so a freshly
-# built LayerNorm is the identity up to the normalization itself.
+"""LayerNorm — normalize each row to zero mean, unit variance, then scale/shift.
+
+For each row over its C features:
+
+    y = (x - mean) / sqrt(var + eps) * weight + bias
+
+The variance is the biased estimator (÷C, not C-1), matching GPT-2 and PyTorch's
+nn.LayerNorm; the unbiased variance would drift the model off GPT-2 parity. eps
+sits inside the square root so a constant row (variance 0) normalizes to zero
+instead of dividing by zero. weight inits to ones, bias to zeros.
+"""
 
 from std.math import sqrt
 
 from llm.nn.parameter import Parameter
 from llm.tensor.tensor2d import Tensor2D, ones_2d, zeros_2d
 
-# GPT-2's LayerNorm epsilon, named at module scope. Guards the divide when a
-# row's variance is (near) zero; also the value weight loading must match for
-# parity.
+# GPT-2's LayerNorm epsilon. Guards the divide when a row's variance is (near)
+# zero; weight loading must match this value for parity.
 comptime LAYERNORM_EPS = 1e-5
 
 
 @fieldwise_init
 struct LayerNormCache(Copyable, Movable):
-    # What LayerNorm.backward needs: the input x plus the per-row mean and rstd
-    # (1/sqrt(var+eps)) the forward already computed. The normalized x̂ is
-    # recomputed from these in backward — storing two scalars per row is cheaper
-    # than the full [N, C] x̂, and it keeps the eps convention in one place. Valid
-    # only for the forward call that produced it.
+    """What LayerNorm.backward needs: the input x plus per-row mean and rstd.
+
+    rstd is 1/sqrt(var+eps). The normalized x̂ is recomputed from these in
+    backward — two scalars per row is cheaper than the full [N, C] x̂. Valid only
+    for the forward call that produced it.
+    """
+
     var x: Tensor2D  # [N, C]
     var mean: List[Float64]  # [N] — per-row mean μ
     var rstd: List[Float64]  # [N] — per-row 1/sqrt(var + eps)
@@ -40,29 +36,49 @@ struct LayerNormCache(Copyable, Movable):
 
 @fieldwise_init
 struct LayerNormForward(Copyable, Movable):
-    # forward_cached's output plus the cache its backward consumes.
+    """Output of forward_cached plus the cache its backward consumes."""
+
     var output: Tensor2D  # [N, C]
     var cache: LayerNormCache
 
     def split(deinit self, mut cache_slot: LayerNormCache) -> Tensor2D:
-        # Consume this forward: the cache moves into the caller's slot and the
-        # output is returned. Lets an assembly site take both pieces by move
-        # instead of copying each out of a live struct (a field cannot be
-        # transferred with `^`).
+        """Consume this forward: move the cache into `cache_slot`, return the output.
+
+        Lets an assembly site take both pieces by move instead of copying each
+        out of a live struct (a field cannot be transferred with `^`).
+
+        Args:
+            cache_slot: Receives the cache by move.
+
+        Returns:
+            The output tensor, shape [N, C], by move.
+        """
         cache_slot = self.cache^
         return self.output^
 
 
 @fieldwise_init
 struct LayerNorm(Copyable, Movable):
+    """Row-wise normalization with per-column scale (weight) and shift (bias).
+    """
+
     var weight: Parameter  # [1, C], init ones — per-column scale (gamma)
     var bias: Parameter  # [1, C], init zeros — per-column shift (beta)
 
     @staticmethod
     def init_default(d_model: Int) raises -> LayerNorm:
-        # A LayerNorm with weight=ones, bias=zeros over C = d_model channels.
-        # Allocates both tensors; raises on non-positive d_model (a degenerate
-        # shape). No rng — the default init is deterministic and parameter-free.
+        """Build a LayerNorm with weight=ones, bias=zeros over C = d_model channels.
+
+        Args:
+            d_model: Feature count C.
+
+        Returns:
+            A LayerNorm with weight and bias [1, C]. Allocates both; deterministic
+            (no rng).
+
+        Raises:
+            Error: If d_model is non-positive.
+        """
         if d_model <= 0:
             raise Error(
                 "LayerNorm.init_default: d_model must be positive, got "
@@ -73,9 +89,19 @@ struct LayerNorm(Copyable, Movable):
         return LayerNorm(Parameter(w^), Parameter(b^))
 
     def forward(self, x: Tensor2D) raises -> Tensor2D:
-        # [N, C] -> [N, C], normalizing each row independently. Reads self only;
-        # allocates the result; raises on a feature-count mismatch. Uses biased
-        # variance (÷C) and eps inside the sqrt.
+        """Normalize each row independently, then scale and shift.
+
+        Uses biased variance (÷C) and eps inside the sqrt.
+
+        Args:
+            x: Input, shape [N, C].
+
+        Returns:
+            Normalized output, shape [N, C]. Allocates; reads self only.
+
+        Raises:
+            Error: On a feature-count or bias-shape mismatch.
+        """
         var c = x.cols
         if c != self.weight.value.cols:
             raise Error(
@@ -117,14 +143,22 @@ struct LayerNorm(Copyable, Movable):
         return out^
 
     def forward_cached(self, var x: Tensor2D) raises -> LayerNormForward:
-        # [N, C] -> LayerNormForward: the same normalization as forward, plus the
-        # cache backward needs (x and the per-row mean and rstd). Takes x by value
-        # and MOVES it into the cache after reading it (no copy) — the caller
-        # hands over `x^` when x is dead or `x.copy()` when it still needs it.
-        # Reads self; allocates the output and two per-row vectors; raises on a
-        # feature-count or bias-shape mismatch (same guards as forward). Uses
-        # biased variance (÷C) and eps inside the sqrt. The cache is valid only
-        # for this call.
+        """Normalize as forward does, additionally caching x and per-row mean/rstd.
+
+        Takes x by value and moves it into the cache after reading it (no copy) —
+        the caller hands over `x^` or `x.copy()`.
+
+        Args:
+            x: Input, shape [N, C]; moved into the cache.
+
+        Returns:
+            A LayerNormForward with output [N, C] and the cache. Allocates the
+            output and two per-row vectors; cache valid only for this call.
+
+        Raises:
+            Error: On a feature-count or bias-shape mismatch (same guards as
+                forward).
+        """
         var c = x.cols
         if c != self.weight.value.cols:
             raise Error(
@@ -170,26 +204,30 @@ struct LayerNorm(Copyable, Movable):
     def backward(
         mut self, cache: LayerNormCache, d_out: Tensor2D
     ) raises -> Tensor2D:
-        # Full per-row derivation of dx (C features). Forward:
-        #   μ = mean(x),  v = mean((x-μ)^2),  r = 1/sqrt(v + eps),
-        #   x̂_j = (x_j - μ) r,  y_j = γ_j x̂_j + β_j.
-        # Upstream d_out = dL/dy. Write a_j = dL/dx̂_j = d_out_j γ_j. Both μ and r
-        # depend on every x_k, so x̂ must be differentiated through them:
-        #   ∂μ/∂x_k = 1/C
-        #   ∂v/∂x_k = (2/C)(x_k - μ)                [Σ_j (x_j - μ) = 0 kills the μ term]
-        #   ∂r/∂x_k = -1/2 (v+eps)^{-3/2} ∂v/∂x_k = -(r^2/C) x̂_k
-        #   ∂x̂_i/∂x_k = (δ_ik - 1/C) r + (x_i - μ) ∂r/∂x_k
-        #             = r[ δ_ik - 1/C - (1/C) x̂_i x̂_k ].
-        # Contracting a against this Jacobian gives the three-term result:
-        #   dx_k = Σ_i a_i ∂x̂_i/∂x_k = r ( a_k - mean(a) - x̂_k mean(a ⊙ x̂) ).
-        # The two subtracted terms are projections: mean(a) removes the component
-        # along the ones vector (μ carries no gradient), and x̂_k mean(a⊙x̂) removes
-        # the component along x̂ (the scale r carries no gradient). Dropping either
-        # is the canonical LayerNorm backward bug; the orthogonality test catches
-        # it analytically. Parameter grads accumulate over rows:
-        #   dγ_j += Σ_r d_out_{r,j} x̂_{r,j},   dβ_j += Σ_r d_out_{r,j}.
-        # Mutates self.weight.grad and self.bias.grad; allocates and returns dx
-        # [N, C]; raises on a shape mismatch against the cache.
+        """Backprop through the row normalization to dx and the parameter grads.
+
+        With a_j = dL/dx̂_j = d_out_j γ_j, differentiating x̂ through the shared μ
+        and r gives the three-term result
+
+            dx_k = r ( a_k - mean(a) - x̂_k mean(a ⊙ x̂) ).
+
+        The two subtracted terms are projections that drop the components carried
+        by μ (along ones) and by the scale r (along x̂); dropping either is the
+        canonical LayerNorm backward bug. Parameter grads accumulate over rows:
+        dγ_j += Σ_r d_out_{r,j} x̂_{r,j}, dβ_j += Σ_r d_out_{r,j}, adding one
+        fully-formed delta per call so two passes double the grads exactly.
+
+        Args:
+            cache: Cached input x with per-row mean and rstd from the forward.
+            d_out: Upstream gradient dL/dy, shape [N, C].
+
+        Returns:
+            Gradient dx, shape [N, C]. Allocates. Mutates self.weight.grad and
+            self.bias.grad.
+
+        Raises:
+            Error: On a shape mismatch against the cache.
+        """
         var c = self.weight.value.cols
         var n = cache.x.rows
         if cache.x.cols != c:
@@ -218,11 +256,8 @@ struct LayerNorm(Copyable, Movable):
             )
         var inv_c = 1.0 / Float64(c)
         var d_x = zeros_2d(n, c)
-        # This call's parameter gradients accumulate into locals first, then add
-        # to the Parameters once per column at the end. Adding one fully-formed
-        # delta per call (rather than += inside the row loop) is what makes two
-        # backward passes double the grads *exactly*: grad = delta, then
-        # grad = delta + delta = 2·delta, with no reordered partial sums.
+        # Accumulate this call's parameter grads into locals, then add to the
+        # Parameters once per column at the end (not += inside the row loop).
         var d_gamma = List[Float64]()
         var d_beta = List[Float64]()
         for _ in range(c):

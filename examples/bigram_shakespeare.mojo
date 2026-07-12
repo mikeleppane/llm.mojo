@@ -1,18 +1,14 @@
-# Train a bigram language model on tiny Shakespeare and generate from it.
-#
-# Puts the whole Part VII surface to work end to end: a TrainingConfig, the
-# character tokenizer, the batch loader, the bigram model's fused loss+gradient,
-# an SGD step, and seeded categorical sampling. It trains over the corpus for a
-# fixed step budget, printing loss and perplexity periodically, then generates a
-# few hundred characters starting from a newline.
-#
-# Run:
-#     pixi run mojo run -I src examples/bigram_shakespeare.mojo
-#
-# The output is bigram-plausible, not fluent: a bigram only knows the current
-# character, so it reproduces letter-pair statistics (a 'q' is almost always
-# followed by 'u') but has no memory beyond one step. That limitation is the
-# whole motivation for the Transformer that follows.
+"""Train a bigram language model on tiny Shakespeare and generate from it.
+
+Wires the training surface together end to end: config, char tokenizer, batch
+loader, the bigram model's fused loss+gradient, an SGD step, and seeded
+categorical sampling. The output is bigram-plausible, not fluent: a bigram only
+knows the current character, so it reproduces letter-pair statistics but has no
+memory beyond one step.
+
+Run:
+    pixi run mojo run -I src examples/bigram_shakespeare.mojo
+"""
 
 from llm.config import TrainingConfig
 from llm.tokenizer.char import CharTokenizer
@@ -34,10 +30,21 @@ def generate(
     temperature: Float64,
     mut rng: Rng,
 ) raises -> List[Int]:
-    # Autoregressive sampling: from `start_id`, repeatedly turn the current
-    # token's next-token distribution into a draw and feed it back. The generate
-    # *loop* lives here in the example rather than the library — the real,
-    # reusable generate (with top-k/top-p) arrives with the generation chapter.
+    """Autoregressively sample `count` tokens starting from `start_id`.
+
+    Repeatedly turns the current token's next-token distribution into a draw and
+    feeds it back.
+
+    Args:
+        model: The trained bigram model.
+        start_id: Token id to start generation from.
+        count: Number of tokens to generate.
+        temperature: Softmax temperature applied to the next-token logits.
+        rng: Random stream; mutated as samples are drawn.
+
+    Returns:
+        The generated token ids. Allocates a new list.
+    """
     var out: List[Int] = []
     var current = start_id
     for _ in range(count):
@@ -49,6 +56,7 @@ def generate(
 
 
 def main() raises:
+    """Train the bigram model over the corpus, then print a generated sample."""
     var config = TrainingConfig(
         batch_size=32,
         learning_rate=1.0,

@@ -1,3 +1,5 @@
+"""Tokenizers: character-level, byte-level BPE, and the GPT-2 encoder."""
+
 from .char import CharTokenizer
 from .bpe import BPETokenizer, pair_key
 from .gpt2 import (

@@ -1,10 +1,10 @@
-# Tests for MLP — the two-Linear feed-forward block, up -> gelu -> down.
-#
-# Two things are pinned: the composition equals manually running up, gelu_rows,
-# then down (so the block wires its pieces in the right order), and it matches an
-# independent oracle golden (so the pieces themselves are right). The hidden width
-# is whatever the constructor was given — GPT-2 passes 4C later, but the block
-# never hardcodes 4x, so the weight shapes reflect the argument.
+"""Tests for MLP — the two-Linear feed-forward block, up -> gelu -> down.
+
+Two things are pinned: the composition equals manually running up, gelu_rows,
+then down (right wiring order), and it matches an independent oracle golden (the
+pieces are right). The hidden width follows the constructor argument, never a
+hardcoded 4x.
+"""
 
 from std.testing import assert_almost_equal, assert_equal, TestSuite
 
@@ -17,7 +17,8 @@ from llm.utils.random import Rng
 
 
 def make_mlp() raises -> MLP:
-    # d_model = 2, d_hidden = 3 — matches the nn_reference.py MLP golden.
+    """Build an MLP with d_model=2, d_hidden=3 matching the nn_reference golden.
+    """
     var up_w = from_rows(
         [[0.5, -0.5], [1.0, 0.0], [0.0, 1.0]]
     )  # [hidden=3, C=2]
@@ -32,7 +33,7 @@ def make_mlp() raises -> MLP:
 
 
 def test_forward_matches_oracle_golden() raises:
-    # Golden from tests/oracles/nn_reference.py ("MLP d_model=2 d_hidden=3").
+    """MLP.forward matches the nn_reference.py oracle golden."""
     var mlp = make_mlp()
     var x = from_rows([[1.0, 2.0], [-1.0, 0.5]])  # [N=2, C=2]
     var y = mlp.forward(x)
@@ -45,8 +46,9 @@ def test_forward_matches_oracle_golden() raises:
 
 
 def test_forward_equals_manual_composition() raises:
-    # Independently run up -> gelu_rows -> down and require an exact match, so the
-    # block can't reorder or drop a step unnoticed.
+    """MLP.forward exactly equals manual up -> gelu_rows -> down."""
+    # Running the steps independently pins that the block can't reorder or drop
+    # one unnoticed.
     var mlp = make_mlp()
     var x = from_rows([[1.0, 2.0], [-1.0, 0.5]])
     var y = mlp.forward(x)
@@ -57,6 +59,7 @@ def test_forward_equals_manual_composition() raises:
 
 
 def test_hidden_width_reflects_constructor() raises:
+    """Weight shapes follow the constructor's d_model and d_hidden arguments."""
     var rng = Rng(3)
     var mlp = MLP.init_random(rng, 4, 16)  # d_model=4, d_hidden=16
     # up: C -> hidden, weight [hidden, C]
@@ -68,6 +71,7 @@ def test_hidden_width_reflects_constructor() raises:
 
 
 def test_forward_shape_contract() raises:
+    """MLP.forward maps [N, C] back to [N, d_model]."""
     var rng = Rng(1)
     var mlp = MLP.init_random(rng, 4, 16)
     var x = from_rows(

@@ -1,8 +1,9 @@
-# Tests for Tensor2D and its constructors.
-#
-# Test the abstraction before building on it: shape/size, set-then-get, the
-# ones/zeros/full constructors, the checked accessor's out-of-range raise, and
-# from_rows rejecting ragged input.
+"""Tests for Tensor2D and its constructors.
+
+Test the abstraction before building on it: shape/size, set-then-get, the
+ones/zeros/full constructors, the checked accessor's out-of-range raise, and
+from_rows rejecting ragged input.
+"""
 
 from std.testing import (
     assert_equal,
@@ -16,24 +17,27 @@ from llm.tensor.tensor2d import Tensor2D, zeros_2d, ones_2d, full_2d, from_rows
 
 
 def test_zeros_shape() raises:
+    """`zeros_2d` has the requested shape/size and all-zero entries."""
     var x = zeros_2d(2, 3)
     assert_equal(x.rows, 2)
     assert_equal(x.cols, 3)
     assert_equal(x.size(), 6)
-    # Stored floats: use the house tolerance habit even where the values are
-    # exact, so the pattern a reader copies is the safe one.
+    # Use the house tolerance habit even where the values are exact, so the
+    # pattern a reader copies is the safe one.
     assert_almost_equal(x[0, 0], 0.0, atol=1e-12)
     assert_almost_equal(x[1, 2], 0.0, atol=1e-12)
 
 
 def test_set_get() raises:
+    """A written element reads back."""
     var x = zeros_2d(2, 3)
     x[1, 2] = 7.5
     assert_almost_equal(x[1, 2], 7.5, atol=1e-12)
 
 
 def test_subscript_mutates_in_place() raises:
-    # The ref-returning subscript serves read, write, and += through one method:
+    """The ref-returning subscript serves read, write, and += through one method.
+    """
     # `+=` accumulates into the buffer directly, no separate setter.
     var x = zeros_2d(2, 3)
     x[0, 1] = 5.0
@@ -42,6 +46,7 @@ def test_subscript_mutates_in_place() raises:
 
 
 def test_offset() raises:
+    """`offset` maps (row, col) to the row-major flat index."""
     var x = zeros_2d(2, 3)
     assert_equal(x.offset(0, 0), 0)
     assert_equal(x.offset(1, 0), 3)
@@ -49,24 +54,28 @@ def test_offset() raises:
 
 
 def test_ones() raises:
+    """`ones_2d` fills every entry with 1.0."""
     var x = ones_2d(2, 2)
     assert_almost_equal(x[0, 0], 1.0, atol=1e-12)
     assert_almost_equal(x[1, 1], 1.0, atol=1e-12)
 
 
 def test_full() raises:
+    """`full_2d` fills every entry with the given value."""
     var x = full_2d(2, 2, -3.0)
     assert_almost_equal(x[0, 1], -3.0, atol=1e-12)
     assert_almost_equal(x[1, 0], -3.0, atol=1e-12)
 
 
 def test_at_out_of_range_raises() raises:
+    """The checked accessor at() raises on an out-of-range index."""
     var x = zeros_2d(2, 2)
     with assert_raises(contains="out of range"):
         _ = x.at(5, 0)
 
 
 def test_from_rows_values() raises:
+    """`from_rows` builds a tensor with the given shape and values."""
     var a = from_rows([[1.0, 2.0], [3.0, 4.0]])
     assert_equal(a.rows, 2)
     assert_equal(a.cols, 2)
@@ -75,19 +84,21 @@ def test_from_rows_values() raises:
 
 
 def test_from_rows_rejects_ragged() raises:
+    """`from_rows` raises on ragged rows."""
     with assert_raises(contains="ragged"):
         _ = from_rows([[1.0, 2.0], [3.0]])
 
 
 def test_from_rows_rejects_empty() raises:
+    """`from_rows` raises on an empty row list."""
     var empty = List[List[Float64]]()
     with assert_raises(contains="at least one row"):
         _ = from_rows(empty)
 
 
 def test_row_sums_a_known_tensor() raises:
-    # row(r) hands back a borrowed [cols] view over the flat buffer — no copy.
-    # Summing it recovers the row's contents.
+    """`row`(r) returns a borrowed [cols] view whose sum recovers the row."""
+    # No copy — the view aliases the flat buffer.
     var a = from_rows([[1.0, 2.0, 3.0], [10.0, 20.0, 30.0]])
     var r0 = a.row(0)
     assert_equal(len(r0), 3)
@@ -103,20 +114,21 @@ def test_row_sums_a_known_tensor() raises:
 
 
 def test_row_view_is_a_live_alias_not_a_copy() raises:
-    # Write THROUGH the borrowed view, then read the element back through the
-    # tensor. A snapshot copy would leave the tensor at 0.0; seeing 9.0 is the
-    # proof that row() aliases self.data — and that the view is writable, not a
-    # read-only preview. (Ordering matters: mutating first and reading the view
-    # after would also pass for a copy, so the write has to go through the view.)
+    """`row`() returns a writable live alias of self.data, not a snapshot copy.
+    """
+    # Write THROUGH the view, then read the element back through the tensor. A
+    # copy would leave the tensor at 0.0; seeing 9.0 proves aliasing and
+    # writability. (The write must go through the view — mutating first and
+    # reading after would also pass for a copy.)
     var x = zeros_2d(2, 3)
     x.row(1)[2] = 9.0
     assert_almost_equal(x[1, 2], 9.0, atol=1e-12)
 
 
 def test_writable_shape_and_values() raises:
-    # String.write must carry the shape header and the leading values, and cap
-    # the preview: a 3x4 tensor has 12 values, so the `…` truncation marker
-    # appears rather than all twelve.
+    """String.write carries the shape header, leading values, and truncation marker.
+    """
+    # A 3x4 tensor has 12 values, so the `…` cap appears rather than all twelve.
     var x = zeros_2d(3, 4)
     x[0, 0] = 1.5
     x[0, 1] = 2.0

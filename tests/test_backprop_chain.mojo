@@ -1,18 +1,15 @@
-# The integration test: a tiny network trains by hand-written backprop.
-#
-# Compose the real layers — Embedding -> LayerNorm -> MLP -> cross_entropy_rows —
-# into a minimal classifier (vocab size V = model width C, so the MLP output is
-# the logits). Two things prove the chain-rule wiring end to end:
-#   1. the gradient of the loss with respect to the *embedding table* — the
-#      furthest-back parameter, reached only by threading every backward in the
-#      stack — matches a central finite difference of the whole forward;
-#   2. twenty full-batch SGD steps on a fixed input drive the loss strictly down.
-# Attention is checked in isolation (its own test); it joins a full block only
-# when Part XIII assembles one, keeping this test cheap and its failures local.
-#
-# Finite-difference convention (D5, shared across this part's backward tests):
-#   L = cross_entropy_rows(forward(x)); central diff h = 1e-5; tolerance
-#   |analytic - numeric| <= 1e-7 + 1e-5 * |numeric|.
+"""Integration test: a tiny network trains by hand-written backprop.
+
+Compose the real layers Embedding -> LayerNorm -> MLP -> cross_entropy_rows into a
+minimal classifier (vocab V = width C, so the MLP output is the logits). Two
+things prove the chain-rule wiring end to end: the gradient of the loss with
+respect to the embedding table (the furthest-back parameter) matches a central
+finite difference of the whole forward; and twenty full-batch SGD steps on a
+fixed input drive the loss strictly down.
+
+Finite difference: L = cross_entropy_rows(forward(x)); central diff h = 1e-5;
+mixed tolerance |analytic - numeric| <= 1e-7 + 1e-5 * |numeric|.
+"""
 
 from std.testing import assert_true, TestSuite
 
@@ -27,7 +24,8 @@ from llm.utils.random import Rng
 
 
 def assert_grad_close(analytic: Float64, numeric: Float64) raises:
-    # D5 mixed tolerance |a - n| <= 1e-7 + 1e-5 * |n|.
+    """Assert |analytic - numeric| <= 1e-7 + 1e-5 * |numeric| (mixed tolerance).
+    """
     assert_true(
         abs(analytic - numeric) <= 1e-7 + 1e-5 * abs(numeric),
         String("grad mismatch: analytic=")
@@ -59,9 +57,9 @@ def forward_loss(
     ids: List[Int],
     targets: List[Int],
 ) raises -> Float64:
-    # Full forward from a raw embedding table to the scalar loss. Used both for
-    # the finite difference (perturbing the table) and to read the loss during
-    # training.
+    """Full forward from a raw embedding table to the scalar loss. Used for the
+    finite difference (perturbing the table) and to read the loss during training.
+    """
     var emb = Embedding(Parameter(table.copy()))
     var embedded = emb.forward(ids)  # [N, C]
     var normed = ln.forward(embedded)  # [N, C]
@@ -70,6 +68,8 @@ def forward_loss(
 
 
 def test_embedding_table_grad_matches_finite_difference() raises:
+    """The embedding-table gradient (threaded through every backward) matches a
+    central finite difference of the whole forward."""
     var rng = Rng(31)
     var emb = Embedding.init_random(rng, 5, 5)  # table [V=5, C=5]
     var ln = LayerNorm.init_default(5)  # [1, 5]
@@ -104,6 +104,8 @@ def test_embedding_table_grad_matches_finite_difference() raises:
 
 
 def test_twenty_sgd_steps_strictly_decrease_loss() raises:
+    """Twenty full-batch SGD steps on a fixed input drive the loss strictly down.
+    """
     var rng = Rng(31)
     var emb = Embedding.init_random(rng, 5, 5)  # table [V=5, C=5]
     var ln = LayerNorm.init_default(5)  # [1, 5]

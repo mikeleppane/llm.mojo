@@ -1,17 +1,10 @@
-# Tests for training.schedule — linear warmup then cosine decay.
-#
-# All goldens are hand-computable (adamw_reference.py prints the same numbers as
-# a cross-check, but every value here is derived in the comment). Config:
-# peak = 1.0, warmup = 10, max_steps = 100, min_lr = 0.1.
-#   step 0    -> 0.0    (warmup starts at 0)
-#   step 5    -> 0.5    (linear: 1.0 * 5/10)
-#   step 10   -> 1.0    (warmup end = peak; cosine progress 0)
-#   step 55   -> 0.55   (cosine midpoint: progress 45/90 = 0.5, cos(pi/2)=0,
-#                        cosine factor 0.5, 0.1 + 0.9*0.5)
-#   step 100  -> 0.1    (== min_lr at max_steps)
-#   step 150  -> 0.1    (clamped past the end)
-# Plus: monotone non-increasing after warmup, the warmup=0 degenerate case, and
-# ScheduleConfig.validate / lr_at guards.
+"""Tests for training.schedule — linear warmup then cosine decay.
+
+All goldens are hand-derivable (adamw_reference.py prints the same numbers as a
+cross-check). Config: peak = 1.0, warmup = 10, max_steps = 100, min_lr = 0.1,
+giving 0.0 at step 0, 0.5 at 5, 1.0 at 10, 0.55 at 55, 0.1 from step 100 on.
+Also: monotone non-increasing after warmup, the warmup=0 case, and the guards.
+"""
 
 from std.testing import (
     assert_almost_equal,
@@ -24,6 +17,7 @@ from llm.training.schedule import lr_at, ScheduleConfig
 
 
 def test_schedule_goldens() raises:
+    """`lr_at` matches the hand-derived goldens across the whole schedule."""
     var peak = 1.0
     var warmup = 10
     var maxs = 100
@@ -37,8 +31,10 @@ def test_schedule_goldens() raises:
 
 
 def test_warmup_end_equals_peak_and_is_continuous() raises:
-    # The warmup boundary is continuous: step warmup-1 is still below peak, step
-    # warmup is exactly peak, step warmup+1 is just below peak (cosine started).
+    """The warmup boundary is continuous and hits exactly peak at step warmup.
+    """
+    # step warmup-1 is still below peak, step warmup is exactly peak, step
+    # warmup+1 is just below peak (cosine started).
     var peak = 2.0
     var warmup = 10
     var maxs = 100
@@ -51,7 +47,7 @@ def test_warmup_end_equals_peak_and_is_continuous() raises:
 
 
 def test_monotone_non_increasing_after_warmup() raises:
-    # From warmup to max_steps the cosine branch never increases.
+    """From warmup to max_steps the cosine branch never increases."""
     var peak = 1.0
     var warmup = 10
     var maxs = 100
@@ -67,8 +63,7 @@ def test_monotone_non_increasing_after_warmup() raises:
 
 
 def test_warmup_zero_degenerate() raises:
-    # warmup_steps = 0: no warmup phase, step 0 is already the peak (cosine
-    # progress 0). This must NOT divide by zero.
+    """`warmup_steps` = 0 starts at peak (step 0) and never divides by zero."""
     var peak = 1.0
     var maxs = 100
     var floor = 0.1
@@ -78,6 +73,8 @@ def test_warmup_zero_degenerate() raises:
 
 
 def test_lr_at_guards() raises:
+    """`lr_at` raises on a negative step, negative warmup, or max_steps <= warmup.
+    """
     with assert_raises(contains="step must be >= 0"):
         _ = lr_at(-1, 1.0, 10, 100, 0.1)
     with assert_raises(contains="warmup_steps must be >= 0"):
@@ -87,6 +84,8 @@ def test_lr_at_guards() raises:
 
 
 def test_schedule_config_validate() raises:
+    """ScheduleConfig.validate accepts valid configs and raises on each bad one.
+    """
     # Valid: warmup < max_steps, 0 <= min_lr <= peak.
     ScheduleConfig(10, 0.1).validate(100, 1.0)
     with assert_raises(contains="must be < max_steps"):

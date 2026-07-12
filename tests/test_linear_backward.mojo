@@ -1,15 +1,11 @@
-# Finite-difference and accumulation tests for Linear.backward.
-#
-# Linear is affine, so three gradients must all check out: dL/dx (returned),
-# dL/dW and dL/db (accumulated into the Parameters). Each gets its own
-# perturbation loop against the projected scalar loss L = sum(cotangent ⊙ y).
-# Separately, the accumulation contract is pinned exactly: two backward calls
-# without a zero_grad() between them double the parameter grads (same floats,
-# same order — exact equality is legitimate here), and zero_grad() resets them.
-#
-# Finite-difference convention (D5, shared across this part's backward tests):
-#   L = sum(cotangent ⊙ y); central diff h = 1e-5; tolerance
-#   |analytic - numeric| <= 1e-7 + 1e-5 * |numeric|.
+"""Finite-difference and accumulation tests for Linear.backward.
+
+Checks all three affine gradients against a projected scalar loss L = sum(cotangent
+elementwise y): dL/dx (returned), dL/dW and dL/db (accumulated into the Parameters),
+using central differences with h = 1e-5 and mixed absolute/relative tolerance
+1e-7 + 1e-5*|n|. Also pins the accumulation contract: two backward calls without a
+zero_grad() between them exactly double the parameter grads, and zero_grad() resets them.
+"""
 
 from std.testing import assert_almost_equal, assert_true, TestSuite
 
@@ -19,7 +15,8 @@ from llm.tensor.tensor2d import Tensor2D, from_rows
 
 
 def assert_grad_close(analytic: Float64, numeric: Float64) raises:
-    # D5 mixed tolerance |a - n| <= 1e-7 + 1e-5 * |n|.
+    """Assert |analytic - numeric| within mixed tolerance 1e-7 + 1e-5*|numeric|.
+    """
     assert_true(
         abs(analytic - numeric) <= 1e-7 + 1e-5 * abs(numeric),
         String("grad mismatch: analytic=")
@@ -30,21 +27,22 @@ def assert_grad_close(analytic: Float64, numeric: Float64) raises:
 
 
 def make_layer() raises -> Linear:
-    # weight [out=2, in=4], bias [1, 2]; asymmetric so no axis error can hide.
+    """Build a Linear with weight [out=2, in=4], bias [1, 2]; asymmetric so no axis error can hide.
+    """
     var w = from_rows([[0.5, -1.0, 2.0, 0.25], [-0.3, 0.8, -2.1, 1.4]])
     var b = from_rows([[0.2, -0.7]])
     return Linear(Parameter(w^), Parameter(b^))
 
 
 def sample_input() raises -> Tensor2D:
-    # [N=3, in=4].
+    """Return the [N=3, in=4] sample input."""
     return from_rows(
         [[1.0, 0.5, -1.0, 0.3], [0.2, -0.4, 0.9, -1.1], [-0.7, 1.2, 0.1, 0.6]]
     )
 
 
 def cotangent() raises -> Tensor2D:
-    # Fixed asymmetric d_out [N=3, out=2].
+    """Return the fixed asymmetric d_out [N=3, out=2]."""
     return from_rows([[0.7, -0.2], [0.1, 0.9], [-0.6, 0.3]])
 
 
@@ -58,6 +56,7 @@ def projected(layer: Linear, x: Tensor2D, cot: Tensor2D) raises -> Float64:
 
 
 def test_d_x_matches_finite_difference() raises:
+    """dL/dx returned by backward matches central finite differences."""
     var layer = make_layer()
     var x = sample_input()
     var cot = cotangent()
@@ -78,6 +77,7 @@ def test_d_x_matches_finite_difference() raises:
 
 
 def test_d_weight_matches_finite_difference() raises:
+    """dL/dW accumulated by backward matches central finite differences."""
     var layer = make_layer()
     var x = sample_input()
     var cot = cotangent()
@@ -106,6 +106,7 @@ def test_d_weight_matches_finite_difference() raises:
 
 
 def test_d_bias_matches_finite_difference() raises:
+    """dL/db accumulated by backward matches central finite differences."""
     var layer = make_layer()
     var x = sample_input()
     var cot = cotangent()
@@ -133,10 +134,11 @@ def test_d_bias_matches_finite_difference() raises:
 
 
 def test_backward_accumulates_exactly() raises:
-    # Two backward calls without a zero_grad() between them must exactly double
-    # the parameter grads — same floats added in the same order, so exact
-    # equality is the right assertion, not a tolerance. This is the contract a
-    # tied weight (one Parameter, two backward paths) later depends on.
+    """Two backward calls without zero_grad() exactly double the parameter grads.
+    """
+    # Same floats added in the same order, so exact equality is the right
+    # assertion, not a tolerance. This is the contract a tied weight (one
+    # Parameter, two backward paths) later depends on.
     var layer = make_layer()
     var x = sample_input()
     var cot = cotangent()
@@ -155,6 +157,7 @@ def test_backward_accumulates_exactly() raises:
 
 
 def test_zero_grad_resets() raises:
+    """zero_grad() resets the accumulated weight and bias grads to zero."""
     var layer = make_layer()
     var x = sample_input()
     var cot = cotangent()
@@ -170,8 +173,7 @@ def test_zero_grad_resets() raises:
 
 
 def assert_equal_exact(a: Float64, b: Float64) raises:
-    # The accumulation test wants bit-for-bit equality (same additions, same
-    # order), not a tolerance — a doubled grad that is off by any ulp is a bug.
+    """Assert bit-for-bit equality; a doubled grad off by any ulp is a bug."""
     assert_true(
         a == b,
         String("expected exact equality, got ")

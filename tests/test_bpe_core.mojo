@@ -1,11 +1,10 @@
-# Tests for the byte-level BPE core (BPETokenizer).
-#
-# These lock the two things a BPE implementation can get subtly wrong: the merge
-# loop (encode) must always apply the *lowest-rank* mergeable pair, and the
-# trainer must learn the same merges a human would by hand. The worked example
-# "aaabdaaabac" is the canonical BPE walkthrough; we assert the exact merges and
-# the exact encoding it produces, so the trainer and the merge loop are pinned to
-# a reference a reader can reproduce with pencil and paper.
+"""Tests for the byte-level BPE core (BPETokenizer).
+
+These lock the two things a BPE implementation gets subtly wrong: the merge loop
+(encode) must always apply the lowest-rank mergeable pair, and the trainer must
+learn the merges a human would by hand. The worked example "aaabdaaabac" is the
+canonical BPE walkthrough; its exact merges and encoding are asserted.
+"""
 
 from std.testing import assert_equal, assert_true, assert_raises, TestSuite
 from std.tempfile import gettempdir
@@ -34,15 +33,15 @@ def _assert_ids_equal(got: List[Int], expected: List[Int]) raises:
 
 
 def test_pair_key_packs_losslessly() raises:
-    # Distinct (left, right) pairs must map to distinct packed keys. A collision
-    # would corrupt the merge dictionaries.
+    """Distinct (left, right) pairs map to distinct packed keys; a collision would
+    corrupt the merge dictionaries."""
     assert_true(pair_key(97, 98) != pair_key(98, 97))
     assert_true(pair_key(256, 97) != pair_key(97, 256))
     assert_equal(pair_key(0, 0), 0)
 
 
 def test_no_merges_is_identity_on_bytes() raises:
-    # A fresh tokenizer has 256 byte tokens and no merges: one id per byte.
+    """A fresh tokenizer has 256 byte tokens and no merges: one id per byte."""
     var tok = BPETokenizer()
     assert_equal(tok.vocab_size(), 256)
     var ids = tok.encode_bytes(_bytes([104, 105]))  # "hi"
@@ -51,12 +50,8 @@ def test_no_merges_is_identity_on_bytes() raises:
 
 
 def test_train_hand_computed() raises:
-    # The classic worked example. 3 merges (target 259) reproduce, in order:
-    #   rank 0: (a, a) -> 256      "aa"
-    #   rank 1: (a, b) -> 257      "ab"
-    #   rank 2: (aa, ab) -> 258    "aaab"
-    # This is Wikipedia's BPE walkthrough: aa->Z, ab->Y, ZY->X, leaving the
-    # string "XdXac", i.e. [aaab, d, aaab, a, c].
+    """The Wikipedia BPE walkthrough: 3 merges (a,a)->256, (a,b)->257, (aa,ab)->258
+    leave "aaabdaaabac" as [258, 100, 258, 97, 99]."""
     var tok = BPETokenizer()
     tok.train(String("aaabdaaabac"), 259)
     assert_equal(tok.vocab_size(), 259)
@@ -73,9 +68,8 @@ def test_train_hand_computed() raises:
 
 
 def test_merge_respects_rank() raises:
-    # Two overlapping merges compete on "abc": (a,b) at rank 0 and (b,c) at
-    # rank 1. The loop must take the lower-rank pair first, giving [ab, c], not
-    # [a, bc]. If rank were ignored the result would differ.
+    """On "abc" with (a,b) rank 0 and (b,c) rank 1, the loop takes the lower-rank
+    pair first, giving [ab, c] not [a, bc]."""
     var tok = BPETokenizer()
     var ab = tok.register_merge(97, 98)  # rank 0 -> id 256
     var bc = tok.register_merge(98, 99)  # rank 1 -> id 257
@@ -85,6 +79,8 @@ def test_merge_respects_rank() raises:
 
 
 def test_round_trip_after_training() raises:
+    """Byte-level BPE round-trips both the training text and unseen text exactly.
+    """
     var corpus = String(
         "the quick brown fox jumps over the lazy dog. "
         "the dog was not amused by the quick fox."
@@ -98,17 +94,16 @@ def test_round_trip_after_training() raises:
 
 
 def test_decode_invalid_utf8_replaces() raises:
-    # Ids may split a multi-byte character; decode must not trap. 0xC3 is the
-    # lead byte of "é" (0xC3 0xA9); on its own it is invalid UTF-8 and must
-    # decode to the replacement character U+FFFD.
+    """Decode does not trap on invalid UTF-8: a lone 0xC3 lead byte becomes the
+    replacement character U+FFFD."""
     var tok = BPETokenizer()
     var replacement = String(Codepoint.from_u32(UInt32(0xFFFD)).value())
     assert_equal(tok.decode([0xC3]), replacement)
 
 
 def test_train_is_deterministic() raises:
-    # Same corpus, trained twice, must learn identical merges (the tie-break is
-    # fixed: highest count, then lowest pair key). Compare via encodings.
+    """Training the same corpus twice learns identical merges (tie-break: highest
+    count, then lowest pair key)."""
     var corpus = String("abracadabra abracadabra banana bandana")
     var tok_a = BPETokenizer()
     var tok_b = BPETokenizer()
@@ -119,6 +114,8 @@ def test_train_is_deterministic() raises:
 
 
 def test_save_load_round_trip() raises:
+    """A saved tokenizer reloads with identical vocab size and bit-exact encodings.
+    """
     var corpus = String("the quick brown fox jumps over the lazy dog")
     var tok = BPETokenizer()
     tok.train(corpus, 300)
@@ -133,9 +130,8 @@ def test_save_load_round_trip() raises:
 
 
 def test_train_twice_extends_without_corruption() raises:
-    # Training an already-trained tokenizer must extend the vocab, not re-learn
-    # a pair it already knows: continuing from the current encoding keeps ranks
-    # contiguous so save/load and encode stay consistent.
+    """Retraining extends the vocab without re-learning known pairs: ranks stay
+    contiguous, so save/load and encode remain consistent."""
     var corpus = String("the quick brown fox jumps over the lazy dog. banana")
     var tok = BPETokenizer()
     tok.train(corpus, 280)
@@ -151,6 +147,7 @@ def test_train_twice_extends_without_corruption() raises:
 
 
 def test_register_duplicate_merge_raises() raises:
+    """Registering the same pair twice is rejected."""
     var tok = BPETokenizer()
     _ = tok.register_merge(97, 98)
     with assert_raises():
@@ -158,6 +155,7 @@ def test_register_duplicate_merge_raises() raises:
 
 
 def test_train_below_base_raises() raises:
+    """A target vocab below the 256 base byte tokens is rejected."""
     var tok = BPETokenizer()
     with assert_raises():
         tok.train(String("hello"), 100)  # < 256 base byte tokens

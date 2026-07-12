@@ -1,23 +1,15 @@
-# A bigram language model: one lookup table from current token to next-token
-# logits.
-#
-# The whole model is a single [V, V] table. Row i holds the unnormalized logits
-# for the token that follows token i, so a forward pass is just a row lookup
-# followed by softmax — no matmul, no hidden state. It is the simplest model
-# that can actually be *trained* by gradient descent, which makes it the right
-# place to prove the loss, gradient, and optimizer wiring before a real network.
-#
-# The same struct wears two hats:
-#   - a *count* model, filled by from_counts: table[i, j] = log P̂(j | i) from
-#     smoothed bigram frequencies. Feeding log-probabilities through softmax
-#     reproduces exactly those probabilities, so this is the analytic optimum a
-#     trained model should approach.
-#   - a *trainable* model, filled with zeros (uniform) or small random logits and
-#     then optimized. loss_and_grad computes the cross-entropy gradient in the
-#     fused p - onehot form and scatter-adds it into a [V, V] gradient table.
-#
-# Everything is Float64 for a clean, gradient-checkable reference. Shapes: the
-# table and its gradient are [V, V]; a batch supplies B*T (current, next) pairs.
+"""A bigram language model: one lookup table from token to next-token logits.
+
+The whole model is a single [V, V] table; row i holds the unnormalized logits
+for the token that follows token i, so a forward pass is a row lookup followed
+by softmax — the simplest model trainable by gradient descent, ideal for
+proving the loss, gradient, and optimizer wiring before a real network. The
+struct wears two hats: a count model (from_counts fills row i with log P(j | i)
+from smoothed bigram frequencies, the analytic optimum) and a trainable model
+(zeros or small random logits, then optimized via loss_and_grad, which
+scatter-adds the fused p - onehot cross-entropy gradient into a [V, V] table).
+Everything is Float64 for a clean, gradient-checkable reference.
+"""
 
 from std.math import log
 
@@ -32,13 +24,23 @@ from llm.utils.random import Rng
 
 
 struct BigramLM(Copyable, Movable):
+    """A bigram model: a [V, V] table of next-token logits per current token."""
+
     var vocab_size: Int  # V
     var table: Tensor2D  # [V, V]; row i = logits for the token after token i
 
     def __init__(out self, vocab_size: Int) raises:
-        # A zeros table — every row is uniform, so the untrained model predicts
-        # every token with probability 1/V (loss log V on any batch). Raises on a
-        # non-positive vocab size.
+        """Initialize a zeros table: every row uniform.
+
+        The untrained model predicts every token with probability 1/V (loss
+        log V on any batch).
+
+        Args:
+            vocab_size: V, must be positive.
+
+        Raises:
+            Error: If vocab_size is not positive.
+        """
         if vocab_size <= 0:
             raise Error("BigramLM: vocab_size must be positive")
         self.vocab_size = vocab_size
@@ -46,9 +48,22 @@ struct BigramLM(Copyable, Movable):
 
     @staticmethod
     def random_init(vocab_size: Int, std: Float64, mut rng: Rng) raises -> Self:
-        # A table of small normal logits (mean 0, given std) drawn from `rng`.
-        # A nonzero start breaks the symmetry of the zeros table; determinism
-        # comes from the generator's state. Mutates rng.
+        """Build a table of small normal logits (mean 0, given std) from `rng`.
+
+        A nonzero start breaks the symmetry of the zeros table; determinism
+        comes from the generator's state. Mutates rng.
+
+        Args:
+            vocab_size: V.
+            std: Standard deviation of the initial logits.
+            rng: Random generator (mutated).
+
+        Returns:
+            The initialized model. Allocates.
+
+        Raises:
+            Error: If vocab_size is not positive.
+        """
         var model = BigramLM(vocab_size)
         for i in range(vocab_size):
             for j in range(vocab_size):
@@ -59,12 +74,25 @@ struct BigramLM(Copyable, Movable):
     def from_counts(
         ids: List[Int], vocab_size: Int, smoothing: Float64
     ) raises -> Self:
-        # Build the count model: table[i, j] = log((count(i, j) + smoothing) /
-        # (count(i, *) + V * smoothing)). Add-`smoothing` (Laplace) keeps every
-        # probability positive so the log is finite even for unseen bigrams; a
-        # row for a token that never appears as a source becomes uniform
-        # (log(1/V)). Raises unless smoothing > 0 (log of a zero count otherwise)
-        # and every id is in [0, V).
+        """Build the count model from smoothed bigram frequencies.
+
+        table[i, j] = log((count(i, j) + smoothing) / (count(i, *) +
+        V * smoothing)). Add-smoothing (Laplace) keeps every probability
+        positive so the log is finite even for unseen bigrams; a row for a token
+        that never appears as a source becomes uniform (log(1/V)).
+
+        Args:
+            ids: The token id sequence to count bigrams over.
+            vocab_size: V, must be positive.
+            smoothing: Laplace smoothing constant, must be > 0.
+
+        Returns:
+            The count model. Allocates.
+
+        Raises:
+            Error: If vocab_size <= 0, smoothing <= 0, or any id is outside
+                [0, V).
+        """
         if vocab_size <= 0:
             raise Error("BigramLM.from_counts: vocab_size must be positive")
         if smoothing <= 0.0:
@@ -92,8 +120,17 @@ struct BigramLM(Copyable, Movable):
         return model^
 
     def next_logits(self, token_id: Int) raises -> List[Float64]:
-        # A copy of row `token_id` — the length-V logits for the next token.
-        # Raises if token_id is outside [0, V). Allocates the returned list.
+        """Return a copy of row `token_id`: the length-V next-token logits.
+
+        Args:
+            token_id: Current token, in [0, V).
+
+        Returns:
+            The logits list. Allocates.
+
+        Raises:
+            Error: If token_id is outside [0, V).
+        """
         if token_id < 0 or token_id >= self.vocab_size:
             raise Error("BigramLM.next_logits: token_id out of range")
         var out = List[Float64]()
@@ -104,13 +141,32 @@ struct BigramLM(Copyable, Movable):
     def next_probs(
         self, token_id: Int, temperature: Float64
     ) raises -> List[Float64]:
-        # The next-token distribution after temperature scaling. Raises via
-        # next_logits (bad token) or the softmax (temperature <= 0).
+        """Return the next-token distribution after temperature scaling.
+
+        Args:
+            token_id: Current token.
+            temperature: Softmax temperature, must be > 0.
+
+        Returns:
+            The probability distribution over the next token. Allocates.
+
+        Raises:
+            Error: If token_id is out of range or temperature <= 0.
+        """
         return softmax_row_temperature(self.next_logits(token_id), temperature)
 
     def loss_on_batch(self, batch: TokenBatch) raises -> Float64:
-        # Mean cross-entropy over all B*T (current, next) pairs. Raises on an
-        # out-of-range id (via next_logits) or target (via cross_entropy_one).
+        """Return the mean cross-entropy over all B*T (current, next) pairs.
+
+        Args:
+            batch: The token batch.
+
+        Returns:
+            The mean cross-entropy loss.
+
+        Raises:
+            Error: On an out-of-range id or target.
+        """
         var count = batch.batch_size * batch.seq_len
         var total = 0.0
         for b in range(batch.batch_size):
@@ -123,19 +179,24 @@ struct BigramLM(Copyable, Movable):
     def loss_and_grad(
         self, batch: TokenBatch, mut grad: Tensor2D
     ) raises -> Float64:
-        # Zero `grad`, fill it with the cross-entropy gradient, and return the
-        # mean loss. Per position (b, t) with current token i and next token
-        # `target`, the gradient of the row's cross-entropy wrt its logits is
-        # p - onehot(target) where p = softmax(table[i]); this is scatter-added
-        # into grad[i, :]. No [B, T, V] logits tensor is ever built — the forward
-        # is a row lookup, so materializing one would be pure waste. Everything is
-        # averaged by 1/(B*T), matching loss_on_batch. `grad` must be [V, V].
-        #
-        # This reference favors clarity over speed: it is O(B*T*V) and computes
-        # exp twice per position (once in cross_entropy_one's logsumexp, once in
-        # softmax_row), re-doing that work for every repeat of the same current
-        # token. A batched implementation that reuses each row's softmax arrives
-        # with the GPT; here the row lookup keeps even the naive form cheap.
+        """Fill `grad` with the cross-entropy gradient and return the mean loss.
+
+        Per position (b, t) with current token i and next token target, the
+        gradient of the row's cross-entropy wrt its logits is p - onehot(target)
+        where p = softmax(table[i]); this is scatter-added into grad[i, :] and
+        averaged by 1/(B*T), matching loss_on_batch. No [B, T, V] logits tensor
+        is built — the forward is a row lookup. Zeros grad first; mutates grad.
+
+        Args:
+            batch: The token batch.
+            grad: Gradient accumulator, must be [V, V] (zeroed and overwritten).
+
+        Returns:
+            The mean cross-entropy loss.
+
+        Raises:
+            Error: If grad is not [V, V], or on an out-of-range id or target.
+        """
         if grad.rows != self.vocab_size or grad.cols != self.vocab_size:
             raise Error("BigramLM.loss_and_grad: grad shape must be [V, V]")
         grad.fill(0.0)

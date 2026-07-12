@@ -1,10 +1,9 @@
-# Tests for attention masks — additive [T_q, T_k] tensors.
-#
-# Masks are data, not baked-in behavior: 0.0 means "attend", MASKED_SCORE
-# (a large finite negative) means "blocked", and masks compose by plain tensor
-# addition (causal + padding = sum). These tests pin the exact entries of each
-# builder and that composition keeps a cell blocked whenever either mask blocks
-# it — the property the attention core relies on.
+"""Tests for attention masks — additive [T_q, T_k] tensors.
+
+Masks are data: 0.0 means attend, MASKED_SCORE (large finite negative) means
+blocked, and masks compose by tensor addition. These pin each builder's exact
+entries and that composition keeps a cell blocked whenever either mask blocks it.
+"""
 
 from std.testing import (
     assert_almost_equal,
@@ -23,6 +22,7 @@ from llm.transformer.masks import (
 
 
 def test_no_mask_is_all_zeros() raises:
+    """`no_mask` returns an all-zeros [T_q, T_k] tensor."""
     var m = no_mask(2, 3)  # [T_q=2, T_k=3]
     assert_equal(m.rows, 2)
     assert_equal(m.cols, 3)
@@ -32,8 +32,9 @@ def test_no_mask_is_all_zeros() raises:
 
 
 def test_causal_mask_hand_checked() raises:
-    # causal_mask(4): 0 on and below the diagonal (attend to self and the past),
-    # MASKED_SCORE strictly above (cannot see the future). Checked entry by entry.
+    """`causal_mask`(4): 0 on and below the diagonal, MASKED_SCORE strictly above.
+    """
+    # Checked entry by entry:
     #   row 0: [ 0   M   M   M ]
     #   row 1: [ 0   0   M   M ]
     #   row 2: [ 0   0   0   M ]
@@ -50,6 +51,7 @@ def test_causal_mask_hand_checked() raises:
 
 
 def test_key_padding_mask_blocks_false_columns() raises:
+    """`key_padding_mask` blocks the padded-key columns in every query row."""
     # keep = [True, False, True, False]; T_q = 3. Every row blocks columns 1 and 3
     # (the padded keys) and leaves columns 0 and 2 open.
     var keep = [True, False, True, False]
@@ -64,10 +66,10 @@ def test_key_padding_mask_blocks_false_columns() raises:
 
 
 def test_causal_plus_padding_composition() raises:
-    # Composition is the elementwise sum. A cell stays blocked if EITHER mask
-    # blocks it: causal blocks the future, padding blocks column 1. Their sum is
-    # 0 only where both are open, and <= MASKED_SCORE (still strongly negative)
-    # wherever at least one blocks.
+    """Composing causal + padding by sum blocks a cell if either mask blocks it.
+    """
+    # A cell stays blocked if EITHER mask blocks it: causal blocks the future,
+    # padding blocks column 1. Their sum is 0 only where both are open.
     #   causal(3):        padding(keep=[T,F,T], 3):
     #    0  M  M            0  M  0
     #    0  0  M            0  M  0

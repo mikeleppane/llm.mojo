@@ -1,9 +1,10 @@
-# Tests for matmul, matmul_ikj, and matvec.
-#
-# The hand-computed small case catches wrong bounds, row/column confusion, and
-# offset bugs. The orders-agree test proves the two loop orders are numerically
-# equivalent (compared with tolerance, since float summation order differs).
-# matvec is pinned to a hand computation.
+"""Tests for matmul, matmul_ikj, and matvec.
+
+The hand-computed small cases catch wrong bounds, row/column confusion, and
+offset bugs; the fast SIMD/threaded kernels are pinned against scalar reference
+spellings, bit-for-bit where the summation order is preserved and to a mixed
+tolerance where the SIMD dot reassociates the contraction.
+"""
 
 from std.testing import (
     assert_almost_equal,
@@ -25,8 +26,16 @@ from llm.utils.random import Rng
 
 
 def _random_tensor(mut rng: Rng, rows: Int, cols: Int) -> Tensor2D:
-    # A [rows, cols] tensor of seeded normal draws — a shared builder for the
-    # matmul_transpose_b / matvec kernel-vs-reference tests.
+    """Build a [rows, cols] tensor of seeded normal draws.
+
+    Args:
+        rng: Seeded generator, advanced in place.
+        rows: Row count.
+        cols: Column count.
+
+    Returns:
+        A [rows, cols] tensor. Allocates.
+    """
     var t = zeros_2d(rows, cols)
     for r in range(rows):
         for c in range(cols):
@@ -35,6 +44,7 @@ def _random_tensor(mut rng: Rng, rows: Int, cols: Int) -> Tensor2D:
 
 
 def test_matmul_small() raises:
+    """`matmul` on a hand-computed [2,3] @ [3,2] case."""
     var a = from_rows([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
     var b = from_rows([[7.0, 8.0], [9.0, 10.0], [11.0, 12.0]])
     var c = matmul(a, b)
@@ -45,6 +55,7 @@ def test_matmul_small() raises:
 
 
 def test_orders_agree() raises:
+    """`matmul` (ijk) and matmul_ikj agree elementwise on a small case."""
     var a = from_rows([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
     var b = from_rows([[7.0, 8.0], [9.0, 10.0], [11.0, 12.0]])
     var c1 = matmul(a, b)
@@ -55,12 +66,11 @@ def test_orders_agree() raises:
 
 
 def test_at_operator_matches_matmul() raises:
-    # `a @ b` (Tensor2D.__matmul__, the ikj kernel) must agree elementwise with
-    # the clear ijk matmul on a non-square case. The two use different loop
-    # nesting (ijk vs ikj), but each output element still accumulates over k in
-    # the same increasing order, so the per-element sums come out bit-identical,
-    # not merely close. A non-square shape [2,3] @ [3,2] catches a row/column or
-    # bounds slip that a square case could mask. Pin at 1e-12.
+    """`a @ b` matches the clear ijk matmul bit-identically on a non-square case.
+    """
+    # Both accumulate over k in the same ascending order, so the per-element sums
+    # come out bit-identical, not merely close. A non-square [2,3] @ [3,2] catches
+    # a row/column or bounds slip a square case could mask.
     var a = from_rows([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
     var b = from_rows([[7.0, 8.0], [9.0, 10.0], [11.0, 12.0]])
     var c1 = matmul(a, b)
@@ -71,9 +81,18 @@ def test_at_operator_matches_matmul() raises:
 
 
 def _scalar_ikj(a: Tensor2D, b: Tensor2D) raises -> Tensor2D:
-    # The plain scalar ikj matmul — the reference the SIMD-over-j `@` operator
-    # must match BIT-FOR-BIT. Same loop order as `@`, no vectorization: each
-    # out[i, j] accumulates over k ascending via out[i, j] += a[i, k]*b[k, j].
+    """Plain scalar ikj matmul, the reference the SIMD-over-j `@` must match.
+
+    Same loop order as `@`, no vectorization: each out[i, j] accumulates over k
+    ascending.
+
+    Args:
+        a: Left operand [M, K].
+        b: Right operand [K, N].
+
+    Returns:
+        out [M, N]. Allocates.
+    """
     var out = zeros_2d(a.rows, b.cols)
     for i in range(a.rows):
         for k in range(a.cols):
@@ -84,13 +103,11 @@ def _scalar_ikj(a: Tensor2D, b: Tensor2D) raises -> Tensor2D:
 
 
 def test_at_operator_bit_identical_to_scalar_ikj() raises:
-    # `@` vectorizes over the OUTPUT columns j (Class A): each cell still sums k in
-    # the same ascending order as the scalar ikj loop, so the two must be EXACTLY
-    # equal (assert_equal, no tolerance) — SIMD-over-j reorders nothing that gets
-    # summed. Any drift here is a real bug (a mis-handled tail, an off-by-one in
-    # the vector step), not float noise. Seeded shapes span sizes 1 and 2 and
-    # output widths n that are NOT multiples of the f64 SIMD width 4 (1, 2, 3, 5,
-    # 7, 13) so the scalar remainder loop is exercised beside the full vectors.
+    """`@` (SIMD over output columns) is bit-identical to the scalar ikj loop.
+    """
+    # Each cell still sums k in the same ascending order, so the two must be
+    # EXACTLY equal — SIMD-over-j reorders nothing that gets summed. Output widths
+    # n that are NOT multiples of the f64 SIMD width 4 exercise the remainder loop.
     var rng = Rng(20260713)
     var shapes = [
         (1, 1, 1),
@@ -123,9 +140,9 @@ def test_at_operator_bit_identical_to_scalar_ikj() raises:
 
 
 def test_at_operator_threaded_is_deterministic() raises:
-    # The @ operator threads over output rows above the work threshold; that
-    # static partition must be run-to-run bit-identical. Two calls on the same
-    # threaded-size inputs (work ~8M, m=64) must agree EXACTLY.
+    """The threaded `@` path is run-to-run bit-identical on the same inputs."""
+    # The static row partition above the work threshold must not depend on
+    # scheduling. Two calls on threaded-size inputs (work ~8M, m=64) agree EXACTLY.
     var rng = Rng(20260715)
     var a = _random_tensor(rng, 64, 256)
     var b = _random_tensor(rng, 256, 512)
@@ -137,8 +154,7 @@ def test_at_operator_threaded_is_deterministic() raises:
 
 
 def test_at_operator_shape_mismatch_raises() raises:
-    # The `@` operator carries its own shape guard; pin it so it can't be
-    # deleted unnoticed.
+    """`@` raises on a shape mismatch (its own guard)."""
     var a = zeros_2d(2, 3)
     var b = zeros_2d(2, 2)  # 3 != 2
     with assert_raises(contains="shape mismatch"):
@@ -146,6 +162,7 @@ def test_at_operator_shape_mismatch_raises() raises:
 
 
 def test_matmul_shape_mismatch_raises() raises:
+    """`matmul` raises on a shape mismatch."""
     var a = zeros_2d(2, 3)
     var b = zeros_2d(2, 2)  # 3 != 2
     with assert_raises(contains="shape mismatch"):
@@ -153,7 +170,7 @@ def test_matmul_shape_mismatch_raises() raises:
 
 
 def test_matmul_ikj_shape_mismatch_raises() raises:
-    # The ikj path has its own guard; pin it so it can't be deleted unnoticed.
+    """`matmul_ikj` raises on a shape mismatch (its own guard)."""
     var a = zeros_2d(2, 3)
     var b = zeros_2d(2, 2)  # 3 != 2
     with assert_raises(contains="shape mismatch"):
@@ -161,8 +178,9 @@ def test_matmul_ikj_shape_mismatch_raises() raises:
 
 
 def test_matmul_transpose_b_hand_computed() raises:
-    # c = a @ b^T with c[i, j] = sum_k a[i, k] * b[j, k]. a [2, 3], b [2, 3] so
-    # b^T is [3, 2] and c is [2, 2]. Each row of a dotted with each row of b:
+    """`matmul_transpose_b` computes a @ b^T on a hand-computed [2,3]x[2,3] case.
+    """
+    # c[i, j] = sum_k a[i, k] * b[j, k]. Each row of a dotted with each row of b:
     #   c[0,0] = 1*7 + 2*8 + 3*9  = 50    c[0,1] = 1*10 + 2*11 + 3*12 = 68
     #   c[1,0] = 4*7 + 5*8 + 6*9  = 122   c[1,1] = 4*10 + 5*11 + 6*12 = 167
     var a = from_rows([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
@@ -177,15 +195,21 @@ def test_matmul_transpose_b_hand_computed() raises:
 
 
 def _assert_close_rel(got: Float64, want: Float64, tag: String) raises:
-    # Genuinely 1e-12 RELATIVE: |got - want| <= 1e-12*|want| + 1e-13. The rtol
-    # term is the Class B contract — matmul_transpose_b's SIMD dot reassociates
-    # the k-sum, so it agrees with the scalar spelling only to ~k*eps. Measured
-    # max relative error over these shapes is ~2.3e-13 at k=4 and <1e-13 at
-    # k=768/3072, so 1e-12 relative is rigorous with ~4x margin and NOT dominated
-    # by the floor. The 1e-13 atol only catches an exact-zero want (never produced
-    # by these seeded dots); it sits below the measured absolute error, so the
-    # relative term governs every real cell. A real tail/reorder bug (errors
-    # orders larger) is caught; legitimate reassociation passes.
+    """Assert |got - want| <= 1e-12*|want| + 1e-13 (relative tolerance).
+
+    The rtol term covers the SIMD dot reassociating the k-sum, so it agrees with
+    the scalar spelling only to ~k*eps (measured max ~2.3e-13). A real
+    tail/reorder bug (errors orders larger) is caught; legitimate reassociation
+    passes.
+
+    Args:
+        got: Value under test.
+        want: Reference value.
+        tag: Label included in the failure message.
+
+    Raises:
+        Error: If the values are not close.
+    """
     var tol = 1e-12 * abs(want) + 1e-13
     if abs(got - want) > tol:
         raise Error(
@@ -203,15 +227,12 @@ def _assert_close_rel(got: Float64, want: Float64, tag: String) raises:
 
 
 def test_matmul_transpose_b_matches_composed_spelling() raises:
-    # matmul_transpose_b(a, b) == matmul(a, transpose(b)) to 1e-12 RELATIVE. It is
-    # a Class B kernel: a multi-accumulator SIMD dot over the contraction k, which
-    # reassociates the sum vs the scalar spelling's left-to-right order (float
-    # addition is not associative), so the two agree within ~k*eps, NOT bit-for-bit.
-    # `matmul` stays the scalar ijk reference oracle — this is a fast-vs-naive
-    # comparison, the only kind that proves the fast kernel correct. Shapes span the
-    # real model contraction widths (k=768 c_attn/scores/tiedhead, k=3072 mlp_down),
-    # [1, k] decode rows, and RAGGED tails k not divisible by the f64 SIMD width
-    # (4 here) — 5, 7, 13, 769, 3073 — to exercise the scalar remainder loop.
+    """`matmul_transpose_b`(a, b) matches matmul(a, transpose(b)) to 1e-12 relative.
+    """
+    # The multi-accumulator SIMD dot reassociates the contraction vs the scalar
+    # left-to-right order, so the two agree within ~k*eps, NOT bit-for-bit; matmul
+    # stays the scalar ijk oracle. Shapes span the real contraction widths (k=768,
+    # k=3072), [1, k] decode rows, and ragged tails (k not a multiple of 4).
     var rng = Rng(20260711)
     var shapes = [
         (3, 4, 5),
@@ -248,11 +269,10 @@ def test_matmul_transpose_b_matches_composed_spelling() raises:
 
 
 def test_matmul_transpose_b_threaded_is_deterministic() raises:
-    # The threaded path partitions output columns statically across workers, so it
-    # must be run-to-run bit-identical (no shared accumulators, no scheduling
-    # dependence). Two calls on the same threaded-size inputs must agree EXACTLY.
-    # A shape well over the threshold (work ~6M, n=4096) guarantees the parallel
-    # branch runs.
+    """The threaded matmul_transpose_b is run-to-run bit-identical."""
+    # Output columns partition statically across workers (no shared accumulators),
+    # so two calls on the same threaded-size inputs (work ~6M, n=4096) agree
+    # EXACTLY.
     var rng = Rng(20260714)
     var a = _random_tensor(rng, 2, 768)
     var b = _random_tensor(rng, 4096, 768)
@@ -266,11 +286,10 @@ def test_matmul_transpose_b_threaded_is_deterministic() raises:
 
 
 def test_matmul_transpose_b_threaded_matches_serial() raises:
-    # The threading claim is Class A: the parallel path must be bit-identical to
-    # the single-threaded _simd_dot, not merely deterministic. matvec(b, a.row(i))
-    # dots each row of b against a[i, :] through the SAME _simd_dot, serially — so
-    # matmul_transpose_b(a, b)[i, j] must EXACTLY equal matvec(b, a.row(i))[j].
-    # A threaded-size b (n=4096, work > 1M) forces the parallel branch.
+    """The threaded matmul_transpose_b is bit-identical to serial _simd_dot."""
+    # matvec(b, a.row(i)) dots each row of b against a[i, :] through the SAME
+    # _simd_dot, serially, so matmul_transpose_b(a, b)[i, j] must EXACTLY equal
+    # matvec(b, a.row(i))[j]. A threaded-size b (n=4096) forces the parallel branch.
     var rng = Rng(20260717)
     var a = _random_tensor(rng, 3, 768)  # [M, K]
     var b = _random_tensor(rng, 4096, 768)  # [N, K]
@@ -284,9 +303,10 @@ def test_matmul_transpose_b_threaded_matches_serial() raises:
 
 
 def test_matmul_transpose_a_threaded_is_deterministic() raises:
-    # matmul_transpose_a threads over output rows above the work threshold; that
-    # static partition must be run-to-run bit-identical. Two calls on the same
-    # threaded-size inputs (work ~6M, output rows = 512) must agree EXACTLY.
+    """The threaded matmul_transpose_a is run-to-run bit-identical."""
+    # The static output-row partition above the work threshold must not depend on
+    # scheduling. Two calls on the same threaded-size inputs (work ~6M, output rows
+    # = 512) agree EXACTLY.
     var rng = Rng(20260718)
     var a = _random_tensor(rng, 64, 512)  # [N, I] -> 512 output rows
     var b = _random_tensor(rng, 64, 200)  # [N, J]
@@ -299,8 +319,8 @@ def test_matmul_transpose_a_threaded_is_deterministic() raises:
 
 
 def test_matmul_transpose_b_shape_mismatch_raises() raises:
-    # The contraction width is the COLUMN count of BOTH operands (b is stored
-    # un-transposed), so a.cols must equal b.cols. A [2, 3] and [2, 4] mismatch.
+    """`matmul_transpose_b` raises when the shared contraction widths differ."""
+    # b is stored un-transposed, so a.cols must equal b.cols.
     var a = zeros_2d(2, 3)
     var b = zeros_2d(2, 4)  # 3 != 4 on the shared contraction width
     with assert_raises(contains="shape mismatch"):
@@ -308,14 +328,11 @@ def test_matmul_transpose_b_shape_mismatch_raises() raises:
 
 
 def test_matmul_transpose_a_matches_composed_spelling() raises:
-    # matmul_transpose_a(a, b) = a^T @ b, computed without materializing a^T. It
-    # must be BIT-IDENTICAL to transpose(a) @ b (assert_equal, no tolerance): it
-    # is a Class A change (order-preserving), accumulating over the shared row
-    # dimension n in the SAME ascending order as the composed spelling, only
-    # skipping the transpose allocation and vectorizing over the output columns.
-    # Any drift is a real reorder/tail bug. Shapes span sizes 1 and 2, output
-    # widths not divisible by the SIMD width, the real 124M backward widths
-    # (N=64 rows, out/in up to 3072), and a threaded-size case (work > 1M).
+    """`matmul_transpose_a`(a, b) is bit-identical to transpose(a) @ b."""
+    # It accumulates over the shared row dimension n in the SAME ascending order as
+    # the composed spelling, only skipping the transpose allocation, so any drift
+    # is a real reorder/tail bug. Shapes span the real backward widths and a
+    # threaded-size case.
     var rng = Rng(20260716)
     var shapes = [
         (1, 1, 1),
@@ -325,7 +342,7 @@ def test_matmul_transpose_a_matches_composed_spelling() raises:
         (64, 384, 128),  # c_attn backward: d_out^T @ x
         (64, 512, 128),  # mlp_fc backward
         (64, 256, 128),  # tied head backward: d_logits^T @ h
-        (64, 3072, 768),  # 124M mlp_fc backward — threaded (work > 1M)
+        (64, 3072, 768),  # mlp_fc backward — threaded (work > 1M)
     ]
     for s in range(len(shapes)):
         var nrows = shapes[s][0]  # shared contraction dimension N
@@ -347,7 +364,8 @@ def test_matmul_transpose_a_matches_composed_spelling() raises:
 
 
 def test_matmul_transpose_a_shape_mismatch_raises() raises:
-    # The contraction is the shared ROW count (a^T @ b needs a.rows == b.rows).
+    """`matmul_transpose_a` raises when the shared row counts differ."""
+    # a^T @ b needs a.rows == b.rows.
     var a = zeros_2d(3, 2)
     var b = zeros_2d(4, 2)  # 3 != 4 shared rows
     with assert_raises(contains="shape mismatch"):
@@ -355,6 +373,7 @@ def test_matmul_transpose_a_shape_mismatch_raises() raises:
 
 
 def test_matvec_hand_computed() raises:
+    """`matvec` on a hand-computed [2,2] @ [2] case."""
     var a = from_rows([[1.0, 2.0], [3.0, 4.0]])
     var x = [10.0, 100.0]
     var y = matvec(a, x)
@@ -363,8 +382,16 @@ def test_matvec_hand_computed() raises:
 
 
 def _scalar_dot(a: Tensor2D, row: Int, x: List[Float64]) -> Float64:
-    # Left-to-right scalar dot of a[row, :] with x — the naive reference the
-    # SIMD matvec must match to 1e-12 relative.
+    """Left-to-right scalar dot of a[row, :] with x — the naive reference.
+
+    Args:
+        a: Tensor whose row is dotted.
+        row: Row index into a.
+        x: Vector of the same length as a's columns.
+
+    Returns:
+        The dot product.
+    """
     var acc = 0.0
     for k in range(a.cols):
         acc += a[row, k] * x[k]
@@ -372,10 +399,10 @@ def _scalar_dot(a: Tensor2D, row: Int, x: List[Float64]) -> Float64:
 
 
 def test_matvec_matches_scalar_dot() raises:
-    # matvec is the same Class B SIMD dot as matmul_transpose_b, in vector form:
-    # y[i] = dot(a[i, :], x). Pin it against the scalar left-to-right dot at the
-    # real decode contraction widths and ragged tails (k not a multiple of the
-    # f64 SIMD width 4), so the reassociated result agrees to ~k*eps.
+    """`matvec` matches the scalar left-to-right dot to 1e-12 relative."""
+    # matvec is the SIMD dot in vector form: y[i] = dot(a[i, :], x). Real decode
+    # contraction widths and ragged tails (k not a multiple of 4) exercise the
+    # reassociation and the remainder loop.
     var rng = Rng(20260712)
     var ks = [1, 3, 5, 7, 13, 768, 769, 3072, 3073]
     for s in range(len(ks)):
@@ -394,6 +421,8 @@ def test_matvec_matches_scalar_dot() raises:
 
 
 def test_matvec_shape_mismatch_raises() raises:
+    """`matvec` raises when the vector length does not match the column count.
+    """
     var a = zeros_2d(2, 3)
     var x = [1.0, 2.0]
     with assert_raises(contains="shape mismatch"):

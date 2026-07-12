@@ -1,29 +1,15 @@
-# Sliding-window batching over a token dataset.
-#
-# This is where the corpus becomes training batches. A *window* of length T + 1
-# starting at position s covers ids[s .. s + T]; its first T tokens are the model
-# input and its last T tokens are the target (the input shifted left by one), so
-# the network at position t is always trained to predict token t + 1. That
-# shift-by-one is built into the window here, not bolted on later.
-#
-# An *epoch* is one pass over all window starts. The starts are enumerated once
-# (0, stride, 2*stride, ...), optionally shuffled by a seeded RNG, and consumed B
-# at a time. Because the order is a permutation of a fixed list, the same seed
-# replays the exact same batch sequence — a training run is reproducible and a
-# test can assert on it. Windows that don't fill a final batch of B are dropped
-# (standard practice; it keeps every batch the same shape). Consequently
-# num_batches() == num_windows() // B.
-#
-# `stride` is explicit: pass stride == seq_len for non-overlapping windows (each
-# token used once as an input), or a smaller stride to oversample with overlap.
-# There is no magic default — the caller states the step it wants.
-#
-# A fresh loader iterates in natural (unshuffled) order — convenient for
-# `overfit_batch` and inspection, but note that natural order is fixed and always
-# drops the same trailing `num_windows % B` windows (the corpus tail). A training
-# loop should call `start_epoch(seed + epoch)` at the top of every epoch: that
-# both varies the order and reshuffles which windows land in the dropped
-# remainder, so the tail is not permanently starved of training.
+"""Sliding-window batching over a token dataset.
+
+A window of length T + 1 starting at position s covers ids[s .. s + T]; its
+first T tokens are the model input and its last T tokens are the target (the
+input shifted left by one), so the network at position t is trained to predict
+token t + 1. An epoch is one pass over all window starts (0, stride, 2*stride,
+...), optionally shuffled by a seeded RNG and consumed B at a time; the same
+seed replays the exact same batch sequence, so a run is reproducible. Windows
+that don't fill a final batch of B are dropped, so num_batches() ==
+num_windows() // B. Pass stride == seq_len for non-overlapping windows, or a
+smaller stride to oversample with overlap.
+"""
 
 from llm.utils import Rng
 
@@ -32,9 +18,19 @@ from .dataset import TokenDataset
 
 
 def _window_starts(size: Int, seq_len: Int, stride: Int) -> List[Int]:
-    # Enumerate window starts in natural order: every s with s + seq_len + 1 <=
-    # size (so both ids[s : s+T] and ids[s+1 : s+T+1] stay in bounds), i.e.
-    # s <= size - seq_len - 1, stepping by stride from 0. Allocates the list.
+    """Enumerate window starts in natural order.
+
+    Every s with s + seq_len + 1 <= size (so both ids[s : s+T] and
+    ids[s+1 : s+T+1] stay in bounds), stepping by stride from 0.
+
+    Args:
+        size: Number of tokens in the dataset.
+        seq_len: T, the window's input/target length.
+        stride: Step between consecutive window starts.
+
+    Returns:
+        The window starts. Allocates.
+    """
     var starts: List[Int] = []
     var max_start = size - seq_len - 1
     var s = 0
@@ -45,6 +41,9 @@ def _window_starts(size: Int, seq_len: Int, stride: Int) -> List[Int]:
 
 
 struct BatchLoader(Movable):
+    """Windows a token dataset into reproducible, shuffleable training batches.
+    """
+
     var dataset: TokenDataset  # the token sequence being windowed
     var batch_size: Int  # B: windows per batch
     var seq_len: Int  # T: input/target length per window
@@ -59,11 +58,21 @@ struct BatchLoader(Movable):
         seq_len: Int,
         stride: Int,
     ) raises:
-        # Build a loader over `dataset`. Raises on degenerate arguments
-        # (batch_size, seq_len, or stride < 1) or a dataset too small to fill even
-        # one batch of B windows. The window starts are enumerated in natural
-        # order so a fresh loader is immediately iterable; call start_epoch to
-        # shuffle them.
+        """Build a loader over `dataset`.
+
+        The window starts are enumerated in natural order so a fresh loader is
+        immediately iterable; call start_epoch to shuffle them.
+
+        Args:
+            dataset: The token sequence to window (ownership transferred).
+            batch_size: B, windows per batch, must be >= 1.
+            seq_len: T, input/target length per window, must be >= 1.
+            stride: Step between consecutive window starts, must be >= 1.
+
+        Raises:
+            Error: On a degenerate argument (< 1), or a dataset too small to
+                fill even one batch of B windows.
+        """
         if batch_size < 1:
             raise Error(
                 "BatchLoader: batch_size must be >= 1, got "
@@ -102,21 +111,25 @@ struct BatchLoader(Movable):
             )
 
     def num_windows(self) -> Int:
-        # Total window starts in one epoch.
+        """Return the total window starts in one epoch."""
         return len(self.order)
 
     def num_batches(self) -> Int:
-        # Full batches per epoch; the remainder windows are dropped.
+        """Return the full batches per epoch; remainder windows are dropped."""
         return self.num_windows() // self.batch_size
 
     def start_epoch(mut self, seed: UInt64):
-        # Begin a fresh epoch: rebuild the canonical (natural-order) window starts
-        # and shuffle that copy with Rng(seed), then rewind the cursor. Rebuilding
-        # first is what makes the result depend *only* on the seed — shuffling the
-        # previous epoch's already-permuted order in place would make each epoch's
-        # order a function of the whole prior history, silently breaking "same
-        # seed -> same batches". Callers wanting per-epoch variation pass
-        # seed + epoch.
+        """Begin a fresh epoch: rebuild the window starts, shuffle, and rewind.
+
+        Rebuilding the canonical (natural-order) starts before shuffling makes
+        the result depend only on the seed; shuffling the previous epoch's
+        already-permuted order in place would make each epoch a function of the
+        whole prior history. Callers wanting per-epoch variation pass
+        seed + epoch. Mutates self.
+
+        Args:
+            seed: RNG seed for the shuffle.
+        """
         self.order = _window_starts(
             self.dataset.size(), self.seq_len, self.stride
         )
@@ -125,14 +138,21 @@ struct BatchLoader(Movable):
         self.cursor = 0
 
     def has_next(self) -> Bool:
-        # True while at least one full batch of B windows remains unread.
+        """Return True while at least one full batch of B windows remains."""
         return self.cursor + self.batch_size <= len(self.order)
 
     def next_batch(mut self) raises -> TokenBatch:
-        # Assemble the next B windows into a TokenBatch. For each window start s,
-        # inputs = ids[s : s+T] and targets = ids[s+1 : s+T+1]. Raises if called
-        # without a full batch remaining (guard with has_next). Advances the
-        # cursor by B; allocates the batch's two flat arrays.
+        """Assemble the next B windows into a TokenBatch.
+
+        For each window start s, inputs = ids[s : s+T] and
+        targets = ids[s+1 : s+T+1]. Advances the cursor by B.
+
+        Returns:
+            The next batch. Allocates its two flat arrays.
+
+        Raises:
+            Error: If no full batch remains (guard with has_next).
+        """
         if not self.has_next():
             raise Error(
                 "BatchLoader.next_batch: no full batch remains (cursor="
@@ -155,11 +175,24 @@ struct BatchLoader(Movable):
 def overfit_batch(
     dataset: TokenDataset, batch_size: Int, seq_len: Int
 ) raises -> TokenBatch:
-    # Return the first B consecutive non-overlapping windows as one fixed batch,
-    # with no shuffling. This is the tiny, constant batch that later parts drive
-    # to near-zero loss to prove the model and training loop are wired correctly;
-    # calling it twice must return identical batches, so it must never touch the
-    # RNG. Built by windowing with stride == seq_len and taking the first batch.
+    """Return the first B non-overlapping windows as one fixed batch.
+
+    No shuffling: this tiny, constant batch is driven to near-zero loss to prove
+    the model and training loop are wired correctly, so calling it twice must
+    return identical batches and it never touches the RNG. Built by windowing
+    with stride == seq_len and taking the first batch.
+
+    Args:
+        dataset: The token sequence to window.
+        batch_size: B, windows in the batch.
+        seq_len: T, input/target length per window.
+
+    Returns:
+        The first batch. Allocates.
+
+    Raises:
+        Error: If the loader cannot be built or filled (see BatchLoader).
+    """
     var loader = BatchLoader(
         dataset.copy(), batch_size, seq_len, stride=seq_len
     )

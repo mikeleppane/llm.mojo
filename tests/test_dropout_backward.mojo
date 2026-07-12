@@ -1,11 +1,11 @@
-# Tests for dropout backward — the cached-mask VJP.
-#
-# Dropout is linear once the mask is fixed (output = (mask * inv_keep) ⊙ x), so
-# backward must reuse the SAME mask the forward drew. The tests pin exactly that:
-# the forward output equals x scaled by the mask; backward equals d_out scaled by
-# the same mask; a central finite difference of the mask-fixed forward matches
-# backward to machine precision (linear -> exact, not the loose D5 tolerance);
-# eval / p == 0 backward is the identity; and eval mode consumes no rng draws.
+"""Tests for dropout backward, the cached-mask VJP.
+
+Dropout is linear once the mask is fixed (output = (mask * inv_keep) * x), so
+backward must reuse the same mask the forward drew. The tests pin that the
+forward and backward both scale by that mask, that a mask-fixed finite
+difference matches backward to machine precision, that eval / p == 0 backward is
+the identity, and that eval mode consumes no rng draws.
+"""
 
 from std.testing import (
     assert_almost_equal,
@@ -20,7 +20,7 @@ from llm.utils.random import Rng
 
 
 def sample_input() raises -> Tensor2D:
-    # [N=3, C=4], asymmetric.
+    """An asymmetric [N=3, C=4] input tensor."""
     return from_rows(
         [
             [1.0, 0.5, -1.0, 0.3],
@@ -31,9 +31,19 @@ def sample_input() raises -> Tensor2D:
 
 
 def forward_with_mask(x: Tensor2D, mask: Tensor2D, p: Float64) -> Tensor2D:
-    # The dropout forward with a *given* mask: output = (mask * inv_keep) ⊙ x.
-    # Used to finite-diff backward against a fixed mask (dropout draws a fresh
-    # mask each call, so this is the only way to hold it constant).
+    """The dropout forward with a given mask: output = (mask * inv_keep) * x.
+
+    Holds the mask fixed so backward can be finite-differenced against it
+    (dropout draws a fresh mask each call).
+
+    Args:
+        x: Input tensor, shape [N, C].
+        mask: The 0/1 keep mask to apply, shape [N, C].
+        p: Drop probability; survivors scale by 1 / (1 - p).
+
+    Returns:
+        The masked, scaled output, shape [N, C]. Allocates a new tensor.
+    """
     var inv_keep = 1.0 / (1.0 - p)
     var out = zeros_2d(x.rows, x.cols)
     for r in range(x.rows):
@@ -43,8 +53,8 @@ def forward_with_mask(x: Tensor2D, mask: Tensor2D, p: Float64) -> Tensor2D:
 
 
 def test_forward_uses_the_returned_mask() raises:
-    # dropout_cached's output must be exactly x * mask * inv_keep — the mask it
-    # returns is the one it actually applied, not a decoration.
+    """Forward output is exactly x * mask * inv_keep: the returned mask is the one dropout_cached applied.
+    """
     var rng = Rng(42)
     var x = sample_input()
     var p = 0.3
@@ -62,10 +72,8 @@ def test_forward_uses_the_returned_mask() raises:
 
 
 def test_backward_matches_finite_difference_through_cached_mask() raises:
-    # Given the mask, dropout is linear in x, so the central difference of the
-    # mask-fixed forward equals backward to machine precision. A tight tolerance
-    # is legitimate here — and a backward that drew a fresh mask instead of
-    # reusing this one would miss it by whole elements.
+    """Backward matches the mask-fixed central difference to machine precision (dropout is linear in x given the mask).
+    """
     var rng = Rng(7)
     var x = sample_input()
     var p = 0.4
@@ -94,7 +102,7 @@ def test_backward_matches_finite_difference_through_cached_mask() raises:
 
 
 def test_backward_scales_by_inv_keep() raises:
-    # d_x = d_out * mask / (1 - p), entry for entry.
+    """Backward computes d_x = d_out * mask / (1 - p), entry for entry."""
     var rng = Rng(123)
     var x = sample_input()
     var p = 0.25
@@ -110,11 +118,8 @@ def test_backward_scales_by_inv_keep() raises:
 
 
 def test_eval_backward_is_identity_with_cached_scale() raises:
-    # Eval mode forward is the identity (no drop, no scale), so its backward must
-    # be the identity too — using the SAME cached scale the forward recorded, not
-    # a p the caller has to remember to pass as 0. The cache carries inv_keep=1.0
-    # for eval, so backward is d_out unchanged even though the forward was called
-    # with p=0.5.
+    """Eval-mode backward is the identity using the cached inv_keep=1.0, even though the forward was called with p=0.5.
+    """
     var rng = Rng(1)
     var x = sample_input()
     var res_eval = dropout_cached(x, 0.5, False, rng)  # eval mode, p=0.5
@@ -128,7 +133,8 @@ def test_eval_backward_is_identity_with_cached_scale() raises:
 
 
 def test_p_zero_backward_is_identity() raises:
-    # p == 0 (training or eval): nothing dropped, inv_keep = 1, backward identity.
+    """p == 0 (training or eval): nothing dropped, inv_keep = 1, backward is the identity.
+    """
     var rng = Rng(2)
     var x = sample_input()
     var res = dropout_cached(x, 0.0, True, rng)
@@ -142,8 +148,8 @@ def test_p_zero_backward_is_identity() raises:
 
 
 def test_eval_mode_consumes_no_rng() raises:
-    # Eval mode must not draw: the generator state is unchanged, so a downstream
-    # seeded draw is unperturbed.
+    """Eval mode does not draw: the generator state is unchanged, so downstream seeded draws are unperturbed.
+    """
     var rng = Rng(99)
     var state_before = rng.state
     var x = sample_input()
@@ -152,6 +158,7 @@ def test_eval_mode_consumes_no_rng() raises:
 
 
 def test_shape_mismatch_raises() raises:
+    """Backward raises when mask and d_out shapes disagree."""
     var mask = zeros_2d(3, 4)
     var d_out = zeros_2d(3, 5)
     with assert_raises(contains="shape mismatch"):

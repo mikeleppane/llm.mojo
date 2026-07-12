@@ -1,3 +1,5 @@
+"""Tensor types and operations: Tensor2D, Tensor3D, and the ops built on them."""
+
 from .tensor2d import Tensor2D, zeros_2d, full_2d, ones_2d, from_rows
 from .tensor3d import Tensor3D, zeros_3d
 from .ops import (

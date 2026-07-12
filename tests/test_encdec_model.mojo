@@ -1,12 +1,4 @@
-# Tests for the EncDec model — forward shape, the uniform-baseline init loss,
-# model-level causality, the longest gradient path in the repo (source token
-# embedding grad, reached only by threading head -> decoder -> cross-attention ->
-# encoder -> embedding), the n_dec=2 d_memory-summing pin, and zero_grad /
-# apply_sgd coverage.
-#
-# Finite-difference convention (Part XI, inline): projected here IS the real
-# scalar loss cross_entropy_rows, differentiated centrally with h = 1e-5, mixed
-# tolerance |analytic - numeric| <= 1e-7 + 1e-5 * |numeric|.
+"""Tests for the EncDec model: forward shape, uniform-baseline init loss, model-level causality, the source-embedding gradient (the longest path in the repo: head -> decoder -> cross-attention -> encoder -> embedding), the n_dec=2 d_memory-summing pin, and zero_grad / apply_sgd coverage. Gradient checks differentiate the real scalar loss cross_entropy_rows centrally with h = 1e-5 and mixed absolute/relative tolerance 1e-7 + 1e-5*|n|."""
 
 from std.math import log
 
@@ -42,9 +34,8 @@ def sample_src() -> List[Int]:
 
 
 def sample_tgt_in() -> List[Int]:
-    # [BOS] + tgt[:-1] for the reverse of sample_src ([4,0,3,1]) -> tgt_in
-    # [BOS,4,0,3]. The exact values do not matter to these tests; a fixed,
-    # in-range teacher-forcing input does.
+    """A fixed, in-range teacher-forcing input [BOS] + tgt[:-1]; exact values do not matter to these tests.
+    """
     return [BOS, 4, 0, 3]
 
 
@@ -63,6 +54,7 @@ def assert_grad_close(analytic: Float64, numeric: Float64) raises:
 
 
 def test_logits_shape() raises:
+    """forward returns logits of shape [T, VOCAB]."""
     var rng = Rng(1)
     var model = build_model(rng, 1)
     var logits = model.forward(sample_src(), sample_tgt_in())
@@ -71,6 +63,8 @@ def test_logits_shape() raises:
 
 
 def test_init_loss_near_log_vocab() raises:
+    """A freshly initialized model has mean cross-entropy near the uniform baseline log(V).
+    """
     # A freshly initialized model has tiny logits (0.02-scale weights, LayerNorm
     # normalizing the stream), so softmax is near-uniform and the mean
     # cross-entropy sits close to log(V) — the uniform baseline. Averaged over a
@@ -95,6 +89,8 @@ def test_init_loss_near_log_vocab() raises:
 
 
 def test_model_causality_in_tgt_in() raises:
+    """Changing the decoder input at position j leaves logits rows < j unchanged.
+    """
     # Changing the decoder input at position j leaves logits rows < j unchanged:
     # causal self-attention plus the fact that token j enters only stream row j.
     var rng = Rng(3)
@@ -129,12 +125,12 @@ def finite_diff_src_table(
 
 
 def check_src_table_grad(n_dec: Int) raises:
-    # End-to-end finite-difference of the SOURCE token embedding grad — the
-    # longest path in the repo (loss -> head -> decoder stack -> cross-attention
-    # -> encoder stack -> src embedding). With n_dec = 2 this ALSO pins that the
-    # decoder blocks' d_memory contributions SUM: overwrite instead of sum and
-    # the encoder (hence this grad) sees only one block's contribution and the
-    # check fails.
+    """Finite-difference the source token embedding grad end to end.
+
+    With n_dec = 2 this also pins that the decoder blocks' d_memory
+    contributions SUM: overwrite instead of sum and the encoder (hence this
+    grad) sees only one block's contribution and the check fails.
+    """
     var rng = Rng(11)
     var model = build_model(rng, n_dec)
     var src = sample_src()
@@ -152,19 +148,22 @@ def check_src_table_grad(n_dec: Int) raises:
 
 
 def test_src_table_grad_finite_difference_n_dec_1() raises:
+    """Source-embedding grad matches finite difference for a single decoder block.
+    """
     check_src_table_grad(1)
 
 
 def test_src_table_grad_finite_difference_n_dec_2_sums_memory() raises:
+    """Source-embedding grad matches finite difference when two decoder blocks sum d_memory.
+    """
     check_src_table_grad(2)
 
 
 def test_zero_grad_and_apply_sgd_touch_every_parameter() raises:
-    # After a backward with nonzero d_logits, representative grads across every
-    # layer type are nonzero; zero_grad drives them to exactly zero; a step with
-    # nonzero grads moves every representative value. Covers each layer family:
-    # the four embeddings, encoder + decoder sublayers (including cross-attn),
-    # both final LayerNorms, and the head.
+    """Backward makes representative grads nonzero, zero_grad clears them, and an SGD step moves every value, across every layer family.
+    """
+    # Covers each layer family: the four embeddings, encoder + decoder sublayers
+    # (including cross-attn), both final LayerNorms, and the head.
     var rng = Rng(5)
     var model = build_model(rng, 1)
     var src = sample_src()

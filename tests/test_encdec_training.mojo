@@ -1,23 +1,4 @@
-# The capstone: the assembled encoder-decoder actually TRAINS end to end. This is
-# the overfit-one-batch integration test — a correct model + hand-written backward
-# + SGD loop must drive a tiny batch to EXACT reproduction under greedy decode; if
-# it can't, the loss, a gradient, or the optimizer is wrong. Copy is the warmup
-# (near-diagonal alignment); reverse is the proof — target position i must fetch
-# source position T-1-i, an alignment no local/bigram shortcut can fake, so only
-# working cross-attention solves it. The corrupted-memory ablation (zero memory,
-# no retraining) then pins cross-attention as load-bearing: exact-match collapses.
-#
-# The task uses a small model (C=8, T=6, V_data=8) and a tiny 4-pair batch so the
-# whole training run stays in test-suite time — the reference forward_cached is
-# allocation-heavy (correctness before speed) and its cost climbs steeply with
-# d_model, so a small model is the practical choice for a training test. Held-out
-# GENERALIZATION at a larger config, and the anti-diagonal cross-attention
-# alignment map, are demonstrated in examples/encdec_reverse.mojo (see
-# notes/part-12-notes.md for why the test overfits rather than generalizes).
-#
-# Everything is seeded and deterministic. The thresholds are the one empirical
-# spot in the suite: lr and step count were tuned on the branch, then the seeded
-# exact-match outcome pinned here.
+"""Capstone overfit-one-batch integration test: the assembled encoder-decoder trains end to end (forward + hand-written backward + SGD) and drives a tiny seeded batch to EXACT greedy-decode reproduction. Copy is the warmup; reverse (target position i fetches source position T-1-i) proves cross-attention works, and a zeroed-memory ablation pins cross-attention as load-bearing when exact-match collapses. Everything is seeded and deterministic; lr and step count were tuned, then the exact-match outcome pinned here."""
 
 from std.math import log
 
@@ -62,10 +43,15 @@ def train(
     steps: Int,
     batch: Int,
 ) raises -> List[Float64]:
-    # Gradient-accumulation training: each step zeroes grads, runs `batch`
-    # sequences through forward_cached + backward with d_logits scaled by 1/batch
-    # (so the accumulated grad is the batch MEAN), then takes one SGD step.
-    # Returns the mean batch loss every 25 steps as a coarse loss curve.
+    """Gradient-accumulation training loop.
+
+    Each step zeroes grads, runs `batch` sequences through forward_cached +
+    backward with d_logits scaled by 1/batch (so the accumulated grad is the
+    batch MEAN), then takes one SGD step.
+
+    Returns:
+        The mean batch loss every 25 steps, as a coarse loss curve.
+    """
     var losses = List[Float64]()
     var n = len(srcs)
     var inv_b = 1.0 / Float64(batch)
@@ -101,8 +87,11 @@ def exact_matches(
 def exact_matches_zero_memory(
     model: EncDec, srcs: List[List[Int]], reverse: Bool
 ) raises -> Int:
-    # Decode from a ZEROED memory (the ablation): the decoder gets no information
-    # from the source, so it cannot reproduce a source-dependent target.
+    """Count exact matches when decoding from a ZEROED memory (the ablation).
+
+    The decoder gets no information from the source, so it cannot reproduce a
+    source-dependent target.
+    """
     var count = 0
     for i in range(len(srcs)):
         var zero_mem = zeros_2d(T, C)
@@ -113,10 +102,8 @@ def exact_matches_zero_memory(
 
 
 def test_copy_overfit() raises:
-    # Warmup: copy is easy (target = source). A short full-batch run drives the
-    # loss far below the uniform baseline log(V) and greedy-decodes every training
-    # pair exactly — the training loop demonstrably works before reverse leans on
-    # it.
+    """Warmup: copy (target = source) drives loss below the log(V) baseline and greedy-decodes every training pair exactly.
+    """
     var rng = Rng(101)
     var model = EncDec.init_random(rng, VOCAB, C, H, 1, 1, HIDDEN, T)
     var data_rng = Rng(202)
@@ -129,12 +116,8 @@ def test_copy_overfit() raises:
 
 
 def test_reverse_overfit_and_ablation() raises:
-    # The proof: reverse needs cross-attention (source position T-1-i for target
-    # position i). Full-batch training drives the loss down and greedy-decodes
-    # every training pair EXACTLY — the assembled backward chain, threaded through
-    # cross-attention back into the encoder, trains. Then zeroing memory (one
-    # corruption, no retraining) collapses exact-match, proving the decoder
-    # actually reads the encoder rather than memorizing target statistics.
+    """Reverse (source position T-1-i for target i) needs cross-attention: training decodes every pair exactly, then zeroing memory collapses exact-match, proving the decoder reads the encoder rather than memorizing target statistics.
+    """
     var rng = Rng(101)
     var model = EncDec.init_random(rng, VOCAB, C, H, 1, 1, HIDDEN, T)
     var data_rng = Rng(303)

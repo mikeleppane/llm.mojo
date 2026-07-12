@@ -1,17 +1,4 @@
-# Tests for the GPT parameter-walk-as-registry (parameter_shapes, decay flags,
-# grad_norm, scale_grads, export/import, apply_adamw). The walk order is a
-# load-bearing contract: the optimizer, gradient clipping, and the checkpoint all
-# index the same documented traversal, and drift between walk methods is the
-# named failure mode these tests exist to catch.
-#
-# The headline check is the against-oracle 2-step run: gpt.apply_adamw is compared
-# to a FLAT reference optimizer that drives the oracle-verified adamw_update over
-# the model's OWN published walk metadata (export_parameters, export_gradients,
-# parameter_decay_flags) in a plain index loop. If apply_adamw visits parameters
-# in a different order, or assigns a decay flag inconsistent with
-# parameter_decay_flags, or threads its m/v state off-by-one, the two diverge.
-# adamw_update is the only shared code, and it is independently pinned against a
-# NumPy oracle in test_adamw.mojo.
+"""Tests for the GPT parameter walk (shapes, decay flags, export/import, apply_adamw): the walk order is a shared contract across the optimizer, clipping, and checkpoint."""
 
 from std.testing import (
     assert_almost_equal,
@@ -34,8 +21,8 @@ comptime EPS = 1e-8
 
 
 def _tiny_gpt(seed: UInt64) raises -> GPT:
-    # V=8, context=8, C=8, L=2, H=2, dropout 0. 28 parameter tensors:
-    # wte, wpe, 12 per block x 2, ln_f weight+bias.
+    """Build a tiny GPT (V=8, context=8, C=8, L=2, H=2, dropout 0), 28 parameter tensors: wte, wpe, 12 per block x 2, ln_f weight+bias.
+    """
     var cfg = GPTConfig(8, 8, 8, 2, 2, 0.0)
     var rng = Rng(seed)
     return GPT.init_random(cfg, rng)
@@ -62,8 +49,8 @@ def _targets() raises -> List[Int]:
 
 
 def _backward_into(mut gpt: GPT) raises:
-    # Populate every gradient with a real backward pass (dropout off, so no rng
-    # is drawn). Grads are nonzero across the model.
+    """Populate every gradient with a real backward pass (dropout off, so no rng is drawn); grads are nonzero across the model.
+    """
     var rng = Rng(0)
     gpt.zero_grad()
     var fwd = gpt.forward_cached(_ids(), False, rng)
@@ -78,6 +65,8 @@ def _set_grad(mut p: Parameter, g: Tensor2D):
 
 
 def test_parameter_shapes_matches_walk() raises:
+    """Walk reports 28 tensors whose float total reconciles with parameter_count_actual.
+    """
     var gpt = _tiny_gpt(3)
     var shapes = gpt.parameter_shapes()
     # 28 tensors: 2 embeddings + 12*2 block params + 2 ln_f.
@@ -98,10 +87,8 @@ def test_parameter_shapes_matches_walk() raises:
 
 
 def test_decay_partition_inventory() raises:
-    # The GPT-family selective-decay partition, pinned as an explicit inventory:
-    # embeddings decay; every bias and LayerNorm vector does not. Per block: 4
-    # decayed matrices (qkv, proj, mlp up, mlp down) and 8 undecayed (4 biases +
-    # 4 LN vectors). Plus wte, wpe decayed and ln_f (weight, bias) undecayed.
+    """Pin the GPT-family selective-decay partition: embeddings and the four per-block matrices (qkv, proj, mlp up, mlp down) decay; every bias and LayerNorm vector does not.
+    """
     var gpt = _tiny_gpt(3)
     var flags = gpt.parameter_decay_flags()
     assert_true(len(flags) == 28, "flags length")
@@ -138,8 +125,8 @@ def test_decay_partition_inventory() raises:
 
 
 def test_apply_adamw_moves_every_parameter() raises:
-    # With real (nonzero) gradients, one AdamW step moves EVERY parameter tensor.
-    # A Parameter the walk skipped would come back byte-for-byte unchanged.
+    """One AdamW step with nonzero gradients moves every parameter tensor; a skipped Parameter would come back unchanged.
+    """
     var gpt = _tiny_gpt(3)
     _backward_into(gpt)
     var before = gpt.export_parameters()
@@ -168,6 +155,7 @@ def test_apply_adamw_moves_every_parameter() raises:
 
 
 def test_apply_adamw_length_mismatch_raises() raises:
+    """Passing wrong-length m/v state lists makes apply_adamw raise."""
     var gpt = _tiny_gpt(3)
     _backward_into(gpt)
     var m = List[Tensor2D]()  # empty — wrong length
@@ -177,11 +165,8 @@ def test_apply_adamw_length_mismatch_raises() raises:
 
 
 def test_apply_adamw_matches_flat_walk_two_steps() raises:
-    # The against-oracle. A flat reference optimizer applies adamw_update to
-    # copies of the model's parameters, driven purely by the published walk
-    # metadata (export order + decay flags), and must agree with gpt.apply_adamw
-    # after each of two steps. Two steps so the second exercises non-zero m/v
-    # (an off-by-one in m/v threading is invisible while all state is zero).
+    """The model's apply_adamw agrees with a flat reference optimizer driving adamw_update over the published walk metadata, after each of two steps (the second exercises nonzero m/v so an off-by-one in m/v threading shows).
+    """
     var gpt = _tiny_gpt(3)
     var shapes = gpt.parameter_shapes()
     var flags = gpt.parameter_decay_flags()
@@ -232,8 +217,8 @@ def test_apply_adamw_matches_flat_walk_two_steps() raises:
 
 
 def test_walk_methods_are_stable() raises:
-    # Two walks agree: the order and shapes are a fixed function of the model, not
-    # of call history. A drifting walk would return different lists per call.
+    """Two walks agree: shapes and decay flags are a fixed function of the model, not of call history.
+    """
     var gpt = _tiny_gpt(7)
     var a = gpt.parameter_shapes()
     var b = gpt.parameter_shapes()

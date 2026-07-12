@@ -1,14 +1,11 @@
-# Codepoint-level character tokenizer.
-#
-# The simplest tokenizer: the vocabulary is the set of unique Unicode codepoints
-# in a training corpus, ordered by codepoint value. Encoding maps each character
-# to its id; decoding maps ids back to characters. There is no notion of subword
-# structure — one codepoint is one token. This is the tokenizer Part V opens with
-# before byte-level BPE, because every later idea (round trips, save/load, an
-# id<->symbol table) already appears here in its clearest form.
-#
-# Determinism: because the vocab is sorted by codepoint value, the same corpus
-# always yields the same ids — no seed, no hash-order dependence.
+"""Codepoint-level character tokenizer.
+
+The simplest tokenizer: the vocabulary is the set of unique Unicode codepoints
+in a training corpus, ordered by codepoint value, so one codepoint is one token
+with no subword structure. Sorting the vocab by codepoint value makes the ids
+deterministic — the same corpus always yields the same ids, with no seed or
+hash-order dependence.
+"""
 
 # Save-format tag (see save/load). Stored codepoints are decimal integers, which
 # avoids every newline/whitespace-escaping bug a character-literal format invites.
@@ -16,26 +13,46 @@ comptime CHARTOK_MAGIC = "CHARTOK v1"
 
 
 def _first_codepoint(single: String) raises -> Int:
-    # Return the codepoint value of a one-character string.
+    """Return the codepoint value of a one-character string.
+
+    Args:
+        single: A one-character string.
+
+    Returns:
+        Its codepoint value.
+
+    Raises:
+        Error: If the string is empty.
+    """
     for cp in single.codepoints():
         return Int(cp)
     raise Error("empty string has no codepoint")
 
 
 struct CharTokenizer(Copyable, Movable):
+    """Character tokenizer: an id <-> single-codepoint-string table."""
+
     var itos: List[String]  # id -> single-codepoint string, sorted by codepoint
     var stoi: Dict[String, Int]  # single-codepoint string -> id
 
     def __init__(out self):
-        # Empty vocab; populated by from_text or load.
+        """Initialize an empty vocab, populated by from_text or load."""
         self.itos = []
         self.stoi = {}
 
     @staticmethod
     def from_text(text: String) raises -> CharTokenizer:
-        # Build a vocab from the unique codepoints of `text`, ordered by codepoint
-        # value so ids are deterministic. Allocates; raises only on internal
-        # invariants (never on ordinary text).
+        """Build a vocab from the unique codepoints of `text`.
+
+        Codepoints are ordered by value so the ids are deterministic.
+
+        Args:
+            text: The training corpus.
+
+        Returns:
+            The built tokenizer. Allocates; raises only on internal invariants,
+            never on ordinary text.
+        """
         var codepoints: List[Int] = []
         for cp in text.codepoints():
             codepoints.append(Int(cp))
@@ -57,8 +74,17 @@ struct CharTokenizer(Copyable, Movable):
         return len(self.itos)
 
     def encode(self, text: String) raises -> List[Int]:
-        # Map each codepoint of `text` to its id. Allocates a new list; raises if
-        # any character is not in the vocab.
+        """Map each codepoint of `text` to its id.
+
+        Args:
+            text: The string to encode.
+
+        Returns:
+            The token ids. Allocates.
+
+        Raises:
+            Error: If any character is not in the vocab.
+        """
         var ids: List[Int] = []
         for cp_slice in text.codepoint_slices():
             var symbol = String(cp_slice)
@@ -70,8 +96,17 @@ struct CharTokenizer(Copyable, Movable):
         return ids^
 
     def decode(self, ids: List[Int]) raises -> String:
-        # Map ids back to characters. Allocates a new string; raises if any id is
-        # outside 0 .. vocab_size-1.
+        """Map ids back to characters.
+
+        Args:
+            ids: Token ids to decode.
+
+        Returns:
+            The decoded string. Allocates.
+
+        Raises:
+            Error: If any id is outside 0 .. vocab_size-1.
+        """
         var out = String("")
         for i in range(len(ids)):
             var id = ids[i]
@@ -83,8 +118,14 @@ struct CharTokenizer(Copyable, Movable):
         return out^
 
     def save(self, path: String) raises:
-        # Write the vocab as CHARTOK v1: magic line, vocab size, then one decimal
-        # codepoint per line in id order. Overwrites `path`.
+        """Write the vocab as CHARTOK v1.
+
+        Format: magic line, vocab size, then one decimal codepoint per line in
+        id order.
+
+        Args:
+            path: Destination file path (overwritten).
+        """
         var text = (
             String(CHARTOK_MAGIC) + "\n" + String(self.vocab_size()) + "\n"
         )
@@ -95,8 +136,18 @@ struct CharTokenizer(Copyable, Movable):
 
     @staticmethod
     def load(path: String) raises -> CharTokenizer:
-        # Restore a tokenizer written by save. Raises on a bad magic line, a
-        # size/line-count mismatch, or an unparseable codepoint.
+        """Restore a tokenizer written by save.
+
+        Args:
+            path: File to read.
+
+        Returns:
+            The restored tokenizer. Allocates.
+
+        Raises:
+            Error: On a bad magic line, a size/line-count mismatch, or an
+                unparseable codepoint.
+        """
         var content = open(path, "r").read()
         var lines = content.split("\n")
         if len(lines) < 2 or String(lines[0]) != CHARTOK_MAGIC:

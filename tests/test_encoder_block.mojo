@@ -1,16 +1,4 @@
-# Tests for EncoderBlock — the pre-LN residual block (self-attention + MLP).
-#
-# The forward golden (Case ENC) comes from tests/oracles/encdec_reference.py and
-# is WIRING-SENSITIVE by construction: a post-LN block (ln(x + sublayer(x))) or a
-# LayerNorm applied to the residual sum produces different numbers and fails it.
-# A zeroed-sublayer block collapsing to the identity pins that the skip
-# connections carry x through (dropping a skip is the classic residual bug). The
-# finite-difference checks verify d_x and every parameter grad; the residual
-# backward rule d_x = d_out + branch_backward(d_out) is what they measure.
-#
-# Finite-difference convention (Part XI, inline): projected scalar loss
-# L = sum(cotangent (.) forward), central diff h = 1e-5, mixed tolerance
-# |analytic - numeric| <= 1e-7 + 1e-5 * |numeric|.
+"""Tests for EncoderBlock, the pre-LN residual block (self-attention + MLP). The forward golden (Case ENC, from tests/oracles/encdec_reference.py) is wiring-sensitive, a zeroed-sublayer block collapsing to the identity pins the skip connections, and finite-difference checks verify d_x and every parameter grad. Gradient checks project the scalar loss L = sum(cotangent (.) forward), central diff h = 1e-5, mixed absolute/relative tolerance 1e-7 + 1e-5*|n|."""
 
 from std.testing import assert_almost_equal, assert_true, TestSuite
 
@@ -367,8 +355,8 @@ def enc_output() raises -> Tensor2D:
 
 
 def enc_weights() raises -> List[Tensor2D]:
-    # [ln1_w, ln1_b, qkv_w, qkv_b, proj_w, proj_b, ln2_w, ln2_b, up_w, up_b,
-    # down_w, down_b] — the 12 parameter tensors of the block, in a fixed order.
+    """The 12 parameter tensors of the block in fixed order: ln1_w, ln1_b, qkv_w, qkv_b, proj_w, proj_b, ln2_w, ln2_b, up_w, up_b, down_w, down_b.
+    """
     var out = List[Tensor2D]()
     out.append(enc_ln1_w())
     out.append(enc_ln1_b())
@@ -386,8 +374,8 @@ def enc_weights() raises -> List[Tensor2D]:
 
 
 def build_enc_block(w: List[Tensor2D]) raises -> EncoderBlock:
-    # Assemble an EncoderBlock from the 12 weight tensors, copied in so a
-    # finite-difference loop can perturb any entry and rebuild.
+    """Assemble an EncoderBlock from the 12 weight tensors, copied in so a finite-difference loop can perturb any entry and rebuild.
+    """
     var ln1 = LayerNorm(Parameter(w[0].copy()), Parameter(w[1].copy()))
     var attn = MultiHeadAttention(
         Linear(Parameter(w[2].copy()), Parameter(w[3].copy())),
@@ -420,7 +408,8 @@ def projected(
 
 
 def test_forward_oracle() raises:
-    # Golden Case ENC: pre-LN encoder block, T=3, C=4, H=2, hidden=8, no mask.
+    """Forward matches golden Case ENC: pre-LN encoder block, T=3, C=4, H=2, hidden=8, no mask.
+    """
     var block = build_enc_block(enc_weights())
     var x = enc_x()
     var y = block.forward(x, no_mask(3, 3))
@@ -432,10 +421,11 @@ def test_forward_oracle() raises:
 
 
 def test_zeroed_sublayers_are_identity() raises:
+    """With both sublayers zeroed the block is the identity (out = x), isolating the skip connections.
+    """
     # With both sublayers' weights and biases zero, attn(ln1(x)) = 0 and
-    # mlp(ln2(a)) = 0, so out = x + 0 + 0 = x. This isolates the skip
-    # connections: if either residual dropped its skip term, the output would
-    # collapse toward zero instead of reproducing x.
+    # mlp(ln2(a)) = 0, so out = x + 0 + 0 = x. If either residual dropped its
+    # skip term, the output would collapse toward zero instead of reproducing x.
     var ln1 = LayerNorm.init_default(4)
     var attn = MultiHeadAttention(
         Linear(Parameter(zeros_2d(12, 4)), Parameter(zeros_2d(1, 12))),
@@ -456,6 +446,8 @@ def test_zeroed_sublayers_are_identity() raises:
 
 
 def test_d_x_matches_finite_difference() raises:
+    """The input gradient d_x matches a central finite difference of the projected loss.
+    """
     var block = build_enc_block(enc_weights())
     var x = enc_x()
     var cot = cotangent()
@@ -492,6 +484,8 @@ def finite_diff_param(
 
 
 def test_parameter_grads_match_finite_difference() raises:
+    """Every one of the 12 parameter grads matches a central finite difference.
+    """
     var w = enc_weights()
     var block = build_enc_block(w)
     var x = enc_x()

@@ -1,16 +1,13 @@
-# ijk vs ikj matmul timing harness.
-#
-# The two loop orders compute identical results (proven in tests/test_matmul.mojo),
-# so any timing difference is pure memory behavior: ijk's inner loop strides down
-# a column of b; ikj streams both operands contiguously. Expect the gap to widen
-# as the matrices outgrow L1 cache.
-#
-# This is outside the test gate — it measures, it does not assert. Run it (ideally
-# a release build) and record your own numbers:
-#     pixi run mojo run -I src benchmarks/bench_matmul.mojo
-#
-# The timer uses perf_counter_ns; the statistics (median, GFLOP/s) come from the
-# unit-tested helpers in llm.utils.timing.
+"""ijk vs ikj matmul timing harness.
+
+The two loop orders compute identical results, so any timing difference is pure
+memory behavior: ijk's inner loop strides down a column of b, while ikj streams
+both operands contiguously. The gap widens as the matrices outgrow L1 cache. It
+measures, it does not assert.
+
+Run (ideally a release build) and record your own numbers:
+    pixi run mojo run -I src benchmarks/bench_matmul.mojo
+"""
 
 from std.time import perf_counter_ns
 from std.collections import List
@@ -21,6 +18,14 @@ from llm.utils.timing import median_ns, gflops_matmul
 
 
 def bench_one(name: String, size: Int, warmup: Int, runs: Int) raises:
+    """Time a size x size matmul in loop order `name` and print median + GFLOP/s.
+
+    Args:
+        name: "ijk" selects matmul; anything else selects matmul_ikj.
+        size: Square matrix dimension.
+        warmup: Untimed warmup calls.
+        runs: Timed calls; the median is reported.
+    """
     var a = zeros_2d(size, size)
     var b = zeros_2d(size, size)
 
@@ -53,6 +58,7 @@ def bench_one(name: String, size: Int, warmup: Int, runs: Int) raises:
 
 
 def main() raises:
+    """Benchmark both loop orders across a range of matrix sizes."""
     var sizes = [64, 128, 256]
     for i in range(len(sizes)):
         var size = sizes[i]

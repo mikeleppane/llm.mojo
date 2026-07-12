@@ -1,15 +1,11 @@
-# Tests for the bigram training loop.
-#
-# The overfit criterion needs care: the bigram loss floor is not 0 in general —
-# if one token is followed by different tokens in the batch, no table can drive
-# loss to 0; the floor is the batch's conditional entropy H(next | current). So
-# the criterion splits honestly:
-#   - a deterministic-bigram batch (each token has exactly one successor) can
-#     reach ~0 loss;
-#   - on a real-text batch, training converges to the count model's loss on that
-#     same batch (the analytic optimum for loss + gradient + update together).
-# The tolerances below are tuned here and frozen; loosening one later is an
-# Ask-first change.
+"""Tests for the bigram training loop.
+
+The overfit floor is not 0 in general: if a token is followed by different tokens
+in the batch, no table can drive loss to 0; the floor is the batch's conditional
+entropy H(next | current). So the criterion splits: a deterministic-bigram batch
+(one successor per token) reaches ~0 loss, while a real-text batch converges to
+the count model's loss on that same batch (the analytic optimum).
+"""
 
 from std.testing import assert_almost_equal, assert_true, TestSuite
 
@@ -25,9 +21,9 @@ from llm.utils.random import Rng
 
 
 def _cyclic_batch(vocab_size: Int, repeats: Int) raises -> TokenBatch:
-    # A deterministic-bigram batch: the sequence 0,1,...,V-1,0,1,... so every
-    # token has exactly one successor. inputs[k] -> targets[k] is (k mod V) ->
-    # ((k+1) mod V). One row (B=1).
+    """A deterministic-bigram batch 0,1,...,V-1,0,1,... where every token has
+    exactly one successor: inputs[k] -> targets[k] is (k mod V) -> ((k+1) mod V).
+    One row (B=1)."""
     var inputs: List[Int] = []
     var targets: List[Int] = []
     var length = vocab_size * repeats
@@ -38,7 +34,8 @@ def _cyclic_batch(vocab_size: Int, repeats: Int) raises -> TokenBatch:
 
 
 def _prefix(text: String, n: Int) -> String:
-    # The first n codepoints of `text` as an owned String (String has no slice).
+    """The first n codepoints of `text` as an owned String (String has no slice).
+    """
     var out = String("")
     var count = 0
     for cp in text.codepoint_slices():
@@ -50,8 +47,8 @@ def _prefix(text: String, n: Int) -> String:
 
 
 def test_loss_decreases() raises:
-    # Full-batch GD with a small lr on a fixed synthetic batch is monotone in
-    # practice; assert non-increasing (with float slack) and a clear net drop.
+    """Full-batch GD on a fixed synthetic batch is non-increasing (with float slack)
+    with a clear net drop."""
     var rng = Rng(1)
     var model = BigramLM.random_init(5, 0.1, rng)
     var batch = _cyclic_batch(5, 4)
@@ -63,8 +60,8 @@ def test_loss_decreases() raises:
 
 
 def test_overfit_deterministic_batch() raises:
-    # Every token has exactly one successor, so the loss floor is 0. Enough GD
-    # steps drive it below 0.05.
+    """With one successor per token the loss floor is 0, so enough GD steps drive it
+    below 0.05."""
     var model = BigramLM(6)
     var batch = _cyclic_batch(6, 3)
     var history = train_bigram(model, batch, 2000, 1.0)
@@ -72,10 +69,8 @@ def test_overfit_deterministic_batch() raises:
 
 
 def test_converges_to_count_optimum() raises:
-    # On a real-text batch, the count model (tiny smoothing) is the analytic
-    # optimum of the bigram cross-entropy. A trained model started from zeros
-    # should reach that same loss within tolerance, exercising loss, gradient,
-    # and update at once.
+    """On a real-text batch, a model trained from zeros reaches the count model's
+    loss (the analytic optimum) within tolerance."""
     var text = load_text("data/tinyshakespeare/input.txt")
     var slice = _prefix(text, 200)
     var tok = CharTokenizer.from_text(slice)
@@ -103,8 +98,8 @@ def test_converges_to_count_optimum() raises:
 
 
 def test_training_deterministic() raises:
-    # Same init seed + same batch -> identical loss history, element for element
-    # (identical op order over Float64s).
+    """Same init seed and batch yield an identical loss history element for element.
+    """
     var batch = _cyclic_batch(4, 3)
     var ra = Rng(42)
     var rb = Rng(42)
@@ -117,9 +112,8 @@ def test_training_deterministic() raises:
 
 
 def test_loss_decreases_on_tinyshakespeare() raises:
-    # Roadmap integration criterion: char-tokenized real text, a few hundred
-    # steps, loss drops clearly and perplexity falls below the vocab size (a
-    # uniform model scores exactly V).
+    """On char-tokenized real text, a few hundred steps drop the loss clearly and
+    push perplexity below the vocab size (a uniform model scores exactly V)."""
     var text = load_text("data/tinyshakespeare/input.txt")
     var slice = _prefix(text, 4000)
     var tok = CharTokenizer.from_text(slice)

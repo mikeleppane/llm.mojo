@@ -1,28 +1,16 @@
-# The attention-weight-dropout train path — equivalence, placement, gradients.
-#
-# GPT-2 drops post-softmax attention weights before they weight the values:
-# output = dropout(W) @ v. This train path is ADDITIVE over the frozen core, so
-# the load-bearing checks are:
-#   1. with training = False (and with p = 0) it equals the proven cached path
-#      EXACTLY — outputs and all three input gradients;
-#   2. eval / p = 0 consume NO rng (twin-generator check);
-#   3. with dropout active (seeded) the dropped weight entries are 0 and the
-#      survivors are scaled by inv_keep = 1/(1-p);
-#   4. dq/dk/dv through the DROPPED core match a central finite difference, using
-#      the re-seeded-rng convention (below);
-#   5. MHA backward_train parameter grads match a finite difference and double
-#      exactly on a second backward.
-#
-# Re-seeded-rng finite-diff convention: with training = True the forward draws a
-# dropout mask, so a naive finite difference would compare two DIFFERENT masks.
-# The mask depends only on the draw sequence (one uniform per weight entry, fixed
-# row-major order), never on q/k/v, so re-seeding the rng identically before each
-# forward call replays the identical mask for x+h and x-h. The check then
-# differentiates the mask-fixed (linear-in-the-mask) map — which is exactly what
-# backward computes.
-#
-# Finite-difference convention: L = sum(cotangent ⊙ output); central diff
-# h = 1e-5; tolerance |analytic - numeric| <= 1e-7 + 1e-5 * |numeric|.
+"""Tests for the attention-weight-dropout train path: equivalence, placement, grads.
+
+GPT-2 drops post-softmax attention weights before they weight the values:
+output = dropout(W) @ v. Checks: eval / p=0 equal the cached path exactly and
+consume no rng; active dropout zeros dropped entries and scales survivors by
+1/(1-p); dq/dk/dv match a re-seeded-rng finite difference; MHA backward_train
+grads match a finite difference and double on a second backward.
+
+Re-seeded-rng convention: the mask depends only on the draw sequence, never on
+q/k/v, so re-seeding identically before each forward replays the same mask for
+x+h and x-h. Finite difference: L = sum(cotangent ⊙ output), central diff
+h = 1e-5, mixed tolerance |analytic - numeric| <= 1e-7 + 1e-5 * |numeric|.
+"""
 
 from std.testing import assert_almost_equal, assert_true, TestSuite
 
@@ -40,7 +28,8 @@ from llm.utils.random import Rng
 
 
 def assert_grad_close(analytic: Float64, numeric: Float64) raises:
-    # Shared mixed tolerance |a - n| <= 1e-7 + 1e-5 * |n|.
+    """Assert |analytic - numeric| <= 1e-7 + 1e-5 * |numeric| (mixed tolerance).
+    """
     assert_true(
         abs(analytic - numeric) <= 1e-7 + 1e-5 * abs(numeric),
         String("grad mismatch: analytic=")
@@ -51,12 +40,12 @@ def assert_grad_close(analytic: Float64, numeric: Float64) raises:
 
 
 def sample_q() raises -> Tensor2D:
-    # [T_q=3, D=3], asymmetric.
+    """Asymmetric q [T_q=3, D=3]."""
     return from_rows([[1.0, 0.0, -0.5], [0.2, 1.0, 0.3], [-0.7, 0.4, 1.1]])
 
 
 def sample_k() raises -> Tensor2D:
-    # [T_k=4, D=3], asymmetric.
+    """Asymmetric k [T_k=4, D=3]."""
     return from_rows(
         [
             [1.0, 0.0, 0.2],
@@ -68,7 +57,7 @@ def sample_k() raises -> Tensor2D:
 
 
 def sample_v() raises -> Tensor2D:
-    # [T_k=4, D_v=3], asymmetric.
+    """Asymmetric v [T_k=4, D_v=3]."""
     return from_rows(
         [
             [0.5, -0.2, 1.0],
@@ -80,7 +69,7 @@ def sample_v() raises -> Tensor2D:
 
 
 def cotangent() raises -> Tensor2D:
-    # Fixed asymmetric d_out [T_q=3, D_v=3].
+    """Fixed asymmetric d_out [T_q=3, D_v=3]."""
     return from_rows([[0.7, -0.3, 0.5], [0.2, 0.9, -0.4], [-0.6, 0.1, 0.8]])
 
 
@@ -93,8 +82,8 @@ def projected_output(output: Tensor2D, cot: Tensor2D) raises -> Float64:
 
 
 def test_eval_equals_cached_forward_and_grads() raises:
-    # training = False must degenerate to the proven cached path — output AND all
-    # three input gradients equal, to exact-math tolerance.
+    """With training=False the path degenerates to the cached path: output and all
+    three input grads equal."""
     var q = sample_q()
     var k = sample_k()
     var v = sample_v()
@@ -127,7 +116,7 @@ def test_eval_equals_cached_forward_and_grads() raises:
 
 
 def test_p_zero_equals_cached() raises:
-    # p = 0 with training = True is also the identity: no element dropped.
+    """With p=0 and training=True the path is the identity: nothing dropped."""
     var q = sample_q()
     var k = sample_k()
     var v = sample_v()
@@ -144,9 +133,8 @@ def test_p_zero_equals_cached() raises:
 
 
 def test_eval_and_p_zero_consume_no_rng() raises:
-    # Disabling dropout (training = False, or p = 0) must not advance the seeded
-    # generator downstream tests depend on. Twin-generator check: a reference rng
-    # left untouched must still be bit-identical to the one the train path saw.
+    """Disabling dropout (training=False or p=0) consumes no rng (twin-generator
+    check)."""
     var q = sample_q()
     var k = sample_k()
     var v = sample_v()
@@ -169,10 +157,8 @@ def test_eval_and_p_zero_consume_no_rng() raises:
 
 
 def test_dropout_placement_on_weights() raises:
-    # With dropout active, the cached mask/scale must describe a dropout on the
-    # post-softmax weights: inv_keep = 1/(1-p); dropped entries (mask 0) reconstruct
-    # to 0, survivors (mask 1) to weights * inv_keep. The reconstructed dropped
-    # weights are what the value matmul saw.
+    """Active dropout acts on the post-softmax weights: dropped entries -> 0,
+    survivors -> weights * inv_keep, with inv_keep = 1/(1-p)."""
     var q = sample_q()
     var k = sample_k()
     var v = sample_v()
@@ -206,9 +192,8 @@ def test_dropout_placement_on_weights() raises:
 
 
 def test_dropped_core_grads_finite_difference() raises:
-    # dq/dk/dv through the DROPPED core vs a central finite difference, re-seeding
-    # the rng identically before every forward so x+h and x-h share the mask. The
-    # analytic side comes from one seeded forward's cache.
+    """Gradients dq/dk/dv through the dropped core match a re-seeded-rng finite
+    difference."""
     var q = sample_q()
     var k = sample_k()
     var v = sample_v()
@@ -285,7 +270,7 @@ def test_dropped_core_grads_finite_difference() raises:
 
 
 def mha_input() raises -> Tensor2D:
-    # [T=4, C=6] asymmetric self-attention input.
+    """Asymmetric self-attention input [T=4, C=6]."""
     return from_rows(
         [
             [0.5, -0.2, 1.0, 0.3, -0.7, 0.1],
@@ -297,7 +282,7 @@ def mha_input() raises -> Tensor2D:
 
 
 def mha_cotangent() raises -> Tensor2D:
-    # Fixed asymmetric d_out [T=4, C=6].
+    """Fixed asymmetric d_out [T=4, C=6]."""
     return from_rows(
         [
             [0.3, -0.5, 0.7, -0.2, 0.4, 0.1],
@@ -309,8 +294,8 @@ def mha_cotangent() raises -> Tensor2D:
 
 
 def test_mha_train_equals_eval() raises:
-    # forward_cached_train / backward_train with training = False must equal the
-    # proven forward_cached / backward — output and the qkv/proj parameter grads.
+    """MHA train path with training=False equals the eval path: output and qkv/proj
+    grads."""
     var x = mha_input()
     var mask = no_mask(4, 4)
     var cot = mha_cotangent()
@@ -344,9 +329,8 @@ def test_mha_train_equals_eval() raises:
 
 
 def test_mha_backward_train_doubles_exactly() raises:
-    # Two backward_train passes without a zero_grad between them must double the
-    # parameter grads bit-for-bit — the accumulation contract weight tying relies
-    # on, checked here on the train path.
+    """Two backward_train passes without zero_grad double the parameter grads
+    bit-for-bit."""
     var x = mha_input()
     var mask = no_mask(4, 4)
     var cot = mha_cotangent()

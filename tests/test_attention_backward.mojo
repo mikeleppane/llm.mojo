@@ -1,18 +1,16 @@
-# Finite-difference and no-leak tests for attention backward.
-#
-# The core (scaled_dot_product_attention_backward) is checked for dq, dk, dv
-# under no_mask AND causal_mask, and with T_q != T_k (the cross-attention shape
-# Part XII will lean on). Masking adds a decisive analytic check: a key blocked
-# from every query must receive zero gradient — the softmax backward multiplies
-# by W, and a blocked key's weight is ~0, so no gradient leaks into it. MHA
-# (forward_cached/backward) is checked end to end: dx by finite difference and
-# the fused-qkv and proj parameter grads against a rebuilt forward.
-#
-# Finite-difference convention (D5, shared across this part's backward tests):
-#   L = sum(cotangent ⊙ output); central diff h = 1e-5; tolerance
-#   |analytic - numeric| <= 1e-7 + 1e-5 * |numeric|.
-# Shapes: core T=4, D=3; MHA T=4, C=6, H=2 (D=3) — big enough that an axis bug
-# cannot hide, small enough to eyeball.
+"""Finite-difference and no-leak tests for attention backward.
+
+The core (scaled_dot_product_attention_backward) is checked for dq/dk/dv under
+no_mask and causal_mask, and with T_q != T_k (the cross-attention shape). Masking
+adds a decisive check: a key blocked from every query must receive zero gradient,
+because the softmax backward multiplies by a ~0 weight. MHA (forward_cached/
+backward) is checked end to end: dx by finite difference and the fused-qkv and
+proj parameter grads against a rebuilt forward.
+
+Finite-difference convention: L = sum(cotangent ⊙ output); central diff h = 1e-5;
+mixed tolerance |analytic - numeric| <= 1e-7 + 1e-5 * |numeric|. Core T=4, D=3;
+MHA T=4, C=6, H=2 (D=3).
+"""
 
 from std.testing import assert_almost_equal, assert_true, TestSuite
 
@@ -30,7 +28,8 @@ from llm.utils.random import Rng
 
 
 def assert_grad_close(analytic: Float64, numeric: Float64) raises:
-    # D5 mixed tolerance |a - n| <= 1e-7 + 1e-5 * |n|.
+    """Assert |analytic - numeric| <= 1e-7 + 1e-5 * |numeric| (mixed tolerance).
+    """
     assert_true(
         abs(analytic - numeric) <= 1e-7 + 1e-5 * abs(numeric),
         String("grad mismatch: analytic=")
@@ -57,8 +56,8 @@ def core_loss(
 def check_core(
     q: Tensor2D, k: Tensor2D, v: Tensor2D, mask: Tensor2D, cot: Tensor2D
 ) raises:
-    # Finite-difference dq, dk, dv for the given q, k, v, mask against the
-    # analytic core backward.
+    """Finite-difference dq, dk, dv for the given q, k, v, mask vs the analytic
+    core backward."""
     var fwd = scaled_dot_product_attention_cached(q, k, v, mask)
     var grads = scaled_dot_product_attention_backward(fwd.cache, cot)
     var h = 1e-5
@@ -101,7 +100,7 @@ def check_core(
 
 
 def square_qkv() raises -> List[Tensor2D]:
-    # q, k, v each [T=4, D=3], asymmetric; returned as [q, k, v].
+    """q, k, v each [T=4, D=3], asymmetric; returned as [q, k, v]."""
     var q = from_rows(
         [[0.5, -1.0, 2.0], [-0.3, 0.8, -2.1], [1.1, 0.0, -0.7], [0.2, 1.3, 0.4]]
     )
@@ -119,25 +118,27 @@ def square_qkv() raises -> List[Tensor2D]:
 
 
 def square_cotangent() raises -> Tensor2D:
-    # Fixed asymmetric d_out [T=4, D_v=3].
+    """Fixed asymmetric d_out [T=4, D_v=3]."""
     return from_rows(
         [[0.7, -0.2, 1.3], [0.1, 0.9, -1.1], [-0.6, 0.3, 0.2], [0.4, -0.5, 0.8]]
     )
 
 
 def test_core_backward_no_mask() raises:
+    """Core dq/dk/dv match finite differences with no mask."""
     var qkv = square_qkv()
     check_core(qkv[0], qkv[1], qkv[2], no_mask(4, 4), square_cotangent())
 
 
 def test_core_backward_causal_mask() raises:
+    """Core dq/dk/dv match finite differences under a causal mask."""
     var qkv = square_qkv()
     check_core(qkv[0], qkv[1], qkv[2], causal_mask(4), square_cotangent())
 
 
 def test_core_backward_cross_shape() raises:
-    # T_q = 3, T_k = 5, D = 3, D_v = 4 — the cross-attention shape. q/k share D;
-    # v has its own width D_v and matches k's length T_k.
+    """Core grads match finite differences at the cross shape T_q=3, T_k=5, D=3,
+    D_v=4."""
     var q = from_rows([[0.5, -1.0, 2.0], [-0.3, 0.8, -2.1], [1.1, 0.0, -0.7]])
     var k = from_rows(
         [
@@ -164,10 +165,8 @@ def test_core_backward_cross_shape() raises:
 
 
 def test_no_gradient_leaks_into_blocked_key() raises:
-    # Block key 2 from every query with a padding mask. Its post-softmax weight
-    # column is ~0, so the softmax backward drives both its value gradient
-    # (dV = W^T dO) and its key gradient (through dScores = W ⊙ ...) to ~0 — no
-    # gradient leaks into a key nothing attends to.
+    """A key blocked from every query gets ~0 value and key gradient (its softmax
+    weight column is ~0)."""
     var qkv = square_qkv()
     var keep = [True, True, False, True]  # key 2 blocked
     var mask = key_padding_mask(keep, 4)  # [4, 4]
@@ -197,7 +196,7 @@ def build_mha(
 
 
 def mha_input() raises -> Tensor2D:
-    # [T=4, C=6], asymmetric.
+    """Asymmetric MHA input [T=4, C=6]."""
     return from_rows(
         [
             [1.0, 0.5, -1.0, 0.3, 0.8, -0.2],
@@ -220,8 +219,8 @@ def mha_cotangent() raises -> Tensor2D:
 
 
 def mha_base_weights() raises -> List[Tensor2D]:
-    # Deterministic seeded weights for C=6, H=2: [qkv_w [18,6], qkv_b [1,18],
-    # proj_w [6,6], proj_b [1,6]].
+    """Deterministic seeded weights for C=6, H=2: [qkv_w [18,6], qkv_b [1,18],
+    proj_w [6,6], proj_b [1,6]]."""
     var rng = Rng(23)
     var base = MultiHeadAttention.init_random(rng, 6, 2)
     var out = List[Tensor2D]()
@@ -239,6 +238,7 @@ def mha_projected(
 
 
 def test_mha_backward_d_x() raises:
+    """MHA d_x matches a central finite difference."""
     var w = mha_base_weights()
     var mha = build_mha(w[0], w[1], w[2], w[3], 2)
     var x = mha_input()
@@ -262,6 +262,7 @@ def test_mha_backward_d_x() raises:
 
 
 def test_mha_backward_parameter_grads() raises:
+    """MHA qkv/proj weight and bias grads match finite differences."""
     var w = mha_base_weights()
     var mha = build_mha(w[0], w[1], w[2], w[3], 2)
     var x = mha_input()

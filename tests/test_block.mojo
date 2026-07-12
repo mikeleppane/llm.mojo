@@ -1,23 +1,16 @@
-# Tests for TransformerBlock — GPT-2's pre-LN decoder block (self-attention).
-#
-# The forward golden comes from tests/oracles/gpt_reference.py and is
-# WIRING-SENSITIVE by construction: a post-LN block (ln(x + sublayer(x))) or a
-# LayerNorm applied to the residual sum produces different numbers and fails it.
-# Behavioral causality under causal_mask pins that a query never attends to the
-# future. The finite-difference checks verify d_x and every parameter grad (with
-# dropout off); the residual backward rule d_x = d_out + branch_backward(d_out)
-# is what they measure. Two placement checks pin GPT-2's dropout: the skip path
-# is never dropped (a zeroed-sublayer block reproduces x EXACTLY even under
-# training with high p), and the branch IS dropped (training output differs from
-# inference).
-#
-# Weights come from the shared `fill` pattern (identical to gpt_reference.py's
-# `fill`), so the goldens are an independent oracle: the reference math lives in
-# NumPy, the implementation in src/, and a mismatch indicts the wiring.
-#
-# Finite-difference convention (inline): projected scalar loss
-# L = sum(cotangent (.) forward), central diff h = 1e-5, mixed tolerance
-# |analytic - numeric| <= 1e-7 + 1e-5 * |numeric|.
+"""Tests for TransformerBlock, GPT-2's pre-LN decoder block (self-attention).
+
+The forward golden comes from tests/oracles/gpt_reference.py and is wiring-
+sensitive: a post-LN block or a LayerNorm on the residual sum fails it. Causality
+under a causal mask pins that a query never attends to the future. Finite-
+difference checks verify d_x and every parameter grad (dropout off). Two placement
+checks pin GPT-2's dropout: the skip path is never dropped (a zeroed-sublayer
+block reproduces x exactly even at high p), and the branch is dropped.
+
+Weights come from the shared `fill` pattern (identical to gpt_reference.py's), so
+the goldens are an independent NumPy oracle. Finite difference: L = sum(cotangent
+⊙ forward), central diff h = 1e-5, tolerance |a - n| <= 1e-7 + 1e-5 * |n|.
+"""
 
 from std.testing import assert_almost_equal, assert_true, TestSuite
 
@@ -33,10 +26,9 @@ from llm.utils.random import Rng
 
 
 def fill(rows: Int, cols: Int, base: Int) raises -> Tensor2D:
-    # The oracle's deterministic asymmetric pattern, entry at flat index k:
-    #   v = (((k + base) * 37 + 11) mod 101) / 100 - 0.5
-    # Integer modular arithmetic then /100 is exact in Float64, so this is
-    # bit-identical to gpt_reference.py's `fill`. MUST match it exactly.
+    """The oracle's deterministic asymmetric pattern, entry at flat index k:
+    v = (((k + base) * 37 + 11) mod 101) / 100 - 0.5. Exact in Float64, so it is
+    bit-identical to gpt_reference.py's `fill` and must match it exactly."""
     var t = zeros_2d(rows, cols)
     for r in range(rows):
         for c in range(cols):
@@ -57,9 +49,9 @@ def assert_grad_close(analytic: Float64, numeric: Float64) raises:
 
 # Config: C=4, H=2, d_hidden=6, T=3 — matches gpt_reference.py's block case.
 def block_weights() raises -> List[Tensor2D]:
-    # The 12 parameter tensors in fixed order, from `fill` with the oracle's
-    # bases: [ln1_w, ln1_b, qkv_w, qkv_b, proj_w, proj_b, ln2_w, ln2_b, up_w,
-    # up_b, down_w, down_b].
+    """The 12 parameter tensors in fixed order from `fill` (oracle bases): [ln1_w,
+    ln1_b, qkv_w, qkv_b, proj_w, proj_b, ln2_w, ln2_b, up_w, up_b, down_w, down_b].
+    """
     var out = List[Tensor2D]()
     out.append(fill(1, 4, 10))  # ln1_w
     out.append(fill(1, 4, 20))  # ln1_b
@@ -77,8 +69,8 @@ def block_weights() raises -> List[Tensor2D]:
 
 
 def build_block(w: List[Tensor2D]) raises -> TransformerBlock:
-    # Assemble a TransformerBlock from the 12 tensors, copied in so a
-    # finite-difference loop can perturb any entry and rebuild.
+    """Assemble a TransformerBlock from the 12 tensors, copied in so a
+    finite-difference loop can perturb any entry and rebuild."""
     var ln1 = LayerNorm(Parameter(w[0].copy()), Parameter(w[1].copy()))
     var attn = MultiHeadAttention(
         Linear(Parameter(w[2].copy()), Parameter(w[3].copy())),
@@ -94,12 +86,12 @@ def build_block(w: List[Tensor2D]) raises -> TransformerBlock:
 
 
 def block_x() raises -> Tensor2D:
-    # Block input [T=3, C=4] = fill(3, 4, 0), matching the oracle.
+    """Block input [T=3, C=4] = fill(3, 4, 0), matching the oracle."""
     return fill(3, 4, 0)
 
 
 def cotangent() raises -> Tensor2D:
-    # Fixed asymmetric d_out [T=3, C=4].
+    """Fixed asymmetric d_out [T=3, C=4]."""
     var t = zeros_2d(3, 4)
     var vals = [0.7, -0.2, 1.3, -0.5, 0.1, 0.9, -1.1, 0.4, -0.6, 0.3, 0.2, -0.8]
     for r in range(3):
@@ -120,8 +112,8 @@ def projected(
 
 
 def block_out_golden() raises -> Tensor2D:
-    # Frozen from tests/oracles/gpt_reference.py (`block_out`), the pre-LN block
-    # forward at C=4 H=2 d_hidden=6 T=3 under a causal mask.
+    """Frozen pre-LN block forward from gpt_reference.py (`block_out`) at C=4, H=2,
+    d_hidden=6, T=3 under a causal mask."""
     var t = zeros_2d(3, 4)
     var vals = [
         -0.4379580143353259,
@@ -144,7 +136,7 @@ def block_out_golden() raises -> Tensor2D:
 
 
 def test_forward_oracle_golden() raises:
-    # Pre-LN wiring-sensitive golden — post-LN or LN-on-the-sum fails it.
+    """Pre-LN wiring-sensitive golden: post-LN or LN-on-the-sum fails it."""
     var block = build_block(block_weights())
     var y = block.forward(block_x(), causal_mask(3))
     var expected = block_out_golden()
@@ -155,9 +147,9 @@ def test_forward_oracle_golden() raises:
 
 
 def test_causality_under_causal_mask() raises:
-    # Perturbing input row j must leave output rows < j unchanged: under the
-    # causal mask a query at position i attends only to positions <= i, and the
-    # MLP is position-wise, so output row i depends only on input rows 0..i.
+    """Perturbing input row j leaves output rows < j unchanged: under a causal mask
+    output row i depends only on input rows 0..i (attention <= i, MLP position-wise).
+    """
     var block = build_block(block_weights())
     var x = block_x()
     var base = block.forward(x, causal_mask(3))
@@ -180,8 +172,8 @@ def test_causality_under_causal_mask() raises:
 
 
 def test_forward_cached_eval_equals_forward() raises:
-    # forward_cached(training=False) must equal the inference forward exactly, and
-    # consume no rng.
+    """With training=False, forward_cached equals the inference forward exactly and
+    consumes no rng."""
     var block = build_block(block_weights())
     var x = block_x()
     var mask = causal_mask(3)
@@ -196,6 +188,7 @@ def test_forward_cached_eval_equals_forward() raises:
 
 
 def test_d_x_matches_finite_difference() raises:
+    """Block d_x matches a central finite difference."""
     var block = build_block(block_weights())
     var x = block_x()
     var cot = cotangent()
@@ -234,6 +227,7 @@ def finite_diff_param(
 
 
 def test_parameter_grads_match_finite_difference() raises:
+    """Every one of the 12 block parameter grads matches a finite difference."""
     var w = block_weights()
     var block = build_block(w)
     var x = block_x()
@@ -265,8 +259,8 @@ def test_parameter_grads_match_finite_difference() raises:
 
 
 def test_exact_accumulation_doubling() raises:
-    # Two backward passes without a zero_grad between them double the grads
-    # bit-for-bit (the tied-weight accumulation contract, at the block level).
+    """Two backward passes without zero_grad double the grads bit-for-bit (the
+    tied-weight accumulation contract at the block level)."""
     var block = build_block(block_weights())
     var x = block_x()
     var cot = cotangent()
@@ -293,9 +287,8 @@ def test_exact_accumulation_doubling() raises:
 
 
 def test_residual_dropout_skip_never_dropped() raises:
-    # Zeroed sublayers make both branches 0, so out = x + dropout(0) + dropout(0)
-    # = x EXACTLY — even under training with high p. If the skip path were dropped
-    # (or dropout applied to the residual sum), out would be a sparsified x.
+    """With zeroed sublayers, out = x + dropout(0) + dropout(0) = x exactly, even at
+    high p: the skip path is never dropped."""
     var ln1 = LayerNorm.init_default(4)
     var attn = MultiHeadAttention(
         Linear(Parameter(zeros_2d(12, 4)), Parameter(zeros_2d(1, 12))),
@@ -317,9 +310,8 @@ def test_residual_dropout_skip_never_dropped() raises:
 
 
 def test_residual_dropout_branch_is_dropped() raises:
-    # With real sublayers, training=True at high p must change the output relative
-    # to inference — the branch dropout is active (the complement of the skip
-    # test: dropout is not a silent no-op).
+    """With real sublayers, training=True at high p changes the output relative to
+    inference: the branch dropout is active."""
     var block = build_block(block_weights())
     var x = block_x()
     var mask = causal_mask(3)

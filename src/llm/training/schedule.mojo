@@ -1,21 +1,20 @@
-# Learning-rate schedule — linear warmup then cosine decay.
-#
-# The schedule GPT-family training uses: raise the learning rate linearly from 0
-# to the peak over `warmup_steps` (a cold start on a randomly-initialized model
-# would otherwise take a destructive first step), then decay it along a cosine
-# from the peak down to `min_lr` at `max_steps`, and hold `min_lr` after. Pure
-# arithmetic on the step index — no state, hand-computable at any step, which is
-# what lets a test freeze goldens for it.
-#
-#   step in [0, warmup_steps):   lr = peak * step / warmup_steps      (from 0)
-#   step == warmup_steps:        lr = peak                            (warmup end)
-#   step in (warmup, max_steps): lr = min_lr + (peak-min_lr)*cosine   (decaying)
-#   step >= max_steps:           lr = min_lr                          (clamped)
-#
-# with cosine = 0.5*(1 + cos(pi * progress)) and progress = (step - warmup) /
-# (max_steps - warmup) in [0, 1). progress = 0 gives cosine = 1 (lr = peak, so
-# the warmup boundary is continuous) and progress -> 1 gives cosine -> 0
-# (lr -> min_lr).
+"""Learning-rate schedule: linear warmup then cosine decay.
+
+Raise the learning rate linearly from 0 to the peak over `warmup_steps` (a cold
+start on a randomly-initialized model would otherwise take a destructive first
+step), then decay it along a cosine from the peak down to `min_lr` at
+`max_steps`, and hold `min_lr` after. Pure arithmetic on the step index, so it is
+hand-computable at any step:
+
+    step in [0, warmup_steps):   lr = peak * step / warmup_steps      (from 0)
+    step == warmup_steps:        lr = peak                            (warmup end)
+    step in (warmup, max_steps): lr = min_lr + (peak-min_lr)*cosine   (decaying)
+    step >= max_steps:           lr = min_lr                          (clamped)
+
+with cosine = 0.5*(1 + cos(pi * progress)) and progress = (step - warmup) /
+(max_steps - warmup) in [0, 1). progress = 0 gives cosine = 1 (lr = peak, so the
+warmup boundary is continuous) and progress -> 1 gives cosine -> 0 (lr -> min_lr).
+"""
 
 from std.math import cos, pi
 
@@ -27,14 +26,25 @@ def lr_at(
     max_steps: Int,
     min_lr: Float64,
 ) raises -> Float64:
-    # The scheduled learning rate at `step` (0-based). See the module header for
-    # the piecewise definition.
-    #   in/out: reads five scalars -> one Float64.
-    #   mutates: nothing.
-    #   allocates: nothing.
-    #   raises: on step < 0, warmup_steps < 0, or max_steps <= warmup_steps (the
-    #           cosine denominator max_steps - warmup_steps must be positive, and
-    #           warmup must finish before the run ends).
+    """Compute the scheduled learning rate at `step` (0-based).
+
+    See the module docstring for the piecewise definition. Allocates nothing.
+
+    Args:
+        step: The 0-based optimizer step index.
+        peak_lr: The peak learning rate reached at the end of warmup.
+        warmup_steps: Length of the linear warmup ramp.
+        max_steps: Step at which the cosine reaches min_lr.
+        min_lr: The cosine floor, held after max_steps.
+
+    Returns:
+        The learning rate for this step.
+
+    Raises:
+        Error: If step < 0, warmup_steps < 0, or max_steps <= warmup_steps (the
+            cosine denominator max_steps - warmup_steps must be positive, and
+            warmup must finish before the run ends).
+    """
     if step < 0:
         raise Error("lr_at: step must be >= 0, got " + String(step))
     if warmup_steps < 0:
@@ -71,26 +81,41 @@ def lr_at(
 
 @fieldwise_init
 struct ScheduleConfig(Copyable, Movable):
-    # The two schedule knobs not already in TrainingConfig: how long the linear
-    # warmup lasts and the floor the cosine decays to. The peak lr and the step
-    # budget live in TrainingConfig (learning_rate is the peak, max_steps the
-    # horizon), so validate() takes them to cross-check.
+    """The two schedule knobs not already in TrainingConfig.
+
+    Holds how long the linear warmup lasts and the floor the cosine decays to.
+    The peak lr and the step budget live in TrainingConfig (learning_rate is the
+    peak, max_steps the horizon), so validate() takes them to cross-check.
+    """
+
     var warmup_steps: Int  # linear-warmup length; 0 disables warmup
     var min_lr: Float64  # the cosine floor, held after max_steps
 
     @staticmethod
     def gpt2_defaults() -> ScheduleConfig:
-        # A conventional warmup + a small floor. warmup_steps here is a
-        # placeholder for tiny runs; real runs set it from the step budget (a
-        # common choice is a few percent of max_steps). min_lr = 0 lets the
-        # cosine reach zero; many recipes keep a small floor, so 0.0 is the
-        # neutral default a caller overrides. Non-raising (constant fields).
+        """Build a conventional warmup + small floor preset.
+
+        warmup_steps is a placeholder for tiny runs; real runs set it from the
+        step budget (a common choice is a few percent of max_steps). min_lr = 0
+        lets the cosine reach zero and is the neutral default a caller overrides.
+
+        Returns:
+            A ScheduleConfig with warmup 0 and floor 0.0.
+        """
         return ScheduleConfig(0, 0.0)
 
     def validate(self, max_steps: Int, peak_lr: Float64) raises:
-        # Raise on the first invalid field, naming it, cross-checked against the
-        # run's max_steps and peak lr: warmup must be non-negative and finish
-        # before the run ends, and the floor must sit in [0, peak].
+        """Validate the fields against the run's max_steps and peak lr.
+
+        Args:
+            max_steps: The run's step budget.
+            peak_lr: The run's peak learning rate.
+
+        Raises:
+            Error: On the first invalid field, naming it: warmup must be
+                non-negative and finish before the run ends, and the floor must
+                sit in [0, peak].
+        """
         if self.warmup_steps < 0:
             raise Error("ScheduleConfig: warmup_steps must be >= 0")
         if self.warmup_steps >= max_steps:

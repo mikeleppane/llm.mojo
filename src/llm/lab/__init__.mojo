@@ -1,3 +1,5 @@
+"""Quarantined encoder-decoder lab: cross-attention, blocks, and a toy model."""
+
 from .tasks import (
     SeqPair,
     bos_id,

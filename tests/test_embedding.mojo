@@ -1,10 +1,4 @@
-# Tests for Embedding — a lookup table gathering rows by integer id.
-#
-# One struct serves both token and positional embeddings (positional use just
-# passes ids = 0..T-1), so both are exercised here. The out-of-range guard is
-# non-negotiable: a stray id must raise, never read a neighbouring row or run off
-# the buffer. Both ends of the range (negative and >= V) are tested because they
-# are two different bounds.
+"""Tests for Embedding, the id-indexed lookup table used for token and positional embeddings, including the out-of-range guard at both bounds."""
 
 from std.testing import (
     assert_almost_equal,
@@ -20,7 +14,8 @@ from llm.utils.random import Rng
 
 
 def make_embedding() raises -> Embedding:
-    # A hand-built [V=4, C=3] table with distinct, recognizable rows.
+    """Build a hand-crafted [V=4, C=3] table with distinct, recognizable rows.
+    """
     var table = from_rows(
         [
             [0.0, 0.1, 0.2],
@@ -33,6 +28,7 @@ def make_embedding() raises -> Embedding:
 
 
 def test_gather_returns_table_rows() raises:
+    """Gathering a list of ids returns the corresponding table rows in order."""
     var emb = make_embedding()
     var out = emb.forward([2, 0, 3])  # [N=3, C=3]
     assert_equal(out.rows, 3)
@@ -47,6 +43,7 @@ def test_gather_returns_table_rows() raises:
 
 
 def test_repeated_ids_gather_same_row() raises:
+    """A repeated id gathers the identical row each time."""
     var emb = make_embedding()
     var out = emb.forward([1, 1])
     for j in range(3):
@@ -54,8 +51,7 @@ def test_repeated_ids_gather_same_row() raises:
 
 
 def test_positional_use_returns_leading_rows() raises:
-    # Positional embeddings are the same struct with ids = 0..T-1; the result is
-    # exactly the first T table rows in order.
+    """Positional use (ids = 0..T-1) returns the first T table rows in order."""
     var emb = make_embedding()
     var out = emb.forward([0, 1, 2])
     for i in range(3):
@@ -65,18 +61,23 @@ def test_positional_use_returns_leading_rows() raises:
 
 
 def test_negative_id_raises() raises:
+    """A negative id raises rather than reading out of bounds."""
     var emb = make_embedding()
     with assert_raises(contains="out of range"):
         _ = emb.forward([0, -1, 2])
 
 
 def test_id_at_or_past_vocab_raises() raises:
+    """An id equal to the vocab size raises rather than reading out of bounds.
+    """
     var emb = make_embedding()  # V = 4, so 4 is the first invalid id
     with assert_raises(contains="out of range"):
         _ = emb.forward([4])
 
 
 def test_init_random_shape_and_determinism() raises:
+    """Random init yields the requested [V, C] shape and is seed-deterministic.
+    """
     var rng_a = Rng(99)
     var rng_b = Rng(99)
     var ea = Embedding.init_random(rng_a, 5, 6)  # [V=5, C=6]

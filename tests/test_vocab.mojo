@@ -1,9 +1,10 @@
-# Tests for the toy whitespace Vocabulary.
-#
-# The headline is the encode/decode round trip: decode(encode(text)) == text for
-# space-separated input. The rest pin the small contracts — add is idempotent,
-# id_of/token_of are inverses, unknown lookups raise, and repeated words reuse
-# their id (the auto-add-once behavior).
+"""Tests for the toy whitespace Vocabulary.
+
+The headline is the encode/decode round trip: decode(encode(text)) == text for
+space-separated input. The rest pin the small contracts — add is idempotent,
+id_of/token_of are inverses, unknown lookups raise, and repeated words reuse their
+id (the auto-add-once behavior).
+"""
 
 from std.testing import assert_equal, assert_raises, TestSuite
 
@@ -11,6 +12,7 @@ from llm.vocab import Vocabulary, new_vocabulary
 
 
 def test_add_is_idempotent() raises:
+    """Adding the same token twice returns the same id and keeps size at 1."""
     var v = new_vocabulary()
     var a = v.add("hello")
     var b = v.add("hello")
@@ -19,6 +21,7 @@ def test_add_is_idempotent() raises:
 
 
 def test_id_token_round_trip() raises:
+    """`id_of` and token_of are inverses."""
     var v = new_vocabulary()
     var id = v.add("world")
     assert_equal(v.token_of(id), "world")
@@ -26,12 +29,14 @@ def test_id_token_round_trip() raises:
 
 
 def test_unknown_token_raises() raises:
+    """`id_of` raises on an unknown token."""
     var v = new_vocabulary()
     with assert_raises(contains="unknown token"):
         _ = v.id_of("missing")
 
 
 def test_token_of_out_of_range_raises() raises:
+    """`token_of` raises on an out-of-range id."""
     var v = new_vocabulary()
     _ = v.add("only")
     with assert_raises(contains="out of range"):
@@ -39,6 +44,7 @@ def test_token_of_out_of_range_raises() raises:
 
 
 def test_encode_decode_round_trip() raises:
+    """`decode`(encode(text)) round-trips space-separated input."""
     var v = new_vocabulary()
     var ids = v.encode("the cat sat")
     assert_equal(len(ids), 3)
@@ -46,6 +52,7 @@ def test_encode_decode_round_trip() raises:
 
 
 def test_encode_reuses_ids_for_repeated_words() raises:
+    """`encode` reuses a word's id on repeat and adds each new word once."""
     var v = new_vocabulary()
     var first = v.encode("the cat")
     var second = v.encode("the dog")

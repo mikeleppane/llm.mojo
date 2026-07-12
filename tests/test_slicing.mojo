@@ -1,10 +1,11 @@
-# Tests for the column slice/concat ops — the head split/merge primitives.
-#
-# slice_cols and concat_cols are the moving parts of multi-head attention's head
-# split (one [T, 3C] projection -> H contiguous [T, D] slices) and merge (H heads
-# -> [T, C]). A stride bug here would masquerade as a model bug three layers up,
-# so they get their own hand-checked and round-trip tests down at the tensor
-# layer. Values are exact integers cast to Float64 — no oracle needed.
+"""Tests for the column slice/concat ops — the head split/merge primitives.
+
+slice_cols and concat_cols drive multi-head attention's head split (one [T, 3C]
+projection -> H contiguous [T, D] slices) and merge (H heads -> [T, C]). A stride
+bug here would masquerade as a model bug three layers up, so they get their own
+hand-checked and round-trip tests at the tensor layer. Values are exact integers
+cast to Float64 — no oracle needed.
+"""
 
 from std.testing import (
     assert_almost_equal,
@@ -18,8 +19,9 @@ from llm.tensor.tensor2d import Tensor2D, from_rows
 
 
 def test_slice_cols_hand_checked() raises:
-    # [2, 4] -> columns [1, 3) -> [2, 2]. Pins that slice_cols reads the right
-    # columns from each row, not a transposed or offset window.
+    """`slice_cols` reads the right column window from each row."""
+    # [2, 4] -> columns [1, 3) -> [2, 2]. Pins that it isn't a transposed or offset
+    # window.
     var a = from_rows([[10.0, 11.0, 12.0, 13.0], [20.0, 21.0, 22.0, 23.0]])
     var s = slice_cols(a, 1, 3)  # [2, 4] -> [2, 2]
     assert_equal(s.rows, 2)
@@ -31,7 +33,7 @@ def test_slice_cols_hand_checked() raises:
 
 
 def test_slice_cols_full_width_is_identity() raises:
-    # Slicing the entire width [0, C) returns a copy equal to the input.
+    """Slicing the entire width [0, C) returns a copy equal to the input."""
     var a = from_rows([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
     var s = slice_cols(a, 0, 3)
     assert_equal(s.rows, 2)
@@ -42,9 +44,10 @@ def test_slice_cols_full_width_is_identity() raises:
 
 
 def test_split_then_concat_round_trips() raises:
-    # Split a [2, 6] tensor into three contiguous [2, 2] blocks, then concat them
-    # back: the identity. This is exactly the head split -> merge path MHA relies
-    # on, so a round-trip failure here is a head-plumbing bug caught early.
+    """Splitting a [2, 6] tensor into three [2, 2] blocks and concatenating is the identity.
+    """
+    # This is exactly the head split -> merge path MHA relies on, so a round-trip
+    # failure here is a head-plumbing bug caught early.
     var a = from_rows(
         [[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [7.0, 8.0, 9.0, 10.0, 11.0, 12.0]]
     )
@@ -61,8 +64,8 @@ def test_split_then_concat_round_trips() raises:
 
 
 def test_concat_cols_widths_add() raises:
-    # Concatenating [2,1], [2,3] -> [2,4], columns laid out left to right in
-    # part order.
+    """`concat_cols` lays parts out left to right, widths adding."""
+    # [2,1], [2,3] -> [2,4].
     var p0 = from_rows([[1.0], [4.0]])
     var p1 = from_rows([[2.0, 3.0, 9.0], [5.0, 6.0, 8.0]])
     var parts = List[Tensor2D]()
@@ -79,6 +82,7 @@ def test_concat_cols_widths_add() raises:
 
 
 def test_slice_cols_bad_range_raises() raises:
+    """`slice_cols` raises on inverted, negative, over-wide, or empty ranges."""
     var a = from_rows([[1.0, 2.0, 3.0, 4.0]])
     with assert_raises(contains="slice_cols"):
         _ = slice_cols(a, 3, 1)  # start >= end
@@ -91,8 +95,9 @@ def test_slice_cols_bad_range_raises() raises:
 
 
 def test_slice_rows_hand_checked() raises:
-    # [4, 2] -> rows [1, 3) -> [2, 2]. Pins that slice_rows reads the right rows
-    # with every column intact, not a transposed or offset window.
+    """`slice_rows` reads the right row window with every column intact."""
+    # [4, 2] -> rows [1, 3) -> [2, 2]. Pins that it isn't a transposed or offset
+    # window.
     var a = from_rows([[10.0, 11.0], [20.0, 21.0], [30.0, 31.0], [40.0, 41.0]])
     var s = slice_rows(a, 1, 3)  # [4, 2] -> [2, 2]
     assert_equal(s.rows, 2)
@@ -104,9 +109,10 @@ def test_slice_rows_hand_checked() raises:
 
 
 def test_slice_rows_prefix_is_cache_view() raises:
-    # The valid-region view the KV cache leans on: rows [0, t) of a taller
-    # buffer. A [5, 3] buffer sliced to its first 2 rows yields exactly those
-    # rows, decoupled from the dead rows below.
+    """`slice_rows` yields the valid-region prefix [0, t) the KV cache leans on.
+    """
+    # A [5, 3] buffer sliced to its first 2 rows yields exactly those rows,
+    # decoupled from the dead rows below.
     var a = from_rows(
         [
             [1.0, 2.0, 3.0],
@@ -125,7 +131,7 @@ def test_slice_rows_prefix_is_cache_view() raises:
 
 
 def test_slice_rows_full_height_is_identity() raises:
-    # Slicing the entire height [0, R) returns a copy equal to the input.
+    """Slicing the entire height [0, R) returns a copy equal to the input."""
     var a = from_rows([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
     var s = slice_rows(a, 0, 3)
     assert_equal(s.rows, 3)
@@ -136,6 +142,7 @@ def test_slice_rows_full_height_is_identity() raises:
 
 
 def test_slice_rows_bad_range_raises() raises:
+    """`slice_rows` raises on inverted, negative, over-tall, or empty ranges."""
     var a = from_rows([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]])
     with assert_raises(contains="slice_rows"):
         _ = slice_rows(a, 3, 1)  # start >= end
@@ -148,12 +155,14 @@ def test_slice_rows_bad_range_raises() raises:
 
 
 def test_concat_cols_empty_list_raises() raises:
+    """`concat_cols` raises on an empty part list."""
     var parts = List[Tensor2D]()
     with assert_raises(contains="concat_cols"):
         _ = concat_cols(parts)
 
 
 def test_concat_cols_row_mismatch_raises() raises:
+    """`concat_cols` raises when parts have differing row counts."""
     var parts = List[Tensor2D]()
     parts.append(from_rows([[1.0, 2.0], [3.0, 4.0]]))  # 2 rows
     parts.append(from_rows([[5.0, 6.0]]))  # 1 row, mismatch
@@ -162,12 +171,11 @@ def test_concat_cols_row_mismatch_raises() raises:
 
 
 def test_slice_concat_bit_exact_fractional() raises:
-    # slice_cols / slice_rows / concat_cols copy contiguous rows with memcpy — a
-    # Class A change that must reproduce the source BYTES exactly, not to a
-    # tolerance. Use fractional values that are not exactly representable in
-    # binary (0.1, 0.2, …) and assert bit-for-bit equality (assert_equal, no
-    # tolerance) between each output element and its source, so a byte-misaligned,
-    # short, or overlapping copy cannot hide under an almost-equal check.
+    """`slice_cols`/slice_rows/concat_cols reproduce source bytes bit-for-bit.
+    """
+    # These copy contiguous rows with memcpy, so use fractional values not exactly
+    # representable in binary (0.1, 0.2, …) and assert bit-for-bit equality, so a
+    # byte-misaligned, short, or overlapping copy can't hide under almost-equal.
     var src = from_rows(
         [
             [0.1, 0.2, 0.3, 0.4, 0.5],

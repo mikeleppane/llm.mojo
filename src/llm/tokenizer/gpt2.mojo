@@ -1,18 +1,16 @@
-# GPT-2 tokenizer: byte-level BPE with GPT-2's exact vocabulary and merges.
-#
-# This layer adds the two things the generic BPE core (bpe.mojo) leaves out, so
-# that encodings match OpenAI's GPT-2 byte-for-byte:
-#   1. A pre-tokenizer regex that splits text into words/numbers/punctuation runs
-#      before BPE ever sees it. GPT-2 uses a Unicode-property pattern the Python
-#      stdlib `re` cannot express, so this one step calls the `regex` package
-#      through Python interop — the one place this code reaches for Python.
-#   2. A loader that reads GPT-2's own vocab.json / merges.txt. Those files are
-#      written in GPT-2's byte<->unicode alphabet; the loader translates that
-#      alphabet back to raw bytes/ids exactly once, here, so the merge loop in
-#      bpe.mojo stays pure integer code.
-#
-# Everything after pre-tokenization is the Mojo BPE core; no Python touches the
-# token data.
+"""GPT-2 tokenizer: byte-level BPE with GPT-2's exact vocabulary and merges.
+
+Adds the two things the generic BPE core (bpe.mojo) leaves out, so encodings
+match OpenAI's GPT-2 byte-for-byte:
+
+1. A pre-tokenizer regex that splits text into word/number/punctuation runs
+   before BPE. GPT-2 uses a Unicode-property pattern the Python stdlib `re`
+   cannot express, so this one step calls the `regex` package through Python
+   interop — the one place this code reaches for Python.
+2. A loader that reads GPT-2's own vocab.json / merges.txt, translating their
+   byte<->unicode alphabet back to raw bytes/ids once here so the merge loop in
+   bpe.mojo stays pure integer code.
+"""
 
 from std.python import Python, PythonObject
 
@@ -32,14 +30,18 @@ comptime GPT2_PATTERN = (
 
 
 def gpt2_byte_to_unicode() -> List[Int]:
-    # GPT-2's reversible byte -> unicode-codepoint map, as a 256-entry table
-    # indexed by byte value. Printable byte values map to themselves; the rest
-    # map to codepoints starting at 256, so every byte is a single printable
-    # character. Pure Mojo; used only when loading. Allocates; does not raise.
-    #
-    # The printable ranges are ASCII '!'..'~' (33..126) plus Latin-1
-    # '\xa1'..'\xac' (161..172) and '\xae'..'\xff' (174..255) — exactly the set
-    # OpenAI's bytes_to_unicode() treats as already-printable.
+    """Build GPT-2's reversible byte -> unicode-codepoint map.
+
+    A 256-entry table indexed by byte value. Printable byte values map to
+    themselves; the rest map to codepoints starting at 256, so every byte
+    becomes a single printable character. The printable ranges are ASCII
+    '!'..'~' (33..126) plus Latin-1 '\\xa1'..'\\xac' (161..172) and
+    '\\xae'..'\\xff' (174..255) — exactly the set OpenAI's bytes_to_unicode()
+    treats as already-printable.
+
+    Returns:
+        The 256-entry table. Allocates; does not raise.
+    """
     var table = List[Int](length=256, fill=-1)
     for b in range(33, 126 + 1):
         table[b] = b
@@ -69,9 +71,20 @@ comptime BYTE_TO_UNICODE = gpt2_byte_to_unicode()
 def gpt2_pre_tokenize(
     pattern: PythonObject, text: String
 ) raises -> List[String]:
-    # The single Python-regex carve-out: run the compiled GPT-2 pattern over
-    # `text` and return the matched chunks as Mojo strings. From here on, no
-    # Python touches the data. Allocates; raises on any interop failure.
+    """Run the compiled GPT-2 pattern over `text`, returning the chunks.
+
+    The single Python-regex carve-out; from here on no Python touches the data.
+
+    Args:
+        pattern: The compiled GPT-2 pre-tokenizer regex.
+        text: The string to split.
+
+    Returns:
+        The matched chunks as Mojo strings. Allocates.
+
+    Raises:
+        Error: On any interop failure.
+    """
     var matches = pattern.findall(text)
     var chunks: List[String] = []
     for chunk in matches:
@@ -82,8 +95,18 @@ def gpt2_pre_tokenize(
 def _token_to_bytes(
     token: String, inverse: Dict[Int, Int]
 ) raises -> List[UInt8]:
-    # Translate a vocab token written in GPT-2's unicode alphabet back to the raw
-    # bytes it stands for, via the inverted byte<->unicode table.
+    """Translate a GPT-2 unicode-alphabet token back to raw bytes.
+
+    Args:
+        token: A vocab token written in GPT-2's unicode alphabet.
+        inverse: The inverted byte<->unicode table (codepoint -> byte value).
+
+    Returns:
+        The raw bytes the token stands for. Allocates.
+
+    Raises:
+        Error: If a token character is not in the table (corrupt vocab).
+    """
     var out: List[UInt8] = []
     for codepoint in token.codepoints():
         var code = Int(codepoint)
@@ -98,6 +121,8 @@ def _token_to_bytes(
 
 
 struct GPT2Tokenizer(Movable):
+    """GPT-2 tokenizer: a byte-level BPE core plus the pre-tokenizer regex."""
+
     var bpe: BPETokenizer  # the byte-level BPE core, loaded with GPT-2's tables
     var pattern: PythonObject  # compiled pre-tokenizer regex, built once
 
@@ -109,11 +134,22 @@ struct GPT2Tokenizer(Movable):
     def from_files(
         vocab_path: String, merges_path: String
     ) raises -> GPT2Tokenizer:
-        # Load GPT-2's vocab.json and merges.txt into a byte-level BPETokenizer.
-        # vocab.json is parsed with Python json (plumbing only); every token is
-        # translated from GPT-2's unicode alphabet into raw bytes here in Mojo.
-        # Raises with a clear message if the vocab is not exactly 50257 entries,
-        # a byte has no id, or a merge line does not resolve. Allocates.
+        """Load GPT-2's vocab.json and merges.txt into a BPETokenizer.
+
+        vocab.json is parsed with Python json (plumbing only); every token is
+        translated from GPT-2's unicode alphabet into raw bytes here in Mojo.
+
+        Args:
+            vocab_path: Path to GPT-2's vocab.json.
+            merges_path: Path to GPT-2's merges.txt.
+
+        Returns:
+            The loaded GPT-2 tokenizer. Allocates.
+
+        Raises:
+            Error: If the vocab is not exactly 50257 entries, a byte has no id,
+                or a merge line does not resolve.
+        """
         var json = Python.import_module("json")
         var builtins = Python.import_module("builtins")
         var regex = Python.import_module("regex")
@@ -227,9 +263,20 @@ struct GPT2Tokenizer(Movable):
         return self.bpe.vocab_size()
 
     def encode(self, text: String) raises -> List[Int]:
-        # Pre-tokenize with the GPT-2 regex, then run each chunk's UTF-8 bytes
-        # through the BPE merge loop and concatenate. No special-token handling
-        # (matches OpenAI's encoder.py). Allocates; raises on interop failure.
+        """Pre-tokenize with the GPT-2 regex, then BPE each chunk.
+
+        Runs each chunk's UTF-8 bytes through the merge loop and concatenates.
+        No special-token handling (matches OpenAI's encoder.py).
+
+        Args:
+            text: The string to encode.
+
+        Returns:
+            The token ids. Allocates.
+
+        Raises:
+            Error: On interop failure.
+        """
         var ids: List[Int] = []
         var chunks = gpt2_pre_tokenize(self.pattern, text)
         for chunk_index in range(len(chunks)):
@@ -243,5 +290,15 @@ struct GPT2Tokenizer(Movable):
         return ids^
 
     def decode(self, ids: List[Int]) raises -> String:
-        # Bytes -> lossy UTF-8, delegated to the BPE core.
+        """Decode ids to a string (bytes -> lossy UTF-8), via the BPE core.
+
+        Args:
+            ids: Token ids to decode.
+
+        Returns:
+            The decoded string. Allocates.
+
+        Raises:
+            Error: If an id is out of range.
+        """
         return self.bpe.decode(ids)

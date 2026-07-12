@@ -1,33 +1,30 @@
-# Training checkpoints — versioned, bit-exact, resume-proven.
-#
-# A checkpoint captures everything an interrupted training run needs to resume
-# IDENTICALLY: every model parameter, both AdamW moment lists (m, v), the step
-# counter t, and the training rng state. The gate that makes it real is the
-# resume equality test — train k steps, checkpoint, load into a fresh model,
-# train n-k more, and the parameters are BIT-IDENTICAL to an uninterrupted
-# n-step run. That only holds if the round-trip is exact, not
-# approximately-parsed, so every Float64 is stored as its raw IEEE-754 bit
-# pattern (a 16-digit hex UInt64) rather than a decimal that must be re-rounded.
-#
-# Format (text, version 1):
-#
-#   line 0:            "GPTCKPT 1"                 magic + version
-#   line 1:            N                            parameter tensor count
-#   line 2:            t                            step counter
-#   line 3:            <rng_state as 16 hex>        one UInt64, our LCG's state
-#   lines 4..4+N-1:    "rows cols"                  each parameter's shape, walk order
-#   then, in walk order and row-major within each tensor, one hex Float64 per line:
-#     parameters (N tensors), then m (N tensors), then v (N tensors).
-#
-# Load validates the header against the LIVE model's parameter_shapes() and
-# raises with a named mismatch — a checkpoint for a different architecture must
-# fail loudly, never read garbage. This is a TRAINING artifact; loading real
-# GPT-2 weights is a separate format and a separate part.
-#
-# Scope cut (documented): a shuffled-loader run's cursor is NOT checkpointed, so
-# resuming such a run mid-epoch is only approximate. The exactness gate runs on
-# the overfit-batch setup, where a fixed batch means there is no loader state to
-# lose.
+"""Training checkpoints: versioned, bit-exact, resumable.
+
+A checkpoint captures everything an interrupted training run needs to resume
+identically: every model parameter, both AdamW moment lists (m, v), the step
+counter t, and the training rng state. Exact resume requires an exact round-trip,
+so every Float64 is stored as its raw IEEE-754 bit pattern (a 16-digit hex
+UInt64) rather than a decimal that must be re-rounded.
+
+Format (text, version 1):
+
+    line 0:            "GPTCKPT 1"                 magic + version
+    line 1:            N                            parameter tensor count
+    line 2:            t                            step counter
+    line 3:            <rng_state as 16 hex>        one UInt64, the LCG's state
+    lines 4..4+N-1:    "rows cols"                  each parameter's shape, walk order
+    then, in walk order and row-major within each tensor, one hex Float64 per line:
+      parameters (N tensors), then m (N tensors), then v (N tensors).
+
+Load validates the header against the live model's parameter_shapes() and raises
+with a named mismatch: a checkpoint for a different architecture must fail
+loudly, never read garbage. This is a training artifact; loading real GPT-2
+weights is a separate format.
+
+A shuffled-loader run's cursor is not checkpointed, so resuming such a run
+mid-epoch is only approximate. A fixed (overfit-batch) run has no loader state to
+lose, so its resume is exact.
+"""
 
 from std.memory import bitcast
 
@@ -45,9 +42,13 @@ comptime WRITE_FLUSH_LINES = 8192
 
 @fieldwise_init
 struct CheckpointState(Copyable, Movable):
-    # What load_checkpoint returns alongside the parameters it restores into the
-    # model: the two AdamW moment lists (walk order), the step counter, and the
-    # rng state — the trainer-owned state the model itself does not hold.
+    """The trainer-owned state load_checkpoint returns.
+
+    Holds what the model itself does not: the two AdamW moment lists (walk
+    order), the step counter, and the rng state. The parameters themselves are
+    restored directly into the model.
+    """
+
     var m: List[Tensor2D]
     var v: List[Tensor2D]
     var t: Int
@@ -55,8 +56,16 @@ struct CheckpointState(Copyable, Movable):
 
 
 def u64_to_hex16(bits: UInt64) -> String:
-    # A UInt64 as exactly 16 lowercase hex digits, most-significant nibble first.
-    # Fixed width so every value occupies one full line; allocates the string.
+    """Format a UInt64 as exactly 16 lowercase hex digits, MSB nibble first.
+
+    Fixed width so every value occupies one full line.
+
+    Args:
+        bits: The value to format.
+
+    Returns:
+        A 16-character lowercase hex string. Allocates the string.
+    """
     var out = String("")
     for i in range(16):
         var shift = UInt64((15 - i) * 4)
@@ -66,8 +75,18 @@ def u64_to_hex16(bits: UInt64) -> String:
 
 
 def parse_hex_u64(s: String) raises -> UInt64:
-    # Parse exactly 16 lowercase hex digits back to a UInt64. Raises on a wrong
-    # length or a non-hex character (a corrupt or truncated line).
+    """Parse exactly 16 lowercase hex digits back to a UInt64.
+
+    Args:
+        s: A 16-character lowercase hex string.
+
+    Returns:
+        The decoded value.
+
+    Raises:
+        Error: On a wrong length or a non-hex character (a corrupt or truncated
+            line).
+    """
     if s.byte_length() != 16:
         raise Error(
             "checkpoint: expected 16 hex digits, got '"
@@ -89,18 +108,44 @@ def parse_hex_u64(s: String) raises -> UInt64:
 
 
 def f64_to_hex(x: Float64) -> String:
-    # A Float64 as its 16-hex-digit IEEE-754 bit pattern (exact, no rounding).
+    """Encode a Float64 as its 16-hex-digit IEEE-754 bit pattern (no rounding).
+
+    Args:
+        x: The value to encode.
+
+    Returns:
+        A 16-character lowercase hex string. Allocates the string.
+    """
     return u64_to_hex16(x.to_bits[DType.uint64]())
 
 
 def hex_to_f64(s: String) raises -> Float64:
-    # Reconstruct a Float64 from its 16-hex bit pattern. Raises on a bad line.
+    """Reconstruct a Float64 from its 16-hex bit pattern.
+
+    Args:
+        s: A 16-character lowercase hex string.
+
+    Returns:
+        The decoded Float64.
+
+    Raises:
+        Error: On a bad line (wrong length or non-hex character).
+    """
     return bitcast[DType.float64, 1](SIMD[DType.uint64, 1](parse_hex_u64(s)))[0]
 
 
 def _write_tensors(mut f: FileHandle, tensors: List[Tensor2D]) raises:
-    # Write every tensor's values as hex lines, row-major, walk order, flushing
-    # in bounded chunks so no single string grows to the whole file.
+    """Write every tensor's values as hex lines, row-major, in walk order.
+
+    Flushes in bounded chunks so no single string grows to the whole file.
+
+    Args:
+        f: The open file handle to append to.
+        tensors: The tensors to serialize, in walk order.
+
+    Raises:
+        Error: If a file write fails.
+    """
     var buf = String("")
     var pending = 0
     for k in range(len(tensors)):
@@ -119,9 +164,20 @@ def _write_tensors(mut f: FileHandle, tensors: List[Tensor2D]) raises:
 def _read_tensor(
     lines: List[String], mut cursor: Int, rows: Int, cols: Int
 ) raises -> Tensor2D:
-    # Read rows*cols hex lines starting at `cursor` into a fresh tensor (row
-    # major), advancing the cursor. Raises if the file runs out of lines (a
-    # truncated checkpoint).
+    """Read rows*cols hex lines from `cursor` into a fresh row-major tensor.
+
+    Args:
+        lines: The file's lines.
+        cursor: Index of the first value line; advanced past the tensor.
+        rows: Number of rows to read.
+        cols: Number of columns to read.
+
+    Returns:
+        The [rows, cols] tensor. Allocates it; advances cursor.
+
+    Raises:
+        Error: If the file runs out of lines (a truncated checkpoint).
+    """
     var out = zeros_2d(rows, cols)
     for i in range(rows):
         for j in range(cols):
@@ -143,12 +199,26 @@ def save_checkpoint(
     t: Int,
     rng_state: UInt64,
 ) raises:
-    # Write a complete resume checkpoint. Reads gpt (via export_parameters /
-    # parameter_shapes) and the trainer-owned m, v, t, rng_state. Raises if m or v
-    # do not have one tensor per parameter, or if any moment tensor's shape does
-    # not match its parameter — either would write a file whose payload no longer
-    # lines up with the header shapes, so load would silently shift values between
-    # tensors. Overwrites `path`; allocates the export copies and the write buffers.
+    """Write a complete resume checkpoint, overwriting `path`.
+
+    Reads gpt (via export_parameters / parameter_shapes) and the trainer-owned m,
+    v, t, rng_state. Validates that the moment lists line up with the parameters,
+    because a mismatch would write a payload that no longer matches the header
+    shapes and load would silently shift values between tensors.
+
+    Args:
+        path: Destination file, overwritten.
+        gpt: The model whose parameters are serialized.
+        m: AdamW first moments, one tensor per parameter in walk order.
+        v: AdamW second moments, one tensor per parameter in walk order.
+        t: The optimizer step counter.
+        rng_state: The training rng state.
+
+    Raises:
+        Error: If m or v do not have one tensor per parameter, or if any moment
+            tensor's shape does not match its parameter. Allocates the export
+            copies and the write buffers.
+    """
     var shapes = gpt.parameter_shapes()
     var params = gpt.export_parameters()
     var n = len(shapes)
@@ -192,12 +262,22 @@ def save_checkpoint(
 
 
 def load_checkpoint(path: String, mut gpt: GPT) raises -> CheckpointState:
-    # Restore a checkpoint into `gpt` (in place) and return the trainer-owned
-    # state (m, v, t, rng_state). Validates the header against the live model's
-    # parameter_shapes() and raises with a NAMED mismatch on a bad magic, an
-    # unsupported version, a parameter-count or shape disagreement, or a truncated
-    # file — never reads garbage. Mutates gpt's parameter values; allocates the
-    # returned state.
+    """Restore a checkpoint into `gpt` in place and return the trainer state.
+
+    Validates the header against the live model's parameter_shapes() so it never
+    reads garbage.
+
+    Args:
+        path: The checkpoint file to read.
+        gpt: The model to restore parameter values into (mutated in place).
+
+    Returns:
+        The trainer-owned state (m, v, t, rng_state). Allocates it.
+
+    Raises:
+        Error: With a named mismatch on a bad magic, an unsupported version, a
+            parameter-count or shape disagreement, or a truncated file.
+    """
     var content = open(path, "r").read()
     # split() yields slices into `content`; own them as Strings so the helpers
     # take a plain List[String] and the values outlive `content`.

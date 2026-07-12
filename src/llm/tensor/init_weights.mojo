@@ -1,14 +1,9 @@
-# Deterministic weight initialization.
-#
-# Xavier/Glorot initialization scales the standard deviation by layer width so
-# activations and gradients neither explode nor vanish across layers:
-#
-#     std = sqrt(2 / (fan_in + fan_out))
-#
-# This lives in the tensor layer, not utils, on purpose: it needs Tensor2D, and
-# the dependency graph runs utils -> tensor. A utils module importing Tensor2D
-# would point up the graph (a cycle risk); the RNG it draws from stays in utils,
-# which tensor is free to import downward.
+"""Deterministic weight initialization.
+
+Xavier/Glorot initialization scales the standard deviation by layer width so
+activations and gradients neither explode nor vanish: std = sqrt(2 / (fan_in +
+fan_out)). It lives in the tensor layer, not utils, because it needs Tensor2D.
+"""
 
 from std.math import sqrt
 
@@ -17,11 +12,20 @@ from llm.utils.random import Rng
 
 
 def xavier_2d(mut rng: Rng, fan_in: Int, fan_out: Int) raises -> Tensor2D:
-    # A [fan_out, fan_in] weight tensor (the [out, in] convention) filled with
-    # Xavier-scaled normal draws from `rng`. Mutates rng (advances its state);
-    # allocates the result. Deterministic given the generator's state. Raises on
-    # non-positive fan sizes, which would divide by zero in the scale or produce
-    # a degenerate shape.
+    """Draw a Xavier-initialized weight tensor from `rng`.
+
+    Args:
+        rng: Generator, advanced as draws are taken.
+        fan_in: Input width.
+        fan_out: Output width.
+
+    Returns:
+        A [fan_out, fan_in] tensor (the [out, in] convention) of Xavier-scaled
+        normal draws. Allocates; deterministic given the generator's state.
+
+    Raises:
+        Error: If fan_in or fan_out is not positive.
+    """
     if fan_in <= 0 or fan_out <= 0:
         raise Error(
             "xavier_2d: fan_in and fan_out must be positive, got "

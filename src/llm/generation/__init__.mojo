@@ -1,3 +1,5 @@
+"""Token sampling and autoregressive generation."""
+
 from .sampler import (
     SamplerConfig,
     filter_top_k,

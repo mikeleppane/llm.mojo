@@ -1,17 +1,11 @@
-# Dropout — inverted dropout with train/eval as an argument, not stored state.
-#
-# In training, each element is independently kept with probability 1 - p and, if
-# kept, scaled by 1/(1-p); dropped elements become 0. The scaling ("inverted"
-# dropout) keeps the expected value of each element unchanged, so evaluation needs
-# no compensating rescale — it is a plain identity.
-#
-# The mode is a *call-site argument*, not a field, so train vs eval is explicit
-# wherever dropout runs. Two rng invariants matter enough to be tested: eval mode
-# (and p == 0) consume no draws, so disabling dropout never perturbs the seeded
-# generator that downstream tests depend on; and training draws exactly one
-# uniform per element in a fixed order, so a seed replays the same mask.
-#
-# Stateless and parameter-free, so it is a free function, not a struct.
+"""Dropout — inverted dropout with train/eval as an argument, not stored state.
+
+In training each element is kept with probability 1 - p and, if kept, scaled by
+1/(1-p); dropped elements become 0. The scaling keeps each element's expected
+value unchanged, so evaluation is a plain identity. Eval mode (and p == 0) draw
+no random numbers, so disabling dropout never perturbs the seeded generator.
+Stateless free functions, not a struct.
+"""
 
 from llm.tensor.tensor2d import Tensor2D, ones_2d, zeros_2d
 from llm.utils.random import Rng
@@ -19,14 +13,14 @@ from llm.utils.random import Rng
 
 @fieldwise_init
 struct DropoutResult(Copyable, Movable):
-    # dropout_cached's output plus what backward needs: the kept-mask and the
-    # scale the forward actually applied. mask[i, j] is 1.0 for a kept element and
-    # 0.0 for a dropped one — the SAME mask the forward used. inv_keep is the
-    # scale the forward applied (1/(1-p) in training, 1.0 in eval / p == 0), cached
-    # so backward reproduces the exact forward map rather than recomputing a scale
-    # from a p the caller might get wrong. In eval mode (or p == 0) nothing is
-    # dropped: the mask is all ones and inv_keep is 1.0, so the layer — and its
-    # backward — is the identity.
+    """Output of dropout_cached plus what backward needs: the mask and scale.
+
+    `mask[i, j]` is 1.0 for a kept element and 0.0 for a dropped one — the same
+    mask the forward used. `inv_keep` is the scale the forward applied (1/(1-p)
+    in training, 1.0 in eval / p == 0), cached so backward reproduces the exact
+    forward map rather than recomputing it from p.
+    """
+
     var output: Tensor2D  # [N, C]
     var mask: Tensor2D  # [N, C], entries in {0, 1}
     var inv_keep: Float64  # applied scale: 1/(1-p) training, 1.0 eval / p == 0
@@ -35,14 +29,23 @@ struct DropoutResult(Copyable, Movable):
 def dropout(
     x: Tensor2D, p: Float64, training: Bool, mut rng: Rng
 ) raises -> Tensor2D:
-    # [N, C] -> [N, C]. Reads x; allocates the result. Mutates rng only in the
-    # training/p>0 branch (one uniform draw per element). Raises if p is outside
-    # [0, 1) — p = 1 would drop everything and divide by zero in the scale.
-    #
-    # The guard is written as "not in range" rather than "p < 0 or p >= 1" so a
-    # NaN p raises too: every comparison with NaN is false, so `p >= 0.0 and
-    # p < 1.0` is false for NaN and the negation fires. A NaN slipping through
-    # would zero the whole output while still consuming rng draws.
+    """Apply inverted dropout.
+
+    Args:
+        x: Input, shape [N, C].
+        p: Drop probability in [0, 1).
+        training: If false (or p == 0), returns an identity copy without drawing.
+        rng: Random generator, advanced one draw per element in the training branch.
+
+    Returns:
+        Output, shape [N, C]. Allocates; reads x only.
+
+    Raises:
+        Error: If p is outside [0, 1) (a NaN p raises too; p = 1 would divide by
+            zero in the scale).
+    """
+    # "Not in range" rather than "p < 0 or p >= 1" so a NaN p raises too: every
+    # comparison with NaN is false, so the negation fires.
     if not (p >= 0.0 and p < 1.0):
         raise Error("dropout: p must be in [0, 1), got " + String(p))
     # Eval mode, or p == 0, returns an identity copy WITHOUT drawing — disabling
@@ -68,15 +71,24 @@ def dropout(
 def dropout_cached(
     x: Tensor2D, p: Float64, training: Bool, mut rng: Rng
 ) raises -> DropoutResult:
-    # Same semantics as dropout, additionally returning the kept-mask so backward
-    # can reuse it. In training with p > 0, each element is kept with probability
-    # 1 - p (one uniform draw per element, in the same fixed row-major order
-    # dropout uses) and scaled by 1/(1-p); dropped elements are 0. Eval mode (or
-    # p == 0) returns an identity copy and an all-ones mask WITHOUT drawing —
-    # disabling dropout must not perturb the seeded generator. Reads x; allocates
-    # the output and mask; mutates rng only in the training/p>0 branch; raises if
-    # p is outside [0, 1) (the not-in-range guard rejects NaN too, matching
-    # dropout).
+    """Apply inverted dropout, also returning the kept-mask so backward can reuse it.
+
+    Same semantics as dropout, drawing in the same fixed row-major order. Eval
+    mode (or p == 0) returns an identity copy and an all-ones mask without drawing.
+
+    Args:
+        x: Input, shape [N, C].
+        p: Drop probability in [0, 1).
+        training: If false (or p == 0), returns an identity result without drawing.
+        rng: Random generator, advanced one draw per element in the training branch.
+
+    Returns:
+        A DropoutResult with output [N, C], mask [N, C], and applied scale.
+        Allocates the output and mask; reads x only.
+
+    Raises:
+        Error: If p is outside [0, 1) (rejects NaN too, matching dropout).
+    """
     if not (p >= 0.0 and p < 1.0):
         raise Error("dropout_cached: p must be in [0, 1), got " + String(p))
     if not training or p <= 0.0:
@@ -100,19 +112,24 @@ def dropout_cached(
 def dropout_backward(
     mask: Tensor2D, inv_keep: Float64, d_out: Tensor2D
 ) raises -> Tensor2D:
-    # VJP of the mask-fixed dropout forward. The forward is a diagonal linear map
-    #     output = (mask * inv_keep) ⊙ x,
-    # so its transpose is the same diagonal:
-    #     dL/dx = (mask * inv_keep) ⊙ d_out.
-    # Both `mask` and `inv_keep` come straight from the DropoutResult the paired
-    # forward produced — NOT recomputed from p. That is what keeps forward and
-    # backward exact inverses in every mode: in eval (or p == 0) the forward is
-    # the identity, its cached mask is all ones AND its cached inv_keep is 1.0, so
-    # this backward is the identity too. Recomputing inv_keep from the forward's p
-    # would instead scale an identity forward by 1/(1-p) — a factor-of-(1-p) bug.
-    # Reusing the forward's mask is likewise the point: a fresh draw would scale a
-    # different set of elements than the forward kept. Shapes [N, C] and [N, C] ->
-    # [N, C]. Reads its args; allocates the result; raises on a shape mismatch.
+    """VJP of the mask-fixed dropout forward: `(mask * inv_keep) * d_out`.
+
+    The forward is a diagonal linear map `output = (mask * inv_keep) * x`, so its
+    transpose is the same diagonal. Both `mask` and `inv_keep` must come straight
+    from the paired forward's DropoutResult, not recomputed from p, so forward and
+    backward stay exact inverses in every mode.
+
+    Args:
+        mask: The forward's kept-mask, shape [N, C], entries in {0, 1}.
+        inv_keep: The scale the forward applied.
+        d_out: Upstream gradient, shape [N, C].
+
+    Returns:
+        Gradient dL/dx, shape [N, C]. Allocates; reads its args.
+
+    Raises:
+        Error: If mask and d_out shapes do not match.
+    """
     if mask.rows != d_out.rows or mask.cols != d_out.cols:
         raise Error("dropout_backward shape mismatch")
     var out = zeros_2d(mask.rows, mask.cols)

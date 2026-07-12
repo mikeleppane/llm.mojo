@@ -1,14 +1,10 @@
-# Finite-difference tests for MLP.backward — chain-rule wiring end to end.
-#
-# The MLP is down(gelu(up(x))): composition is where chain-rule bugs live (a
-# transposed factor, a stage backward fed the wrong cache, gelu applied to the
-# post- instead of pre-activation). So every gradient the composition produces is
-# checked against a central finite difference of the whole MLP forward: dx and
-# all four parameter grads (up weight/bias, down weight/bias).
-#
-# Finite-difference convention (D5, shared across this part's backward tests):
-#   L = sum(cotangent ⊙ y); central diff h = 1e-5; tolerance
-#   |analytic - numeric| <= 1e-7 + 1e-5 * |numeric|.
+"""Finite-difference tests for MLP.backward — chain-rule wiring end to end.
+
+The MLP is down(gelu(up(x))): composition is where chain-rule bugs live, so
+every gradient (dx and all four parameter grads) is checked against a central
+finite difference of the whole MLP forward. Convention: L = sum(cotangent ⊙ y),
+central diff h = 1e-5, tolerance |analytic - numeric| <= 1e-7 + 1e-5 * |numeric|.
+"""
 
 from std.testing import assert_true, TestSuite
 
@@ -20,7 +16,15 @@ from llm.utils.random import Rng
 
 
 def assert_grad_close(analytic: Float64, numeric: Float64) raises:
-    # D5 mixed tolerance |a - n| <= 1e-7 + 1e-5 * |n|.
+    """Assert |analytic - numeric| <= 1e-7 + 1e-5 * |numeric|.
+
+    Args:
+        analytic: Backprop gradient.
+        numeric: Finite-difference estimate.
+
+    Raises:
+        Error: If the two are not within the mixed tolerance.
+    """
     assert_true(
         abs(analytic - numeric) <= 1e-7 + 1e-5 * abs(numeric),
         String("grad mismatch: analytic=")
@@ -33,28 +37,40 @@ def assert_grad_close(analytic: Float64, numeric: Float64) raises:
 def build_mlp(
     uw: Tensor2D, ub: Tensor2D, dw: Tensor2D, db: Tensor2D
 ) raises -> MLP:
-    # Assemble an MLP from four weight tensors (copied in) so a finite-difference
-    # loop can perturb any one entry and rebuild.
+    """Assemble an MLP from four weight tensors (copied in).
+
+    Copying lets a finite-difference loop perturb one entry and rebuild.
+
+    Args:
+        uw: Up weight.
+        ub: Up bias.
+        dw: Down weight.
+        db: Down bias.
+
+    Returns:
+        A fresh MLP. Allocates; does not mutate the inputs.
+    """
     var up = Linear(Parameter(uw.copy()), Parameter(ub.copy()))
     var down = Linear(Parameter(dw.copy()), Parameter(db.copy()))
     return MLP(up^, down^)
 
 
 def sample_input() raises -> Tensor2D:
-    # [N=3, C=4].
+    """Fixed [N=3, C=4] input tensor."""
     return from_rows(
         [[1.0, 0.5, -1.0, 0.3], [0.2, -0.4, 0.9, -1.1], [-0.7, 1.2, 0.1, 0.6]]
     )
 
 
 def cotangent() raises -> Tensor2D:
-    # Fixed asymmetric d_out [N=3, C=4].
+    """Fixed asymmetric d_out [N=3, C=4]."""
     return from_rows(
         [[0.7, -0.2, 1.3, -0.5], [0.1, 0.9, -1.1, 0.4], [-0.6, 0.3, 0.2, -0.8]]
     )
 
 
 def projected(mlp: MLP, x: Tensor2D, cot: Tensor2D) raises -> Float64:
+    """Scalar projected loss sum(cot ⊙ mlp.forward(x))."""
     var y = mlp.forward(x)
     var total = 0.0
     for i in range(y.rows):
@@ -74,8 +90,23 @@ def finite_diff_param(
     x: Tensor2D,
     cot: Tensor2D,
 ) raises -> Float64:
-    # Central difference of the projected loss wrt one parameter entry. `which`
-    # selects the tensor: 0=up weight, 1=up bias, 2=down weight, 3=down bias.
+    """Central difference of the projected loss wrt one parameter entry.
+
+    Args:
+        uw: Up weight.
+        ub: Up bias.
+        dw: Down weight.
+        db: Down bias.
+        which: Selects the tensor — 0=up weight, 1=up bias, 2=down weight,
+            3=down bias.
+        r: Row of the perturbed entry.
+        c: Column of the perturbed entry.
+        x: Input tensor.
+        cot: Cotangent.
+
+    Returns:
+        The numeric gradient estimate.
+    """
     var h = 1e-5
     var uw_p = uw.copy()
     var ub_p = ub.copy()
@@ -103,7 +134,11 @@ def finite_diff_param(
 
 
 def base_weights() raises -> List[Tensor2D]:
-    # Deterministic seeded weights for C=4, hidden=6; returned as [uw, ub, dw, db].
+    """Deterministic seeded weights for C=4, hidden=6.
+
+    Returns:
+        The list [up weight, up bias, down weight, down bias].
+    """
     var rng = Rng(11)
     var base = MLP.init_random(rng, 4, 6)
     var out = List[Tensor2D]()
@@ -115,6 +150,7 @@ def base_weights() raises -> List[Tensor2D]:
 
 
 def test_d_x_matches_finite_difference() raises:
+    """MLP.backward's dx matches a central finite difference of the forward."""
     var w = base_weights()
     var mlp = build_mlp(w[0], w[1], w[2], w[3])
     var x = sample_input()
@@ -136,6 +172,7 @@ def test_d_x_matches_finite_difference() raises:
 
 
 def test_parameter_grads_match_finite_difference() raises:
+    """All four MLP parameter grads match central finite differences."""
     var w = base_weights()
     var mlp = build_mlp(w[0], w[1], w[2], w[3])
     var x = sample_input()
