@@ -177,14 +177,16 @@ def test_matmul_transpose_b_hand_computed() raises:
 
 
 def _assert_close_rel(got: Float64, want: Float64, tag: String) raises:
-    # |got - want| <= atol + rtol*|want|, the numpy-style mixed bound. rtol 1e-12
-    # is the Class B contract: matmul_transpose_b's SIMD dot reassociates the
-    # k-sum, so it agrees with the scalar spelling only to ~k*eps (~7e-13 at the
-    # largest real k=3072), not bit-for-bit. atol 1e-9 floors near-zero cells
-    # where a cancelling dot has no meaningful relative scale — still six orders
-    # tighter than any model golden, so a real tail/reorder bug (errors far larger
-    # than 1e-9) is caught, while legitimate reassociation passes.
-    var tol = 1e-9 + 1e-12 * abs(want)
+    # Genuinely 1e-12 RELATIVE: |got - want| <= 1e-12*|want| + 1e-13. The rtol
+    # term is the Class B contract — matmul_transpose_b's SIMD dot reassociates
+    # the k-sum, so it agrees with the scalar spelling only to ~k*eps. Measured
+    # max relative error over these shapes is ~2.3e-13 at k=4 and <1e-13 at
+    # k=768/3072, so 1e-12 relative is rigorous with ~4x margin and NOT dominated
+    # by the floor. The 1e-13 atol only catches an exact-zero want (never produced
+    # by these seeded dots); it sits below the measured absolute error, so the
+    # relative term governs every real cell. A real tail/reorder bug (errors
+    # orders larger) is caught; legitimate reassociation passes.
+    var tol = 1e-12 * abs(want) + 1e-13
     if abs(got - want) > tol:
         raise Error(
             "not close ("
@@ -263,6 +265,39 @@ def test_matmul_transpose_b_threaded_is_deterministic() raises:
             assert_equal(c1[i, j], c2[i, j])
 
 
+def test_matmul_transpose_b_threaded_matches_serial() raises:
+    # The threading claim is Class A: the parallel path must be bit-identical to
+    # the single-threaded _simd_dot, not merely deterministic. matvec(b, a.row(i))
+    # dots each row of b against a[i, :] through the SAME _simd_dot, serially — so
+    # matmul_transpose_b(a, b)[i, j] must EXACTLY equal matvec(b, a.row(i))[j].
+    # A threaded-size b (n=4096, work > 1M) forces the parallel branch.
+    var rng = Rng(20260717)
+    var a = _random_tensor(rng, 3, 768)  # [M, K]
+    var b = _random_tensor(rng, 4096, 768)  # [N, K]
+    var threaded = matmul_transpose_b(a, b)  # parallel over output columns
+    assert_equal(threaded.rows, 3)
+    assert_equal(threaded.cols, 4096)
+    for i in range(3):
+        var serial = matvec(b, a.row(i))  # serial _simd_dot per output column
+        for j in range(4096):
+            assert_equal(threaded[i, j], serial[j])
+
+
+def test_matmul_transpose_a_threaded_is_deterministic() raises:
+    # matmul_transpose_a threads over output rows above the work threshold; that
+    # static partition must be run-to-run bit-identical. Two calls on the same
+    # threaded-size inputs (work ~6M, output rows = 512) must agree EXACTLY.
+    var rng = Rng(20260718)
+    var a = _random_tensor(rng, 64, 512)  # [N, I] -> 512 output rows
+    var b = _random_tensor(rng, 64, 200)  # [N, J]
+    var c1 = matmul_transpose_a(a, b)
+    var c2 = matmul_transpose_a(a, b)
+    assert_equal(c1.rows, 512)
+    for i in range(c1.rows):
+        for j in range(c1.cols):
+            assert_equal(c1[i, j], c2[i, j])
+
+
 def test_matmul_transpose_b_shape_mismatch_raises() raises:
     # The contraction width is the COLUMN count of BOTH operands (b is stored
     # un-transposed), so a.cols must equal b.cols. A [2, 3] and [2, 4] mismatch.
@@ -299,7 +334,11 @@ def test_matmul_transpose_a_matches_composed_spelling() raises:
         var a = _random_tensor(rng, nrows, idim)  # [N, I]
         var b = _random_tensor(rng, nrows, jdim)  # [N, J]
         var direct = matmul_transpose_a(a, b)  # a^T @ b
-        var composed = transpose(a) @ b  # (a^T) @ b, materialized
+        # Compare against the SCALAR matmul oracle (ijk), not the SIMD `@`: both
+        # matmul_transpose_a and `@` vectorize over columns, so `@` would be a
+        # fast-vs-fast check. matmul is the untouched scalar reference, and both
+        # accumulate the shared row dim ascending, so they are bit-identical.
+        var composed = matmul(transpose(a), b)  # (a^T) @ b, scalar reference
         assert_equal(direct.rows, idim)
         assert_equal(direct.cols, jdim)
         for i in range(idim):
