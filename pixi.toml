@@ -23,10 +23,24 @@ fmt = "mojo format src tests examples benchmarks"
 fmt-check = "mojo format src tests examples benchmarks && git diff --exit-code"
 # CANONICAL green gate — smoke test first, then every test EXCEPT the files in
 # SLOW_6554 (currently only test_seq_tasks.mojo, which trips Mojo #6554 and can
-# hang for minutes). This is what CI runs and what "green" means in the docs.
-test-fast = "SKIP_SLOW=1 bash scripts/test_all.sh"
-# Superset of test-fast that ALSO runs the SLOW_6554 files. Not the gate: it can
-# hang on #6554. Use only when you are changing one of those files, and prefer
-# running that file standalone (see AGENTS.md).
+# hang a run). Prints a loud per-file SKIPPED line so the exclusion is visible.
+# This is what CI runs and what "green" means everywhere in the docs.
 test = "bash scripts/test_all.sh"
+# Alias of `test`, kept so older docs and muscle memory keep working — both skip
+# the SLOW_6554 files. Prefer `test`; there is no longer a "fast vs full" default.
+test-fast = "bash scripts/test_all.sh"
+# Superset of `test` that ALSO runs the SLOW_6554 files (RUN_SLOW=1). NOT the gate:
+# it can hang on #6554. Its one job is the toolchain-upgrade check — run it once
+# after bumping the pinned Mojo version to see whether #6554 is fixed upstream
+# (see AGENTS.md). Otherwise prefer running a changed slow file standalone.
+test-full = "RUN_SLOW=1 bash scripts/test_all.sh"
 test-smoke = "mojo run -I src tests/test_smoke.mojo"
+# Tier 2 release gate — the 124M gauntlet. Precompiles the package, then runs the
+# multi-prompt harness against checkpoints/gpt2-124m.bin (needs the real ~475 MB
+# weights; fails with a converter-pointing error if they are absent). Minutes-
+# scale, run locally before every merge to main. NOT run in CI (needs weights).
+gauntlet = "mojo precompile src/llm -o build/llm.mojopkg && mojo run -I build examples/gpt2_gauntlet.mojo"
+# Compile-check (does NOT run) every file in examples/ and benchmarks/ against the
+# precompiled package at -O0 — seconds per file, no weights. Catches example/bench
+# bit-rot that the suite never sees. CI runs this; running the examples stays Tier 2.
+build-examples = "bash scripts/build_examples.sh"
