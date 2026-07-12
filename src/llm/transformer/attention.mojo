@@ -8,9 +8,10 @@
 # [T_k, D] is the whole story. This is why the tests exercise T_q != T_k now,
 # before any cross-attention layer exists to need it.
 #
-# The pipeline reuses the tested tensor ops (the `@` matmul operator, transpose,
-# scale, add, softmax_rows) rather than open-coding a second matmul or softmax.
-# The order is load-bearing and pinned in the docstring below.
+# The pipeline reuses the tested tensor ops (matmul_transpose_b for the q @ k^T
+# scores, the `@` matmul operator for weights @ v, scale, add, softmax_rows)
+# rather than open-coding a second matmul or softmax. The order is load-bearing
+# and pinned in the docstring below.
 
 from std.math import sqrt
 
@@ -19,6 +20,8 @@ from llm.nn.linear import Linear, LinearCache
 from llm.tensor.ops import (
     add,
     concat_cols,
+    matmul_transpose_a,
+    matmul_transpose_b,
     scale,
     slice_cols,
     slice_rows,
@@ -108,7 +111,13 @@ def scaled_dot_product_attention(
             + "]"
         )
 
-    var scores = q @ transpose(k)  # [T_q, T_k]
+    # scores[i, j] = sum_d q[i, d] * k[j, d] = q @ k^T, computed directly (no
+    # [D, T_k] transpose copy of k). matmul_transpose_b is a Class B SIMD dot, so
+    # the scores reassociate the d-sum (~d*eps) vs the old `q @ transpose(k)`
+    # scalar spelling — the kernel's 1e-12 test and the attention/124M goldens
+    # bound it, and step and batch scoring share this kernel so they stay
+    # bit-identical to each other (XVII's exact parity).
+    var scores = matmul_transpose_b(q, k)  # [T_q, T_k]
     var scaled = scale(scores, 1.0 / sqrt(Float64(d)))  # 1/sqrt(d_head)
     var biased = add(scaled, mask)  # additive mask, after the scale
     var weights = softmax_rows(biased)  # [T_q, T_k], rows sum to 1
@@ -204,11 +213,13 @@ def scaled_dot_product_attention_backward(
             "scaled_dot_product_attention_backward: v/k length mismatch"
         )
     var s = 1.0 / sqrt(Float64(d))
-    var d_v = transpose(cache.weights) @ d_out  # [T_k, D_v]
-    var d_w = d_out @ transpose(cache.v)  # [T_q, T_k]
+    var d_v = matmul_transpose_a(cache.weights, d_out)  # W^T @ dO [T_k, D_v]
+    var d_w = d_out @ transpose(cache.v)  # dO @ V^T [T_q, T_k] (v tiny, kept)
     var d_scores = softmax_rows_backward(cache.weights, d_w)  # [T_q, T_k]
     var d_q = scale(d_scores @ cache.k, s)  # [T_q, D]
-    var d_k = scale(transpose(d_scores) @ cache.q, s)  # [T_k, D]
+    var d_k = scale(
+        matmul_transpose_a(d_scores, cache.q), s
+    )  # dS^T @ Q [T_k, D]
     return AttentionGrads(d_q^, d_k^, d_v^)
 
 
@@ -325,15 +336,19 @@ def scaled_dot_product_attention_train_backward(
     var dropped_w = dropout_backward(
         cache.drop_mask, cache.inv_keep, cache.weights
     )  # [T_q, T_k]
-    var d_v = transpose(dropped_w) @ d_out  # [T_k, D_v]
-    var d_dropped_w = d_out @ transpose(cache.v)  # [T_q, T_k]
+    var d_v = matmul_transpose_a(
+        dropped_w, d_out
+    )  # dropped_W^T @ dO [T_k, D_v]
+    var d_dropped_w = d_out @ transpose(cache.v)  # dO @ V^T [T_q, T_k] (v tiny)
     var d_w = dropout_backward(
         cache.drop_mask, cache.inv_keep, d_dropped_w
     )  # [T_q, T_k]
     var d_scores = softmax_rows_backward(cache.weights, d_w)  # PRE-dropout W
     var s = 1.0 / sqrt(Float64(d))
     var d_q = scale(d_scores @ cache.k, s)  # [T_q, D]
-    var d_k = scale(transpose(d_scores) @ cache.q, s)  # [T_k, D]
+    var d_k = scale(
+        matmul_transpose_a(d_scores, cache.q), s
+    )  # dS^T @ Q [T_k, D]
     return AttentionGrads(d_q^, d_k^, d_v^)
 
 

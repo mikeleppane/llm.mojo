@@ -83,6 +83,12 @@ is affected without opening the file:
   `Float64.from_bits`); `String.split` yields `StringSlice` + a trailing empty
   slice; there is no `"rb"` open mode (use `read_bytes()`), and don't materialize
   a ~500 MB payload as one `String`.
+- **SIMD, pointers, parallelism** — `List[Float64].unsafe_ptr()` +
+  `ptr.load[width=W]`/`.store`/`.reduce_add` (no storage redesign needed);
+  `simd_width_of` from `std.sys`; `parallelize` wants an `@parameter def(Int)`
+  worker and manual block partitioning; write parallel output through a raw
+  pointer, not a `mut` capture; `memcpy` is keyword-only; multi-accumulator SIMD
+  reassociates (classify Class A vs B), SIMD-over-columns does not.
 
 ## Toolchain and the quality floor
 

@@ -161,5 +161,48 @@ def test_concat_cols_row_mismatch_raises() raises:
         _ = concat_cols(parts)
 
 
+def test_slice_concat_bit_exact_fractional() raises:
+    # slice_cols / slice_rows / concat_cols copy contiguous rows with memcpy — a
+    # Class A change that must reproduce the source BYTES exactly, not to a
+    # tolerance. Use fractional values that are not exactly representable in
+    # binary (0.1, 0.2, …) and assert bit-for-bit equality (assert_equal, no
+    # tolerance) between each output element and its source, so a byte-misaligned,
+    # short, or overlapping copy cannot hide under an almost-equal check.
+    var src = from_rows(
+        [
+            [0.1, 0.2, 0.3, 0.4, 0.5],
+            [1.1, 1.2, 1.3, 1.4, 1.5],
+            [2.1, 2.2, 2.3, 2.4, 2.5],
+        ]
+    )  # [3, 5], fractional
+
+    var sc = slice_cols(src, 1, 4)  # [3, 3], the middle band
+    assert_equal(sc.rows, 3)
+    assert_equal(sc.cols, 3)
+    for r in range(3):
+        for c in range(3):
+            assert_equal(sc[r, c], src[r, 1 + c])
+
+    var sr = slice_rows(src, 1, 3)  # [2, 5], the bottom two rows
+    assert_equal(sr.rows, 2)
+    assert_equal(sr.cols, 5)
+    for r in range(2):
+        for c in range(5):
+            assert_equal(sr[r, c], src[1 + r, c])
+
+    # Splitting the columns and concatenating them back must rebuild src exactly.
+    var left = slice_cols(src, 0, 2)  # [3, 2]
+    var right = slice_cols(src, 2, 5)  # [3, 3]
+    var parts = List[Tensor2D]()
+    parts.append(left^)
+    parts.append(right^)
+    var joined = concat_cols(parts)  # [3, 5]
+    assert_equal(joined.rows, 3)
+    assert_equal(joined.cols, 5)
+    for r in range(3):
+        for c in range(5):
+            assert_equal(joined[r, c], src[r, c])
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

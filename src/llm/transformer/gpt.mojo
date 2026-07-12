@@ -44,8 +44,8 @@ from llm.nn.optim import adamw_update, sgd_update
 from llm.tensor.ops import (
     add,
     cross_entropy_rows,
+    matmul_transpose_a,
     matmul_transpose_b,
-    transpose,
 )
 from llm.tensor.tensor2d import Tensor2D, zeros_2d
 from llm.transformer.block import (
@@ -187,8 +187,11 @@ struct GPT(Copyable, Movable):
         for i in range(len(self.blocks)):
             x = self.blocks[i].forward(x, mask)
         var h = self.ln_f.forward(x)  # [T, C]
-        # Tied head: logits = h @ wte.table^T. transpose(table) is [C, V].
-        return h @ transpose(self.wte.table.value)  # [T, V]
+        # Tied head: logits = h @ wte.table^T, computed directly — no [C, V]
+        # transpose copy of the table (~309 MB at 124M). This is the SAME kernel
+        # the cached `step` head uses, so the batch and step tied heads produce
+        # identical bits for a shared row: the parity the step-vs-forward test pins.
+        return matmul_transpose_b(h, self.wte.table.value)  # [T, V]
 
     def step(self, token_id: Int, mut cache: KVCache) raises -> Tensor2D:
         # KV-cached single-token forward: feed ONE new token, reusing the cached
@@ -302,7 +305,9 @@ struct GPT(Copyable, Movable):
             zeros_2d(0, 0), List[Float64](), List[Float64]()
         )  # placeholder, replaced by the move
         var h = ln_f_fwd^.split(ln_f_cache)  # cache -> ln_f_cache, returns h
-        var logits = h @ transpose(self.wte.table.value)  # [T, V]
+        # Tied head h @ table^T, direct (no [C, V] transpose copy); same kernel
+        # and k-order as forward's head, so forward_cached's logits match.
+        var logits = matmul_transpose_b(h, self.wte.table.value)  # [T, V]
 
         var cache = GPTCache(
             wte_cache^,
@@ -347,7 +352,9 @@ struct GPT(Copyable, Movable):
         var c = self.wte.table.value.cols
 
         # Head path into a fresh [V, C] delta; d_h flows on down the stack.
-        var d_table = transpose(d_logits) @ cache.h  # [V, C]
+        var d_table = matmul_transpose_a(
+            d_logits, cache.h
+        )  # d_logits^T @ h [V, C]
         var d_h = d_logits @ self.wte.table.value  # [T, C]
 
         # ln_f and the block stack.
