@@ -16,6 +16,7 @@ from llm.tensor.tensor2d import Tensor2D, zeros_2d, from_rows
 from llm.tensor.ops import (
     matmul,
     matmul_ikj,
+    matmul_transpose_a,
     matmul_transpose_b,
     matvec,
     transpose,
@@ -269,6 +270,49 @@ def test_matmul_transpose_b_shape_mismatch_raises() raises:
     var b = zeros_2d(2, 4)  # 3 != 4 on the shared contraction width
     with assert_raises(contains="shape mismatch"):
         _ = matmul_transpose_b(a, b)
+
+
+def test_matmul_transpose_a_matches_composed_spelling() raises:
+    # matmul_transpose_a(a, b) = a^T @ b, computed without materializing a^T. It
+    # must be BIT-IDENTICAL to transpose(a) @ b (assert_equal, no tolerance): it
+    # is a Class A change (order-preserving), accumulating over the shared row
+    # dimension n in the SAME ascending order as the composed spelling, only
+    # skipping the transpose allocation and vectorizing over the output columns.
+    # Any drift is a real reorder/tail bug. Shapes span sizes 1 and 2, output
+    # widths not divisible by the SIMD width, the real 124M backward widths
+    # (N=64 rows, out/in up to 3072), and a threaded-size case (work > 1M).
+    var rng = Rng(20260716)
+    var shapes = [
+        (1, 1, 1),
+        (3, 2, 4),
+        (2, 5, 7),
+        (4, 8, 13),
+        (64, 384, 128),  # c_attn backward: d_out^T @ x
+        (64, 512, 128),  # mlp_fc backward
+        (64, 256, 128),  # tied head backward: d_logits^T @ h
+        (64, 3072, 768),  # 124M mlp_fc backward — threaded (work > 1M)
+    ]
+    for s in range(len(shapes)):
+        var nrows = shapes[s][0]  # shared contraction dimension N
+        var idim = shapes[s][1]  # a has idim columns -> out rows
+        var jdim = shapes[s][2]  # b has jdim columns -> out cols
+        var a = _random_tensor(rng, nrows, idim)  # [N, I]
+        var b = _random_tensor(rng, nrows, jdim)  # [N, J]
+        var direct = matmul_transpose_a(a, b)  # a^T @ b
+        var composed = transpose(a) @ b  # (a^T) @ b, materialized
+        assert_equal(direct.rows, idim)
+        assert_equal(direct.cols, jdim)
+        for i in range(idim):
+            for j in range(jdim):
+                assert_equal(direct[i, j], composed[i, j])
+
+
+def test_matmul_transpose_a_shape_mismatch_raises() raises:
+    # The contraction is the shared ROW count (a^T @ b needs a.rows == b.rows).
+    var a = zeros_2d(3, 2)
+    var b = zeros_2d(4, 2)  # 3 != 4 shared rows
+    with assert_raises(contains="shape mismatch"):
+        _ = matmul_transpose_a(a, b)
 
 
 def test_matvec_hand_computed() raises:

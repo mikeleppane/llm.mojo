@@ -296,6 +296,78 @@ def matmul_transpose_b(a: Tensor2D, b: Tensor2D) raises -> Tensor2D:
     return out^
 
 
+def matmul_transpose_a(a: Tensor2D, b: Tensor2D) raises -> Tensor2D:
+    # c = a^T @ b WITHOUT materializing a^T: [N, I]^T @ [N, J] -> [I, J] with
+    #     c[i, j] = sum_n a[n, i] * b[n, j].
+    # Both operands share the contraction dimension N as their ROW count, so the
+    # guard is a.rows == b.rows. This is the mirror of matmul_transpose_b for the
+    # backward pass, where products are spelled transpose(w) @ d — Linear's
+    # dW = d_out^T @ x, attention's dV/dK/dQ, the tied head's d_table.
+    #
+    # Class A (order-preserving), UNLIKE matmul_transpose_b: it accumulates over n
+    # ascending in exactly the order transpose(a) @ b (ikj) does — for each n it
+    # adds a[n, i] * b[n, :] into row i, vectorized over the independent columns j,
+    # never regrouping the n reduction — so it is BIT-IDENTICAL to the composed
+    # spelling (a test pins exact equality). It skips the [I, N] transpose
+    # allocation, which profiling showed was 28-65% of each backward product once
+    # the matmul itself was vectorized. Threads over output rows i above the work
+    # threshold, like the @ operator. Raises on a row-count mismatch; allocates.
+    if a.rows != b.rows:
+        raise Error(
+            "matmul_transpose_a shape mismatch: a.rows="
+            + String(a.rows)
+            + " must equal b.rows="
+            + String(b.rows)
+        )
+    comptime W = simd_width_of[DType.float64]()
+    var nrows = a.rows  # shared contraction N
+    var idim = a.cols  # output rows
+    var jdim = b.cols  # output cols
+    var out = zeros_2d(idim, jdim)
+    var pout = out.data.unsafe_ptr()
+    var pa = a.data.unsafe_ptr()
+    var pb = b.data.unsafe_ptr()
+
+    # One output row block: for each output row i, accumulate a[n, i] * b[n, :]
+    # over n ascending (SIMD over j), matching transpose(a) @ b's ikj order.
+    @parameter
+    def row_block(i0: Int, i1: Int):
+        for i in range(i0, i1):
+            var ibase = i * jdim
+            for nn in range(nrows):
+                var a_ni = pa[nn * idim + i]  # a[n, i]
+                var a_vec = SIMD[DType.float64, W](a_ni)
+                var obase = nn * jdim
+                var j = 0
+                while j + W <= jdim:
+                    var acc = pout.load[width=W](ibase + j) + a_vec * pb.load[
+                        width=W
+                    ](obase + j)
+                    pout.store(ibase + j, acc)
+                    j += W
+                while j < jdim:
+                    pout[ibase + j] += a_ni * pb[obase + j]
+                    j += 1
+
+    if idim * nrows * jdim < _MTB_THREAD_MIN_WORK or idim < 2:
+        row_block(0, idim)
+        return out^
+
+    var nblocks = 32 if idim >= 32 else idim
+    var block = (idim + nblocks - 1) // nblocks
+
+    @parameter
+    def worker(t: Int):
+        var i0 = t * block
+        var i1 = i0 + block
+        if i1 > idim:
+            i1 = idim
+        row_block(i0, i1)
+
+    parallelize[worker](nblocks)
+    return out^
+
+
 # --- softmax ---
 
 
