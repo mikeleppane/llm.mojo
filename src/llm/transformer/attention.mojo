@@ -8,9 +8,10 @@
 # [T_k, D] is the whole story. This is why the tests exercise T_q != T_k now,
 # before any cross-attention layer exists to need it.
 #
-# The pipeline reuses the tested tensor ops (the `@` matmul operator, transpose,
-# scale, add, softmax_rows) rather than open-coding a second matmul or softmax.
-# The order is load-bearing and pinned in the docstring below.
+# The pipeline reuses the tested tensor ops (matmul_transpose_b for the q @ k^T
+# scores, the `@` matmul operator for weights @ v, scale, add, softmax_rows)
+# rather than open-coding a second matmul or softmax. The order is load-bearing
+# and pinned in the docstring below.
 
 from std.math import sqrt
 
@@ -19,6 +20,7 @@ from llm.nn.linear import Linear, LinearCache
 from llm.tensor.ops import (
     add,
     concat_cols,
+    matmul_transpose_b,
     scale,
     slice_cols,
     slice_rows,
@@ -108,7 +110,9 @@ def scaled_dot_product_attention(
             + "]"
         )
 
-    var scores = q @ transpose(k)  # [T_q, T_k]
+    # scores[i, j] = sum_d q[i, d] * k[j, d] = q @ k^T, computed directly (no
+    # [D, T_k] transpose copy of k), same d-ascending accumulation as before.
+    var scores = matmul_transpose_b(q, k)  # [T_q, T_k]
     var scaled = scale(scores, 1.0 / sqrt(Float64(d)))  # 1/sqrt(d_head)
     var biased = add(scaled, mask)  # additive mask, after the scale
     var weights = softmax_rows(biased)  # [T_q, T_k], rows sum to 1

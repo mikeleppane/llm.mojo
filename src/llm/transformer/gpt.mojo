@@ -187,8 +187,11 @@ struct GPT(Copyable, Movable):
         for i in range(len(self.blocks)):
             x = self.blocks[i].forward(x, mask)
         var h = self.ln_f.forward(x)  # [T, C]
-        # Tied head: logits = h @ wte.table^T. transpose(table) is [C, V].
-        return h @ transpose(self.wte.table.value)  # [T, V]
+        # Tied head: logits = h @ wte.table^T, computed directly — no [C, V]
+        # transpose copy of the table (~309 MB at 124M). This is the SAME kernel
+        # the cached `step` head uses, so the batch and step tied heads produce
+        # identical bits for a shared row: the parity the step-vs-forward test pins.
+        return matmul_transpose_b(h, self.wte.table.value)  # [T, V]
 
     def step(self, token_id: Int, mut cache: KVCache) raises -> Tensor2D:
         # KV-cached single-token forward: feed ONE new token, reusing the cached
@@ -302,7 +305,9 @@ struct GPT(Copyable, Movable):
             zeros_2d(0, 0), List[Float64](), List[Float64]()
         )  # placeholder, replaced by the move
         var h = ln_f_fwd^.split(ln_f_cache)  # cache -> ln_f_cache, returns h
-        var logits = h @ transpose(self.wte.table.value)  # [T, V]
+        # Tied head h @ table^T, direct (no [C, V] transpose copy); same kernel
+        # and k-order as forward's head, so forward_cached's logits match.
+        var logits = matmul_transpose_b(h, self.wte.table.value)  # [T, V]
 
         var cache = GPTCache(
             wte_cache^,
