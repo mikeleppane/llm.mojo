@@ -131,6 +131,19 @@ def test_validate_raises_per_field() raises:
         SamplerConfig(1.0, 0, 0.0).validate()  # p <= 0
     with assert_raises(contains="top_p"):
         SamplerConfig(1.0, 0, 1.5).validate()  # p > 1
+    # Non-finite fields must not slip through: a NaN temperature would poison the
+    # softmax so sample_categorical silently returns the last token, and +inf
+    # passes a bare `temperature < 0`. isfinite / the negated range reject both.
+    var nan_v: Float64 = FloatLiteral.nan
+    var inf_v: Float64 = FloatLiteral.infinity
+    with assert_raises(contains="temperature"):
+        SamplerConfig(nan_v, 0, 1.0).validate()
+    with assert_raises(contains="temperature"):
+        SamplerConfig(inf_v, 0, 1.0).validate()
+    with assert_raises(contains="top_p"):
+        SamplerConfig(1.0, 0, nan_v).validate()
+    with assert_raises(contains="top_p"):
+        SamplerConfig(1.0, 0, inf_v).validate()
 
 
 def test_presets_validate() raises:

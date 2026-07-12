@@ -6,6 +6,8 @@ the same seeded Rng that shuffles batches also makes generation reproducible.
 Top-k / top-p filters and the generate loop build on this.
 """
 
+from std.math import isfinite
+
 from llm.tensor.ops import argmax, softmax_row_temperature
 from llm.utils.random import Rng
 
@@ -298,14 +300,17 @@ struct SamplerConfig(Copyable, Movable):
     def validate(self) raises:
         """Validate the policy fields.
 
-        temperature 0 is valid (the greedy sentinel); only a negative temperature
-        is rejected. top_k must be non-negative (0 disabled); top_p must be in
-        (0, 1] (1.0 disabled). Allocates nothing; draws no rng.
+        temperature 0 is valid (the greedy sentinel); a negative or non-finite
+        temperature is rejected. top_k must be non-negative (0 disabled); top_p
+        must be in (0, 1] (1.0 disabled). Allocates nothing; draws no rng.
 
         Raises:
-            Error: On an out-of-range field, naming it.
+            Error: On an out-of-range or non-finite field, naming it.
         """
-        if self.temperature < 0.0:
+        # isfinite rejects NaN and +inf: a bare `temperature < 0` passes both (NaN
+        # fails every compare, +inf is >= 0), and a NaN temperature poisons the
+        # softmax so sample_categorical silently returns the last vocab token.
+        if not (isfinite(self.temperature) and self.temperature >= 0.0):
             raise Error(
                 "SamplerConfig: temperature must be >= 0 (0 = greedy), got "
                 + String(self.temperature)
@@ -315,7 +320,8 @@ struct SamplerConfig(Copyable, Movable):
                 "SamplerConfig: top_k must be >= 0 (0 = disabled), got "
                 + String(self.top_k)
             )
-        if self.top_p <= 0.0 or self.top_p > 1.0:
+        # Negated two-sided range rejects NaN and +inf for the (0, 1] bound.
+        if not (self.top_p > 0.0 and self.top_p <= 1.0):
             raise Error(
                 "SamplerConfig: top_p must be in (0, 1] (1 = disabled), got "
                 + String(self.top_p)
