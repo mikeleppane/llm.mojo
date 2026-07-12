@@ -1,9 +1,17 @@
 # Progress
 
 Build status per part of the from-scratch Transformer. "Test command" is what
-proves the part green on a fresh checkout (`pixi install` first). `pixi run
-test-fast` is the canonical gate — it runs the whole suite except one
-#6554-stalling lab file; see [AGENTS.md](AGENTS.md).
+proves the part green on a fresh checkout (`pixi install` first).
+
+**Part XIX flipped the default gate.** `pixi run test` is now the canonical gate:
+it runs the whole suite EXCEPT one #6554-stalling lab file BY DEFAULT, printing a
+loud `SKIPPED (Mojo #6554)` line — which is what "green" has always meant. Before
+XIX the default `test` *ran* the slow file and `test-fast` skipped it; now
+`test-fast` is a retained alias of `test`, and `test-full` (`RUN_SLOW=1`) is the
+opt-in that also runs the slow file (the toolchain-upgrade check). Rows dated
+before this flip list `pixi run test-fast`, which still works. From XIX on, a part
+is mergeable when the suite is green, `pixi run gauntlet` (the 124M release gate)
+is green, and `fmt-check` passes; see [AGENTS.md](AGENTS.md).
 
 | Part | Title | Status | Test command | Date |
 |------|-------|--------|--------------|------|
@@ -25,6 +33,7 @@ test-fast` is the canonical gate — it runs the whole suite except one
 | XVI | Loading real GPT-2 weights (the MVP) | ✅ green (offline safetensors→`GPT2W v1` converter with every Conv1D transpose + buffer skip in one place; native `load_gpt2` builds the GPT fieldwise from the f32 payload, exact f32→f64 widening, named header validation; doll-house sentinel parity in-suite + f64 goldens at 124M; **the from-scratch Mojo forward, fed OpenAI's real weights, generates coherent English** — HF-f32 agreement 6e-5) | `pixi run test-fast` | 2026-07-05 |
 | XVII | The KV cache | ✅ green (per-layer `KVCache` of preallocated `[context_length, C]` key/value buffers; additive `step` methods on attention/block/gpt that feed ONE token and reuse the cached past, reusing the frozen `scaled_dot_product_attention` with a zeros `[1, t]` mask; `matmul_transpose_b` for the tied head with no per-token transpose; `generate_cached` twin of `generate` with an up-front overflow raise; **step-vs-forward logits BIT-IDENTICAL at every prefix**, generation + rng-stream parity, and the 124M greedy text character-identical to Part XVI at ~8.3× (0.78 vs 6.49 s/token) — the ALGORITHM fix, arithmetic still scalar f64) | `pixi run test-fast` | 2026-07-11 |
 | XVIII | Performance (SIMD + threading) | ✅ green (a private multi-accumulator SIMD `_simd_dot` under `matvec`/`matmul_transpose_b` — the one Class B reassociation, 1e-12-relative tested; SIMD-over-columns `@`, `matmul_transpose_a` for the backward, and `std.algorithm` threading of both reduction kernels — all Class A, bit-identical, exact-equality + determinism tested; call-site retrofits onto `matmul_transpose_b`/`_a` delete a transpose alloc per call; memcpy slice/concat hygiene; **greedy 124M decode 0.784 → 0.0249 s/token (31.5×), training step 367.8 → 20.2 ms (18.2×), text character-identical** — the ARITHMETIC fix, whole existing suite green UNCHANGED, XVII exact parity untouched) | `pixi run test-fast` | 2026-07-12 |
+| XIX | The gauntlet: systematic validation & CI | ✅ green (two validation tiers formalized in pixi tasks — Tier 1 `pixi run test`: hermetic suite that now SKIPS the #6554 lab file BY DEFAULT with a loud SKIPPED line (**a behaviour flip of the old opt-in**), `test-full` the toolchain-upgrade opt-in, `build-examples` compile-checking every example+benchmark in CI; Tier 2 `pixi run gauntlet`: a 16-prompt 124M harness spanning English/contractions/accents/CJK/emoji/code/digits/URL/whitespace/Unicode-separators(NBSP,U+2028/9)/newlines/single-token/Finnish and the **1000- and exactly-1024-token context boundary**, checking tokenization+argmax+top-5 EXACT and probe logits+mean NLL @ 1e-6 against frozen NumPy-f64 goldens (provenance-checked against the `.bin`'s sha256 before the run), plus `generate` vs `generate_cached` token parity on a short subset; golden-lifecycle + merge-gate doctrine written into AGENTS.md; **gauntlet 16/16 green in ~41 s, NO model change, no bug surfaced**) | `pixi run test` + `pixi run gauntlet` | 2026-07-12 |
 
 ## Notes
 
