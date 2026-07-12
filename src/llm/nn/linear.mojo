@@ -7,11 +7,12 @@
 # transpose-at-load concern, handled where the weights are read, never by bending
 # this convention.)
 #
-# The forward transposes the weight to [in, out] and multiplies with the `@`
-# operator (x @ wt), then broadcasts the bias row across every position.
+# The forward computes x @ W^T directly with `matmul_transpose_b` (no per-call
+# [in, out] transpose copy of the weight), then broadcasts the bias row across
+# every position.
 
 from llm.nn.parameter import Parameter
-from llm.tensor.ops import transpose
+from llm.tensor.ops import matmul_transpose_b, transpose
 from llm.tensor.tensor2d import Tensor2D, zeros_2d
 from llm.utils.random import Rng
 
@@ -79,8 +80,8 @@ struct Linear(Copyable, Movable):
 
     def forward(self, x: Tensor2D) raises -> Tensor2D:
         # [N, in] -> [N, out] as x @ W^T + b. Reads self only; allocates the
-        # result (via transpose and matmul); raises on a feature-count mismatch.
-        # The bias row is added to every one of the N positions.
+        # result; raises on a feature-count mismatch. The bias row is added to
+        # every one of the N positions.
         if x.cols != self.weight.value.cols:
             raise Error(
                 "Linear.forward: shape mismatch, expected "
@@ -101,8 +102,11 @@ struct Linear(Copyable, Movable):
                 + String(self.bias.value.cols)
                 + "]"
             )
-        var wt = transpose(self.weight.value)  # [out, in] -> [in, out]
-        var out = x @ wt  # [N, in] @ [in, out] -> [N, out]
+        # x @ W^T directly: W is [out, in], so out[n, o] = sum_i x[n, i] *
+        # W[o, i] — a[i,k]*b[j,k] with a=x, b=W. No [in, out] transpose copy of
+        # the weight per forward, and the same k-ascending accumulation as the
+        # transpose-then-matmul spelling it replaces.
+        var out = matmul_transpose_b(x, self.weight.value)  # [N, out]
         for r in range(out.rows):
             for c in range(out.cols):
                 out[r, c] = out[r, c] + self.bias.value[0, c]
