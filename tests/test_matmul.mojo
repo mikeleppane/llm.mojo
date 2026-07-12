@@ -203,6 +203,9 @@ def test_matmul_transpose_b_matches_composed_spelling() raises:
         (1, 3072, 2),
         (2, 769, 3),
         (1, 3073, 4),
+        (2, 768, 2048),  # crosses the threading threshold (work ~3M, n>=32)
+        (1, 768, 4096),  # threaded, m=1 decode-shaped, n a multiple of blocks
+        (3, 512, 2000),  # threaded, n not divisible by the block count
     ]
     for s in range(len(shapes)):
         var m = shapes[s][0]
@@ -219,6 +222,24 @@ def test_matmul_transpose_b_matches_composed_spelling() raises:
                 _assert_close_rel(
                     direct[i, j], composed[i, j], "mtb k=" + String(k)
                 )
+
+
+def test_matmul_transpose_b_threaded_is_deterministic() raises:
+    # The threaded path partitions output columns statically across workers, so it
+    # must be run-to-run bit-identical (no shared accumulators, no scheduling
+    # dependence). Two calls on the same threaded-size inputs must agree EXACTLY.
+    # A shape well over the threshold (work ~6M, n=4096) guarantees the parallel
+    # branch runs.
+    var rng = Rng(20260714)
+    var a = _random_tensor(rng, 2, 768)
+    var b = _random_tensor(rng, 4096, 768)
+    var c1 = matmul_transpose_b(a, b)
+    var c2 = matmul_transpose_b(a, b)
+    assert_equal(c1.rows, 2)
+    assert_equal(c1.cols, 4096)
+    for i in range(c1.rows):
+        for j in range(c1.cols):
+            assert_equal(c1[i, j], c2[i, j])
 
 
 def test_matmul_transpose_b_shape_mismatch_raises() raises:

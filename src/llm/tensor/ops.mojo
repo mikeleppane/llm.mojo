@@ -13,11 +13,20 @@
 # before exponentiating so large logits never overflow, and floats are compared
 # with tolerances (never ==) by the tests that exercise these.
 
+from std.algorithm import parallelize
 from std.collections import List
 from std.math import exp, log
 from std.sys import simd_width_of
 
 from llm.tensor.tensor2d import Tensor2D, zeros_2d
+
+# Below this many multiply-adds (m*n*k), matmul_transpose_b runs single-threaded:
+# the parallelize dispatch costs more than it saves on the small kernels
+# (c_proj's [1,768].[768,768]^T is ~0.6M and stays serial; c_attn/mlp/tied head
+# clear it). Threading independent output columns is bit-identical to serial
+# (each cell computed by exactly one worker in the same _simd_dot order), so this
+# threshold trades only speed, never numbers — a smaller machine can lower it.
+comptime _MTB_THREAD_MIN_WORK = 1_000_000
 
 
 # --- elementwise ---
@@ -251,11 +260,39 @@ def matmul_transpose_b(a: Tensor2D, b: Tensor2D) raises -> Tensor2D:
             + " must equal b.cols="
             + String(b.cols)
         )
-    var out = zeros_2d(a.rows, b.rows)
-    for i in range(a.rows):
-        var arow = a.row(i)  # contiguous [K] view, reused across all j
-        for j in range(b.rows):
-            out[i, j] = _simd_dot(arow, b.row(j))
+    var m = a.rows
+    var n = b.rows
+    var out = zeros_2d(m, n)
+    if m * n * a.cols < _MTB_THREAD_MIN_WORK or n < 2:
+        for i in range(m):
+            var arow = a.row(i)  # contiguous [K] view, reused across all j
+            for j in range(n):
+                out[i, j] = _simd_dot(arow, b.row(j))
+        return out^
+
+    # Threaded: partition the OUTPUT columns j (= rows of b) into contiguous
+    # blocks, one worker per block. Every out[i, j] is written by exactly one
+    # worker, computed by the same _simd_dot as the serial path — no shared
+    # accumulators, no atomics, a static partition — so the result is
+    # bit-identical to single-threaded and stable run to run (Class A). The
+    # output is written through a raw pointer to disjoint cells; a and b are
+    # shared immutably.
+    var pout = out.data.unsafe_ptr()
+    var nblocks = 32 if n >= 32 else n
+    var block = (n + nblocks - 1) // nblocks
+
+    @parameter
+    def col_block(t: Int):
+        var j0 = t * block
+        var j1 = j0 + block
+        if j1 > n:
+            j1 = n
+        for i in range(m):
+            var arow = a.row(i)
+            for j in range(j0, j1):
+                pout[i * n + j] = _simd_dot(arow, b.row(j))
+
+    parallelize[col_block](nblocks)
     return out^
 
 

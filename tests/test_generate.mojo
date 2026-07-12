@@ -457,5 +457,43 @@ def test_cached_stop_id_in_prompt_does_not_halt() raises:
     _assert_ids_equal(out, full)
 
 
+def test_generate_cached_threaded_is_deterministic() raises:
+    # After threading landed in matmul_transpose_b, prove generation stays
+    # reproducible end to end: same seed, two runs, identical tokens. The config
+    # is sized so the tied head's per-step matmul_transpose_b — [1, 32] . [32000,
+    # 32]^T, ~1.0M multiply-adds — crosses the threading threshold, so this run
+    # actually drives the PARALLEL kernel (a tiny V=11 model would stay serial and
+    # prove nothing about threading). The kernel's own run-to-run determinism is
+    # pinned directly in test_matmul; this is the end-to-end guard. Random weights
+    # are fine — reproducibility, not coherent text, is the property under test.
+    var cfg = GPTConfig(32000, 16, 32, 1, 2, 0.0)  # V, T, C, L, H, dropout
+    var init_rng = Rng(7)
+    var gpt = GPT.init_random(cfg, init_rng)
+    var prompt: List[Int] = [5, 9, 2, 17]
+    var stops = List[Int]()
+
+    # Greedy: pure forward determinism through the threaded head, no draws.
+    var g1 = Rng(123)
+    var greedy1 = generate_cached(
+        gpt, prompt, 6, SamplerConfig.greedy(), stops, g1
+    )
+    var g2 = Rng(123)
+    var greedy2 = generate_cached(
+        gpt, prompt, 6, SamplerConfig.greedy(), stops, g2
+    )
+    _assert_ids_equal(greedy1, greedy2)
+
+    # Nucleus: the sampled stream must also reproduce under the same seed.
+    var s1 = Rng(456)
+    var nucleus1 = generate_cached(
+        gpt, prompt, 6, SamplerConfig(1.0, 0, 0.9), stops, s1
+    )
+    var s2 = Rng(456)
+    var nucleus2 = generate_cached(
+        gpt, prompt, 6, SamplerConfig(1.0, 0, 0.9), stops, s2
+    )
+    _assert_ids_equal(nucleus1, nucleus2)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
