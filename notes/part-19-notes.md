@@ -62,7 +62,7 @@ Not a flip defect.)
 Following the Part XVI pattern (offline Python writes / committed text / native
 Mojo reads):
 
-1. **`data/gauntlet/prompts.txt`** — 15 curated prompts, one `=== id: <name> ===`
+1. **`data/gauntlet/prompts.txt`** — 16 curated prompts, one `=== id: <name> ===`
    record each with an inline rationale after the closing `===`. Format documented
    in the file header. Both parsers split on `\n` ONLY (never a unicode-aware
    `splitlines`, which would treat CJK/exotic codepoints as line breaks) and drop
@@ -103,6 +103,7 @@ no flake channel.
 | `digits-punct` | 33 | digit runs and punctuation runs |
 | `url-email` | 38 | symbol-dense, space-free spans (a URL and an email) |
 | `whitespace-mixed` | 18 | leading spaces, a tab, doubled internal spaces, a trailing newline |
+| `unicode-separators` | 28 | NBSP + U+2028/U+2029 — the codepoints `splitlines()` would break on but `split('\n')` keeps inline (added in review; validates the parser design) |
 | `newline-heavy` | 30 | multi-paragraph text with blank lines |
 | `single-token` | 1 | the shortest legal input; NLL undefined (`none`), greedy subset |
 | `finnish` | 65 | agglutinative non-English with long compound word forms |
@@ -148,11 +149,13 @@ Incidental finding: the real Mojo-vs-reference gap on that probe is
 
 ## Full gauntlet run — GREEN
 
-`pixi run mojo run -I build examples/gpt2_gauntlet.mojo`, wall-clock **30.9 s**
-(includes the ~2 GB model load, 15 forwards, the NLL second-forwards, and the
-greedy subset; 485% CPU — threaded post-XVIII):
+`pixi run gauntlet` (sha256 provenance check → precompile → harness), wall-clock
+**40.8 s** for the full 16-prompt run — including the `sha256sum` of the 498 MB
+`.bin`, the ~2 GB model load, 16 forwards, the NLL second-forwards, and the greedy
+subset (418% CPU — threaded post-XVIII):
 
 ```
+==> provenance OK: checkpoints/gpt2-124m.bin matches goldens sha256 e6f6ccacec40...
 PASS  short-english  T=8  argmax=407  probes=9  nll=4.003301000867618  greedy=ok
 PASS  english-prose  T=29  argmax=198  probes=9  nll=4.415431523350696
 PASS  contractions  T=35  argmax=198  probes=9  nll=4.3351386163135865  greedy=ok
@@ -163,13 +166,14 @@ PASS  code-snippet  T=43  argmax=198  probes=9  nll=3.4146819084701834
 PASS  digits-punct  T=33  argmax=405  probes=9  nll=5.140678525442255
 PASS  url-email  T=38  argmax=198  probes=9  nll=3.9496312205732877
 PASS  whitespace-mixed  T=18  argmax=198  probes=9  nll=8.030731788920267
+PASS  unicode-separators  T=28  argmax=198  probes=9  nll=4.983019827350871
 PASS  newline-heavy  T=30  argmax=198  probes=9  nll=3.0227222575411252
 PASS  single-token  T=1  argmax=198  probes=9  nll=   n/a  greedy=ok
 PASS  finnish  T=65  argmax=198  probes=9  nll=4.7813484793188525
 PASS  near-context  T=1000  argmax=198  probes=9  nll=4.2721819978339886
 PASS  exact-1024  T=1024  argmax=329  probes=9  nll=4.271336177044599
 
-GAUNTLET OK — 15/15 prompts matched the float64 reference (tokens/argmax/top5 exact, probes & nll @ 1e-6); generate vs generate_cached agreed on 3 short prompts.
+GAUNTLET OK — 16/16 prompts matched the float64 reference (tokens/argmax/top5 exact, probes & nll @ 1e-6); generate vs generate_cached agreed on 3 short prompts.
 ```
 
 **No bug surfaced.** The from-scratch Mojo port matches the f64 reference across
@@ -212,7 +216,43 @@ want after three parts of single-prompt validation.
 
 ## Review triage
 
-Dual external review (Codex GPT-5.5 high + Claude Opus 4.8 xhigh) over
-`git diff main...part-19-gauntlet`. Findings and fix/reject decisions:
+Dual external review over `git diff main...part-19-gauntlet`: Codex (gpt-5.6-sol,
+high) — **request changes**; Claude Opus 4.8 xhigh — **approve** (no
+Critical/High/Medium; every load-bearing claim independently verified, incl. a
+local `sha256sum` of the `.bin`). Consolidated findings and decisions:
 
-_(to be filled after the review pass.)_
+- **FIXED (Codex High + Opus L2) — the golden parser could silently disable
+  itself.** A truncated or malformed `goldens.txt` (a missing/duplicated field, a
+  short top-5) left a default (empty list, `has_nll=False`) and the prompt still
+  printed PASS with that check skipped. `parse_goldens` now counts each field per
+  block, guards the field branches on `have`, rejects any unrecognized in-block
+  line, and `_finish_golden` requires every field exactly once with the right
+  shape (non-empty tokens, exactly-5 top-5, non-empty probe) and `nll: none` iff
+  the prompt is a single token — otherwise a NAMED error, never a silent pass.
+- **FIXED (Codex Medium) — the sha256 header was recorded but not enforced.** New
+  `scripts/run_gauntlet.sh` (now the `gauntlet` task) checks the committed `.bin`
+  against the goldens' pinned sha256 BEFORE the run and fails with a clear
+  provenance error (expected vs actual) if they diverge; skipped only when the
+  `.bin` is absent, so the harness still raises the canonical converter error.
+  This makes the documented "goldens pinned to exact weights" mechanical.
+- **FIXED (Codex Low + Opus L1) — top-5 tie-break mismatch.** The generator used
+  `np.argsort(last)[::-1]` (non-stable, highest-index-first on ties) while the
+  Mojo harness picks lowest-index-first. Real logits do not tie so no value
+  changed (goldens byte-identical for the pre-existing prompts), but the generator
+  now uses `np.argsort(-last, kind="stable")[:5]` so both sides share one rule.
+- **FIXED (Codex Low) — added the `unicode-separators` prompt** (NBSP, U+2028,
+  U+2029): the exact codepoints for which `splitlines()` would break a record but
+  `split('\n')` keeps it inline — validating the parser design, not just
+  tokenization. Both sides use the same Python pre-tokenizer regex + byte-BPE, so
+  they agree (green).
+- **DEFERRED (Opus L3) — a literal special-token string (`<|endoftext|>` in the
+  input) and an RTL-script prompt.** Both optional; the special-token case is the
+  likeliest tokenizer-vs-reference divergence and deserves its own focused test in
+  a later part rather than being bolted on here.
+- **NO ACTION (Opus N1) — `_require_file` opens the `.bin` in text mode "r".** Opus
+  itself flagged this as fine (immediate close, no read, the only mode this
+  toolchain has) and recommended no change.
+
+After the fixes the gauntlet is green at **16/16** and the malformed-goldens
+rejection was verified (a field deleted from a block produces a named
+`_finish_golden` error before the model even loads).
