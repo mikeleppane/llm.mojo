@@ -40,10 +40,19 @@ jobs:
         run: pixi run fmt-check
 
       # Smoke test first (fails fast on a broken toolchain), then the suite.
-      # `test-fast` is the canonical green gate: it runs every test EXCEPT the
+      # `pixi run test` is the canonical green gate: it runs every test EXCEPT the
       # files listed in SLOW_6554 in scripts/test_all.sh (currently only
       # tests/test_seq_tasks.mojo), which trip Mojo #6554 and can hang a run for
-      # many minutes. That one file is run standalone when it is being changed;
-      # see AGENTS.md ("The #6554 compile stall").
+      # many minutes — the exclusion is the DEFAULT and prints a loud SKIPPED line.
+      # `pixi run test-full` (RUN_SLOW=1) is the opt-in toolchain-upgrade check and
+      # is deliberately NOT run here. See AGENTS.md ("The #6554 compile stall").
       - name: Tests
-        run: pixi run test-fast
+        run: pixi run test
+
+      # Compile-check (does not run) every example and benchmark against the
+      # precompiled package — catches signature/API bit-rot in the guide's
+      # artifacts, which the test suite never sees. No weights, seconds per file.
+      # Running the examples stays a local Tier-2 step (the gauntlet needs the
+      # 475 MB weights that never live in CI).
+      - name: Build examples
+        run: pixi run build-examples
