@@ -20,6 +20,7 @@ from llm.nn.linear import Linear, LinearCache
 from llm.tensor.ops import (
     add,
     concat_cols,
+    matmul_transpose_a,
     matmul_transpose_b,
     scale,
     slice_cols,
@@ -208,11 +209,13 @@ def scaled_dot_product_attention_backward(
             "scaled_dot_product_attention_backward: v/k length mismatch"
         )
     var s = 1.0 / sqrt(Float64(d))
-    var d_v = transpose(cache.weights) @ d_out  # [T_k, D_v]
-    var d_w = d_out @ transpose(cache.v)  # [T_q, T_k]
+    var d_v = matmul_transpose_a(cache.weights, d_out)  # W^T @ dO [T_k, D_v]
+    var d_w = d_out @ transpose(cache.v)  # dO @ V^T [T_q, T_k] (v tiny, kept)
     var d_scores = softmax_rows_backward(cache.weights, d_w)  # [T_q, T_k]
     var d_q = scale(d_scores @ cache.k, s)  # [T_q, D]
-    var d_k = scale(transpose(d_scores) @ cache.q, s)  # [T_k, D]
+    var d_k = scale(
+        matmul_transpose_a(d_scores, cache.q), s
+    )  # dS^T @ Q [T_k, D]
     return AttentionGrads(d_q^, d_k^, d_v^)
 
 
@@ -329,15 +332,19 @@ def scaled_dot_product_attention_train_backward(
     var dropped_w = dropout_backward(
         cache.drop_mask, cache.inv_keep, cache.weights
     )  # [T_q, T_k]
-    var d_v = transpose(dropped_w) @ d_out  # [T_k, D_v]
-    var d_dropped_w = d_out @ transpose(cache.v)  # [T_q, T_k]
+    var d_v = matmul_transpose_a(
+        dropped_w, d_out
+    )  # dropped_W^T @ dO [T_k, D_v]
+    var d_dropped_w = d_out @ transpose(cache.v)  # dO @ V^T [T_q, T_k] (v tiny)
     var d_w = dropout_backward(
         cache.drop_mask, cache.inv_keep, d_dropped_w
     )  # [T_q, T_k]
     var d_scores = softmax_rows_backward(cache.weights, d_w)  # PRE-dropout W
     var s = 1.0 / sqrt(Float64(d))
     var d_q = scale(d_scores @ cache.k, s)  # [T_q, D]
-    var d_k = scale(transpose(d_scores) @ cache.q, s)  # [T_k, D]
+    var d_k = scale(
+        matmul_transpose_a(d_scores, cache.q), s
+    )  # dS^T @ Q [T_k, D]
     return AttentionGrads(d_q^, d_k^, d_v^)
 
 

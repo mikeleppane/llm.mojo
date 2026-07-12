@@ -44,8 +44,8 @@ from llm.nn.optim import adamw_update, sgd_update
 from llm.tensor.ops import (
     add,
     cross_entropy_rows,
+    matmul_transpose_a,
     matmul_transpose_b,
-    transpose,
 )
 from llm.tensor.tensor2d import Tensor2D, zeros_2d
 from llm.transformer.block import (
@@ -352,7 +352,9 @@ struct GPT(Copyable, Movable):
         var c = self.wte.table.value.cols
 
         # Head path into a fresh [V, C] delta; d_h flows on down the stack.
-        var d_table = transpose(d_logits) @ cache.h  # [V, C]
+        var d_table = matmul_transpose_a(
+            d_logits, cache.h
+        )  # d_logits^T @ h [V, C]
         var d_h = d_logits @ self.wte.table.value  # [T, C]
 
         # ln_f and the block stack.
