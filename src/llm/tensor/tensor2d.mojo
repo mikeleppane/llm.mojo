@@ -14,6 +14,7 @@
 # checked on demand.
 
 from std.collections import List
+from std.sys import simd_width_of
 
 
 @fieldwise_init
@@ -77,19 +78,42 @@ struct Tensor2D(Copyable, Movable, Writable):
     def __matmul__(self, other: Tensor2D) raises -> Tensor2D:
         # Matrix multiply via the `@` operator: [M, K] @ [K, N] -> [M, N] in ikj
         # loop order. The inner loop walks other[k, *] and result[i, *]
-        # contiguously along rows, which is cache-friendly and often several
-        # times faster than the clear ijk form on non-trivial sizes. Raises on a
-        # shape mismatch; allocates the result. (The teaching contrast, the plain
-        # ijk kernel, lives in ops.matmul.)
+        # contiguously along rows, which is cache-friendly and vectorizes: the W
+        # output columns result[i, j..j+W] are updated in one SIMD fused step
+        # result[i, j:] += a_ik * other[k, j:], with a scalar tail for the ragged
+        # remainder. Raises on a shape mismatch; allocates the result. (The
+        # teaching contrast, the plain ijk kernel, lives in ops.matmul.)
+        #
+        # This is a Class A (order-preserving) vectorization: each output cell
+        # result[i, j] still accumulates over k in the SAME ascending order as the
+        # scalar loop — SIMD only groups the independent j columns, never the k
+        # reduction — so every cell is bit-identical to the scalar ikj result (a
+        # test pins exact equality against a scalar reference). Contrast
+        # _simd_dot / matmul_transpose_b, which DO regroup the k-sum (Class B).
         if self.cols != other.rows:
             raise Error("matmul shape mismatch")
-        var result = zeros_2d(self.rows, other.cols)
+        comptime W = simd_width_of[DType.float64]()
+        var n = other.cols
+        var result = zeros_2d(self.rows, n)
+        var pres = result.data.unsafe_ptr()
+        var poth = other.data.unsafe_ptr()
         for i in range(self.rows):
+            var ibase = i * n
             for k in range(self.cols):
-                # self[i, k] is constant across j; hoist it out of the inner loop.
+                # self[i, k] is constant across j; hoist it and broadcast it.
                 var a_ik = self[i, k]
-                for j in range(other.cols):
+                var a_vec = SIMD[DType.float64, W](a_ik)
+                var obase = k * n
+                var j = 0
+                while j + W <= n:
+                    var acc = pres.load[width=W](ibase + j) + a_vec * poth.load[
+                        width=W
+                    ](obase + j)
+                    pres.store(ibase + j, acc)
+                    j += W
+                while j < n:
                     result[i, j] += a_ik * other[k, j]
+                    j += 1
         return result^
 
 

@@ -69,6 +69,52 @@ def test_at_operator_matches_matmul() raises:
             assert_almost_equal(c1[i, j], c2[i, j], atol=1e-12)
 
 
+def _scalar_ikj(a: Tensor2D, b: Tensor2D) raises -> Tensor2D:
+    # The plain scalar ikj matmul — the reference the SIMD-over-j `@` operator
+    # must match BIT-FOR-BIT. Same loop order as `@`, no vectorization: each
+    # out[i, j] accumulates over k ascending via out[i, j] += a[i, k]*b[k, j].
+    var out = zeros_2d(a.rows, b.cols)
+    for i in range(a.rows):
+        for k in range(a.cols):
+            var a_ik = a[i, k]
+            for j in range(b.cols):
+                out[i, j] += a_ik * b[k, j]
+    return out^
+
+
+def test_at_operator_bit_identical_to_scalar_ikj() raises:
+    # `@` vectorizes over the OUTPUT columns j (Class A): each cell still sums k in
+    # the same ascending order as the scalar ikj loop, so the two must be EXACTLY
+    # equal (assert_equal, no tolerance) — SIMD-over-j reorders nothing that gets
+    # summed. Any drift here is a real bug (a mis-handled tail, an off-by-one in
+    # the vector step), not float noise. Seeded shapes span sizes 1 and 2 and
+    # output widths n that are NOT multiples of the f64 SIMD width 4 (1, 2, 3, 5,
+    # 7, 13) so the scalar remainder loop is exercised beside the full vectors.
+    var rng = Rng(20260713)
+    var shapes = [
+        (1, 1, 1),
+        (2, 3, 2),
+        (3, 4, 5),
+        (2, 5, 7),
+        (4, 8, 13),
+        (1, 768, 3),
+        (5, 64, 64),
+    ]
+    for s in range(len(shapes)):
+        var m = shapes[s][0]
+        var k = shapes[s][1]
+        var n = shapes[s][2]
+        var a = _random_tensor(rng, m, k)
+        var b = _random_tensor(rng, k, n)
+        var fast = a @ b
+        var reference = _scalar_ikj(a, b)
+        assert_equal(fast.rows, m)
+        assert_equal(fast.cols, n)
+        for i in range(m):
+            for j in range(n):
+                assert_equal(fast[i, j], reference[i, j])
+
+
 def test_at_operator_shape_mismatch_raises() raises:
     # The `@` operator carries its own shape guard; pin it so it can't be
     # deleted unnoticed.
