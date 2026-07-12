@@ -24,7 +24,7 @@ test-fast` is the canonical gate — it runs the whole suite except one
 | XV | Generation | ✅ green (top-k + top-p distribution filters in probability space; one `SamplerConfig` policy — greedy/temperature/top-k/top-p — with temperature 0 = argmax drawing zero rng; the autoregressive `generate` loop with sliding-window crop and append-then-halt stop tokens; LCG-replay sampled goldens; a memorize-then-speak capstone; the Shakespeare checkpoint speaking four ways) | `pixi run test-fast` | 2026-07-05 |
 | XVI | Loading real GPT-2 weights (the MVP) | ✅ green (offline safetensors→`GPT2W v1` converter with every Conv1D transpose + buffer skip in one place; native `load_gpt2` builds the GPT fieldwise from the f32 payload, exact f32→f64 widening, named header validation; doll-house sentinel parity in-suite + f64 goldens at 124M; **the from-scratch Mojo forward, fed OpenAI's real weights, generates coherent English** — HF-f32 agreement 6e-5) | `pixi run test-fast` | 2026-07-05 |
 | XVII | The KV cache | ✅ green (per-layer `KVCache` of preallocated `[context_length, C]` key/value buffers; additive `step` methods on attention/block/gpt that feed ONE token and reuse the cached past, reusing the frozen `scaled_dot_product_attention` with a zeros `[1, t]` mask; `matmul_transpose_b` for the tied head with no per-token transpose; `generate_cached` twin of `generate` with an up-front overflow raise; **step-vs-forward logits BIT-IDENTICAL at every prefix**, generation + rng-stream parity, and the 124M greedy text character-identical to Part XVI at ~8.3× (0.78 vs 6.49 s/token) — the ALGORITHM fix, arithmetic still scalar f64) | `pixi run test-fast` | 2026-07-11 |
-| XVIII+ | Performance (SIMD, arithmetic) | not started | — | — |
+| XVIII | Performance (SIMD + threading) | ✅ green (a private multi-accumulator SIMD `_simd_dot` under `matvec`/`matmul_transpose_b` — the one Class B reassociation, 1e-12-relative tested; SIMD-over-columns `@`, `matmul_transpose_a` for the backward, and `std.algorithm` threading of both reduction kernels — all Class A, bit-identical, exact-equality + determinism tested; call-site retrofits onto `matmul_transpose_b`/`_a` delete a transpose alloc per call; memcpy slice/concat hygiene; **greedy 124M decode 0.784 → 0.0249 s/token (31.5×), training step 367.8 → 20.2 ms (18.2×), text character-identical** — the ARITHMETIC fix, whole existing suite green UNCHANGED, XVII exact parity untouched) | `pixi run test-fast` | 2026-07-12 |
 
 ## Notes
 
@@ -202,8 +202,18 @@ test-fast` is the canonical gate — it runs the whole suite except one
 |------|--------|
 | `tests/test_kv_cache.mojo` | `fresh` shapes/length/capacity; `check_compatible` named raises (wrong layer count, width, capacity); `GPT.step` fills to exactly capacity then raises NAMED when full (failed step does not advance length); **the centerpiece — step-vs-forward EXACT logits parity at every prefix on a TWO-layer doll-house** (`assert_equal`, all V columns, no tolerance); `reset` replays bit-identically; a bad token id raises and leaves `length` trustworthy |
 | `tests/test_generate.mojo` (extended) | `generate_cached == generate` token-for-token AND `rng.state` identical (stream parity) — greedy and a temperature-0.9 top-k+top-p config on a two-layer doll-house; up-front overflow raise and the ==context_length success; contract parity (empty prompt, negative budget, zero-budget no-op with rng untouched, append-then-halt, prompt stop-ids ignored) |
-| `tests/test_matmul.mojo` (extended) | `matmul_transpose_b` hand-computed; **EXACTLY equals `matmul(a, transpose(b))`** on seeded shapes incl. a `[1, k]` row (`assert_equal`); contraction-width-mismatch raise |
+| `tests/test_matmul.mojo` (extended) | `matmul_transpose_b` hand-computed; equals `matmul(a, transpose(b))` on seeded shapes incl. a `[1, k]` row (see Part XVIII — Class B, now 1e-12 relative); contraction-width-mismatch raise |
 | `tests/test_slicing.mojo` (extended) | `slice_rows` hand-checked, prefix-as-cache-view, full-height identity, bad-range raises |
+
+### Performance — SIMD + threading (Part XVIII)
+
+| File | Covers |
+|------|--------|
+| `tests/test_matmul.mojo` (extended) | **Class B** `matmul_transpose_b` and `matvec` vs the scalar spelling at **1e-12 RELATIVE** on real dims (k=768, 3072) and ragged tails (5, 7, 13, 769, 3073); **Class A** `@` SIMD-over-columns **bit-identical** to a scalar ikj reference (`assert_equal`, ragged widths) and `matmul_transpose_a` **bit-identical** to `transpose(a) @ b`; threaded-path correctness + two-call **determinism** (exact) for both `matmul_transpose_b` and `@` |
+| `tests/test_generate.mojo` (extended) | `generate_cached` **determinism** after threading — same seed, two runs, identical greedy AND nucleus tokens, on a model sized so the tied head crosses the threading threshold |
+| `benchmarks/bench_kernels.mojo` (new) | decode-shape kernel table (measurement only, no assertions) — the before/after evidence per stage |
+
+Everything else is implementation-only under stable contracts: the SIMD/threaded kernels slot in under `matmul`/`matmul_transpose_b`/`matvec`/`@`, and the whole pre-existing suite (XVII exact parity, gradient-doubling, 124M 1e-6 goldens) passes UNCHANGED. Gated stages: threading (D4) **in**; fused decode attention (D5) **skipped on profile evidence** — KV copies subdominant and the memcpy hygiene made them 5–9× cheaper; `matmul_transpose_a` (D6) **in** — the transpose alloc was 28–65% of each backward product.
 
 ### Training (Part XIV)
 
