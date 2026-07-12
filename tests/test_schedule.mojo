@@ -94,6 +94,13 @@ def test_schedule_config_validate() raises:
         ScheduleConfig(10, -0.1).validate(100, 1.0)
     with assert_raises(contains="must be <= peak"):
         ScheduleConfig(10, 2.0).validate(100, 1.0)
+    # A NaN or +inf min_lr must raise too (isfinite guards the one-sided bound).
+    var nan_lr: Float64 = FloatLiteral.nan
+    with assert_raises(contains="min_lr must be >= 0"):
+        ScheduleConfig(10, nan_lr).validate(100, 1.0)
+    var inf_lr: Float64 = FloatLiteral.infinity
+    with assert_raises(contains="min_lr must be >= 0"):
+        ScheduleConfig(10, inf_lr).validate(100, 1.0)
 
 
 def main() raises:

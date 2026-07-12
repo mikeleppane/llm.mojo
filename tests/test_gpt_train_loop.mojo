@@ -240,6 +240,16 @@ def test_adamw_config_validate() raises:
         AdamWConfig(0.9, 0.95, 0.0, 0.1, 1.0).validate()
     with assert_raises(contains="grad_clip must be positive"):
         AdamWConfig(0.9, 0.95, 1e-8, 0.1, 0.0).validate()
+    # Non-finite hyperparameters must raise too (a NaN beta or +inf eps would
+    # otherwise pass the bare bounds and silently poison every optimizer step).
+    var nan_v: Float64 = FloatLiteral.nan
+    var inf_v: Float64 = FloatLiteral.infinity
+    with assert_raises(contains="beta1 must be in"):
+        AdamWConfig(nan_v, 0.95, 1e-8, 0.1, 1.0).validate()
+    with assert_raises(contains="eps must be positive"):
+        AdamWConfig(0.9, 0.95, inf_v, 0.1, 1.0).validate()
+    with assert_raises(contains="grad_clip must be positive"):
+        AdamWConfig(0.9, 0.95, 1e-8, 0.1, inf_v).validate()
 
 
 def main() raises:
