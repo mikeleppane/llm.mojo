@@ -164,3 +164,46 @@ tests they describe are examples of the "exactness is the contract" case in
   (the GPT2W loader pins this with a probe). Scan for the header's newline and
   break at it rather than reading the whole file into a `String` — a 498 MB
   payload should never materialize as one string.
+
+## SIMD, pointers, and parallelism (the performance-part API surface)
+
+Verified while vectorizing and threading the tensor kernels. Pretrained models
+get most of this wrong (stale API); compile against the pin to confirm.
+
+- **SIMD over `List[Float64]` needs no storage redesign.** `list.unsafe_ptr()`
+  returns an `UnsafePointer`; `ptr.load[width=W](i)` reads a `SIMD[DType.float64,
+  W]` from a contiguous span and `ptr.store(i, vec)` writes one back;
+  `(v0 + v1).reduce_add()` horizontally sums. The lane count is
+  `simd_width_of[DType.float64]()` from `std.sys` (**4** on this AVX2 host) — a
+  `comptime` value. A flat row-major `List[Float64]` is directly SIMD-addressable,
+  so no `UnsafePointer`-backed tensor rewrite is required.
+- **A multi-accumulator SIMD dot reassociates the sum.** Keeping several
+  accumulator vectors (to break the scalar add-chain latency — a ~25× single-
+  thread win at k=768/3072) regroups the additions, so the result differs from the
+  strict left-to-right scalar order by ~k·eps. That is a numerics-contract choice
+  (bit-exact vs fast), not a bug — classify and test it (1e-12 relative vs the
+  scalar oracle), don't paper over it. SIMD across the *output* dimension instead
+  (columns of a matmul) keeps the per-element k-order and stays bit-identical.
+- **`std.algorithm.parallelize`** signature (pinned):
+  `parallelize[origins, //, func: def(Int) capturing -> None](num_work_items:
+  Int, num_workers: Int = ..., ctx = None)`. The worker MUST be an
+  `@parameter def(Int)` (it is consumed as a comptime parameter); captures
+  (`unsafe_ptr`s to the operands/output, `read` borrows) are inferred — no explicit
+  capture list. Partition the work into ~`ncores` contiguous blocks yourself and
+  pass the block count as `num_work_items`; passing a huge item count (one per
+  row) drowns in per-task overhead.
+- **Write parallel output through a raw `unsafe_ptr`, not a `mut` capture.** A
+  shared `mut result` captured across workers trips the exclusivity checker; take
+  `result.data.unsafe_ptr()` once and have each worker write its DISJOINT cells
+  through it. A `read`-borrowed `self`/operands captured by multiple workers is
+  fine (immutable sharing). A static, disjoint partition is bit-identical to serial
+  and run-to-run deterministic (pin it with a two-call exact-equality test).
+- **`memcpy` is keyword-only:** `memcpy(dest=dst_ptr, src=src_ptr, count=n)`
+  (import from `std.memory`). Positional args fail to parse. It is the clean way to
+  copy a contiguous row (slice/concat) instead of an element loop through the
+  checked `[i, j]` subscript.
+- **Non-associativity is a feature test, not a fear.** On this toolchain, `a*b+c`
+  written as a SIMD expression and as a scalar `+=` contract to FMA *consistently*,
+  so SIMD-over-columns matmul and `matmul_transpose_a` came out bit-identical to
+  their scalar references (exact `assert_equal` passes) — verify it rather than
+  pre-emptively loosening to a tolerance.
