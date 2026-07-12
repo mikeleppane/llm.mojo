@@ -122,7 +122,14 @@ def test_at_operator_bit_identical_to_scalar_ikj() raises:
             40,
             100,
             101,
-        ),  # threaded, m not divisible by the block count, ragged n
+        ),  # single-threaded (work 404k < 1M), ragged n exercises the tail
+        (
+            64,
+            128,
+            129,
+        ),  # THREADED (work ~1.06M >= 1M, m>=2) AND ragged n (129 % 4, % 8 != 0):
+        # exercises the remainder loop inside a parallelize worker, where the tail
+        # must write through the raw pointer, not the mut `result` capture
     ]
     for s in range(len(shapes)):
         var m = shapes[s][0]
