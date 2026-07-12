@@ -3,9 +3,10 @@
 Read-only vector inputs are borrowed `Span[Float64, _]` views — a Tensor2D row
 (via `.row()`) or a List both coerce in, so no per-row copy on the hot path;
 owned results are fresh `List[Float64]`. Covers elementwise add/scale, transpose,
-matmul in two loop orders plus matvec, numerically stable softmax and
-cross-entropy, and argmax. Softmax and logsumexp subtract the row max before
-exponentiating so large logits never overflow.
+row/column slicing and column concat, four matmul variants (naive ijk, the
+optimized ikj `@` delegate, and the two transposed-operand kernels) plus matvec,
+numerically stable softmax and cross-entropy, and argmax. Softmax and logsumexp
+subtract the row max before exponentiating so large logits never overflow.
 """
 
 from std.algorithm import parallelize
