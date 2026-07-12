@@ -25,7 +25,7 @@ from llm.utils.random import Rng
 
 def _random_tensor(mut rng: Rng, rows: Int, cols: Int) -> Tensor2D:
     # A [rows, cols] tensor of seeded normal draws — a shared builder for the
-    # matmul_transpose_b exact-equality tests.
+    # matmul_transpose_b / matvec kernel-vs-reference tests.
     var t = zeros_2d(rows, cols)
     for r in range(rows):
         for c in range(cols):
@@ -109,35 +109,70 @@ def test_matmul_transpose_b_hand_computed() raises:
     assert_almost_equal(c[1, 1], 167.0, atol=1e-12)
 
 
-def test_matmul_transpose_b_equals_composed_spelling() raises:
-    # The load-bearing claim: matmul_transpose_b(a, b) is BIT-IDENTICAL to
-    # matmul(a, transpose(b)). transpose only relabels indices, so each output
-    # cell accumulates over k in the same ascending order — the results must be
-    # EXACTLY equal, not merely close (assert_equal, no tolerance). This pins the
-    # exactness the KV-cache tied head inherits. Note the batch head actually uses
-    # the `@` operator (the ikj kernel), not this ijk `matmul`; all THREE spellings
-    # accumulate each output cell over k ascending, so all three are bit-identical
-    # (the `@`-vs-ijk equality is pinned by test_at_operator_matches_matmul). We
-    # compare against `matmul` here because it makes the k-order explicit; the real
-    # decode-vs-batch head path is covered end to end by the step parity test.
-    # Several seeded shapes, including a [1, k] decode row.
+def _assert_close_rel(got: Float64, want: Float64, tag: String) raises:
+    # |got - want| <= atol + rtol*|want|, the numpy-style mixed bound. rtol 1e-12
+    # is the Class B contract: matmul_transpose_b's SIMD dot reassociates the
+    # k-sum, so it agrees with the scalar spelling only to ~k*eps (~7e-13 at the
+    # largest real k=3072), not bit-for-bit. atol 1e-9 floors near-zero cells
+    # where a cancelling dot has no meaningful relative scale — still six orders
+    # tighter than any model golden, so a real tail/reorder bug (errors far larger
+    # than 1e-9) is caught, while legitimate reassociation passes.
+    var tol = 1e-9 + 1e-12 * abs(want)
+    if abs(got - want) > tol:
+        raise Error(
+            "not close ("
+            + tag
+            + "): got "
+            + String(got)
+            + " want "
+            + String(want)
+            + " |diff| "
+            + String(abs(got - want))
+            + " > tol "
+            + String(tol)
+        )
+
+
+def test_matmul_transpose_b_matches_composed_spelling() raises:
+    # matmul_transpose_b(a, b) == matmul(a, transpose(b)) to 1e-12 RELATIVE. It is
+    # a Class B kernel: a multi-accumulator SIMD dot over the contraction k, which
+    # reassociates the sum vs the scalar spelling's left-to-right order (float
+    # addition is not associative), so the two agree within ~k*eps, NOT bit-for-bit.
+    # `matmul` stays the scalar ijk reference oracle — this is a fast-vs-naive
+    # comparison, the only kind that proves the fast kernel correct. Shapes span the
+    # real model contraction widths (k=768 c_attn/scores/tiedhead, k=3072 mlp_down),
+    # [1, k] decode rows, and RAGGED tails k not divisible by the f64 SIMD width
+    # (4 here) — 5, 7, 13, 769, 3073 — to exercise the scalar remainder loop.
     var rng = Rng(20260711)
-    var shapes = [(3, 4, 5), (1, 7, 6), (4, 4, 4), (2, 1, 3), (6, 3, 1)]
+    var shapes = [
+        (3, 4, 5),
+        (1, 7, 6),
+        (4, 4, 4),
+        (2, 1, 3),
+        (6, 3, 1),
+        (1, 5, 8),
+        (2, 13, 4),
+        (1, 768, 7),
+        (3, 768, 5),
+        (1, 3072, 2),
+        (2, 769, 3),
+        (1, 3073, 4),
+    ]
     for s in range(len(shapes)):
         var m = shapes[s][0]
         var k = shapes[s][1]
         var n = shapes[s][2]
         var a = _random_tensor(rng, m, k)  # [M, K]
         var b = _random_tensor(rng, n, k)  # [N, K], stored un-transposed
-        var direct = matmul_transpose_b(a, b)  # a @ b^T
-        var composed = matmul(a, transpose(b))  # a @ (b^T), materialized
+        var direct = matmul_transpose_b(a, b)  # a @ b^T, SIMD dot
+        var composed = matmul(a, transpose(b))  # a @ (b^T), scalar reference
         assert_equal(direct.rows, m)
         assert_equal(direct.cols, n)
         for i in range(m):
             for j in range(n):
-                # Exact equality on purpose: the summation orders are identical,
-                # so any drift is a real reordering bug, not float noise.
-                assert_equal(direct[i, j], composed[i, j])
+                _assert_close_rel(
+                    direct[i, j], composed[i, j], "mtb k=" + String(k)
+                )
 
 
 def test_matmul_transpose_b_shape_mismatch_raises() raises:
@@ -155,6 +190,37 @@ def test_matvec_hand_computed() raises:
     var y = matvec(a, x)
     assert_almost_equal(y[0], 210.0, atol=1e-12)  # 1*10 + 2*100
     assert_almost_equal(y[1], 430.0, atol=1e-12)  # 3*10 + 4*100
+
+
+def _scalar_dot(a: Tensor2D, row: Int, x: List[Float64]) -> Float64:
+    # Left-to-right scalar dot of a[row, :] with x — the naive reference the
+    # SIMD matvec must match to 1e-12 relative.
+    var acc = 0.0
+    for k in range(a.cols):
+        acc += a[row, k] * x[k]
+    return acc
+
+
+def test_matvec_matches_scalar_dot() raises:
+    # matvec is the same Class B SIMD dot as matmul_transpose_b, in vector form:
+    # y[i] = dot(a[i, :], x). Pin it against the scalar left-to-right dot at the
+    # real decode contraction widths and ragged tails (k not a multiple of the
+    # f64 SIMD width 4), so the reassociated result agrees to ~k*eps.
+    var rng = Rng(20260712)
+    var ks = [1, 3, 5, 7, 13, 768, 769, 3072, 3073]
+    for s in range(len(ks)):
+        var k = ks[s]
+        var m = 4
+        var a = _random_tensor(rng, m, k)  # [m, k]
+        var x = List[Float64](capacity=k)
+        for _ in range(k):
+            x.append(rng.normal(0.0, 1.0))
+        var y = matvec(a, x)  # SIMD dot per row
+        assert_equal(len(y), m)
+        for i in range(m):
+            _assert_close_rel(
+                y[i], _scalar_dot(a, i, x), "matvec k=" + String(k)
+            )
 
 
 def test_matvec_shape_mismatch_raises() raises:

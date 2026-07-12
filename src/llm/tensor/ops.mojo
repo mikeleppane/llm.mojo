@@ -15,6 +15,7 @@
 
 from std.collections import List
 from std.math import exp, log
+from std.sys import simd_width_of
 
 from llm.tensor.tensor2d import Tensor2D, zeros_2d
 
@@ -136,6 +137,54 @@ def concat_cols(parts: List[Tensor2D]) raises -> Tensor2D:
     return out^
 
 
+# --- SIMD dot kernel (Class B: reassociates the k-sum) ---
+
+
+def _simd_dot(a: Span[Float64, _], b: Span[Float64, _]) -> Float64:
+    # Dot product of two contiguous EQUAL-LENGTH f64 spans, vectorized. This is
+    # the one reduction kernel matvec and matmul_transpose_b both consolidate on:
+    # both dot a contiguous row against a contiguous vector.
+    #
+    # Class B, deliberately. The scalar `for k: acc += a[k]*b[k]` sums strictly
+    # left to right; this keeps `4 * W` independent SIMD accumulators, so the
+    # additions are regrouped. Float addition is not associative, so the result
+    # differs from the scalar order by ~k*eps relative (~7e-13 at k=3072) — the
+    # price of breaking the scalar loop's serial add-chain latency for the ~25x
+    # single-thread win the decode path lives on. The regrouping is FIXED by the
+    # length alone (same lanes, same tree, every call), so a given operand pair
+    # yields identical bits no matter who calls it — which is what lets the batch
+    # and cached-step paths, both routed here, stay bit-identical to each other.
+    # The scalar `matmul` stays in this file as the readable/oracle spelling.
+    comptime W = simd_width_of[DType.float64]()
+    var n = len(a)
+    var pa = a.unsafe_ptr()
+    var pb = b.unsafe_ptr()
+    var acc0 = SIMD[DType.float64, W](0.0)
+    var acc1 = SIMD[DType.float64, W](0.0)
+    var acc2 = SIMD[DType.float64, W](0.0)
+    var acc3 = SIMD[DType.float64, W](0.0)
+    var k = 0
+    var step = 4 * W
+    # Main body: four vectors of width W per iteration, four accumulators to hide
+    # the FMA latency.
+    while k + step <= n:
+        acc0 = pa.load[width=W](k) * pb.load[width=W](k) + acc0
+        acc1 = pa.load[width=W](k + W) * pb.load[width=W](k + W) + acc1
+        acc2 = pa.load[width=W](k + 2 * W) * pb.load[width=W](k + 2 * W) + acc2
+        acc3 = pa.load[width=W](k + 3 * W) * pb.load[width=W](k + 3 * W) + acc3
+        k += step
+    # Remaining whole vectors.
+    while k + W <= n:
+        acc0 = pa.load[width=W](k) * pb.load[width=W](k) + acc0
+        k += W
+    var acc = (acc0 + acc1 + acc2 + acc3).reduce_add()
+    # Scalar tail: the ragged 0..W-1 elements that don't fill a vector.
+    while k < n:
+        acc += a[k] * b[k]
+        k += 1
+    return acc
+
+
 # --- matmul family ---
 
 
@@ -170,32 +219,31 @@ def matmul_ikj(a: Tensor2D, b: Tensor2D) raises -> Tensor2D:
 
 def matvec(a: Tensor2D, x: Span[Float64, _]) raises -> List[Float64]:
     # Matrix-vector product [M, K] @ [K] -> [M]. The special case that dominates
-    # single-token decoding. The inner loop walks a[i, *] contiguously. Raises on
-    # a shape mismatch; allocates the result.
+    # single-token decoding: each output is one row of a dotted with x. Runs the
+    # Class B SIMD dot per row (so ~k*eps reassociation vs a scalar loop — see
+    # _simd_dot). Raises on a shape mismatch; allocates the result.
     if a.cols != len(x):
         raise Error("matvec shape mismatch")
     var out = List[Float64](capacity=a.rows)  # one row entry per output
     for i in range(a.rows):
-        var acc = 0.0
-        for k in range(a.cols):
-            acc += a[i, k] * x[k]
-        out.append(acc)
+        out.append(_simd_dot(a.row(i), x))
     return out^
 
 
 def matmul_transpose_b(a: Tensor2D, b: Tensor2D) raises -> Tensor2D:
     # c = a @ b^T WITHOUT materializing b^T: [M, K] @ [N, K]^T -> [M, N] with
-    #     c[i, j] = sum_k a[i, k] * b[j, k].
+    #     c[i, j] = dot(a[i, :], b[j, :]).
     # Both a and b share the contraction width K as their COLUMN count (b is
     # stored un-transposed), so the guard is a.cols == b.cols, not a.cols ==
-    # b.rows. The inner sum walks k ascending — the SAME order as
-    # matmul(a, transpose(b)), which computes the same c[i, j] = sum_k a[i, k] *
-    # transpose(b)[k, j] = sum_k a[i, k] * b[j, k] over k ascending. Transpose
-    # only relabels indices; it does not reorder the accumulation, so the two
-    # spellings are BIT-IDENTICAL (a test pins the exact equality), and this one
+    # b.rows. Each output cell is a Class B SIMD dot (see _simd_dot): it computes
+    # the same c[i, j] = sum_k a[i, k] * b[j, k] as matmul(a, transpose(b)), but
+    # regroups the k-sum across SIMD accumulators, so it agrees with that scalar
+    # spelling within ~k*eps (a test pins 1e-12 relative), not bit-for-bit. It
     # never allocates the [K, N] transpose. The tied LM head uses it to score one
     # decode row against the [V, C] embedding table without a ~309 MB per-token
-    # transpose copy. Raises on a contraction-width mismatch; allocates the result.
+    # transpose copy; because the reduction tree is fixed by K, the batch and
+    # cached-step heads (both routed here) still produce identical bits for a
+    # shared row. Raises on a contraction-width mismatch; allocates the result.
     if a.cols != b.cols:
         raise Error(
             "matmul_transpose_b shape mismatch: a.cols="
@@ -205,11 +253,9 @@ def matmul_transpose_b(a: Tensor2D, b: Tensor2D) raises -> Tensor2D:
         )
     var out = zeros_2d(a.rows, b.rows)
     for i in range(a.rows):
+        var arow = a.row(i)  # contiguous [K] view, reused across all j
         for j in range(b.rows):
-            var acc = 0.0
-            for k in range(a.cols):
-                acc += a[i, k] * b[j, k]
-            out[i, j] = acc
+            out[i, j] = _simd_dot(arow, b.row(j))
     return out^
 
 
