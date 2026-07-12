@@ -16,6 +16,7 @@
 from std.algorithm import parallelize
 from std.collections import List
 from std.math import exp, log
+from std.memory import memcpy
 from std.sys import simd_width_of
 
 from llm.tensor.tensor2d import Tensor2D, zeros_2d
@@ -84,9 +85,12 @@ def slice_cols(a: Tensor2D, start: Int, end: Int) raises -> Tensor2D:
         )
     var width = end - start
     var out = zeros_2d(a.rows, width)
+    # The [start, end) band of each row is contiguous in a's flat storage, so
+    # copy it in one shot instead of element by element (same bytes, Class A).
+    var pa = a.data.unsafe_ptr()
+    var po = out.data.unsafe_ptr()
     for r in range(a.rows):
-        for c in range(width):
-            out[r, c] = a[r, start + c]
+        memcpy(dest=po + r * width, src=pa + r * a.cols + start, count=width)
     return out^
 
 
@@ -108,9 +112,14 @@ def slice_rows(a: Tensor2D, start: Int, end: Int) raises -> Tensor2D:
         )
     var height = end - start
     var out = zeros_2d(height, a.cols)
+    # Each output row is a whole contiguous row of a — copy the full [start, end)
+    # band of rows in one memcpy per row (same bytes, Class A). This is the KV
+    # decode path's per-token cache view, whose cost grows with context length.
+    var w = a.cols
+    var pa = a.data.unsafe_ptr()
+    var po = out.data.unsafe_ptr()
     for r in range(height):
-        for c in range(a.cols):
-            out[r, c] = a[start + r, c]
+        memcpy(dest=po + r * w, src=pa + (start + r) * w, count=w)
     return out^
 
 
@@ -136,12 +145,19 @@ def concat_cols(parts: List[Tensor2D]) raises -> Tensor2D:
             )
         total_cols += parts[i].cols
     var out = zeros_2d(rows, total_cols)
+    var po = out.data.unsafe_ptr()
     var col_offset = 0
     for i in range(len(parts)):
         var part_cols = parts[i].cols
+        # Each part's row is contiguous; drop it into its column band with one
+        # memcpy per row (same bytes, Class A).
+        var pp = parts[i].data.unsafe_ptr()
         for r in range(rows):
-            for c in range(part_cols):
-                out[r, col_offset + c] = parts[i][r, c]
+            memcpy(
+                dest=po + r * total_cols + col_offset,
+                src=pp + r * part_cols,
+                count=part_cols,
+            )
         col_offset += part_cols
     return out^
 
