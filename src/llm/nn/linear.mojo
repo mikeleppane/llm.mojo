@@ -30,7 +30,7 @@ struct LinearCache(Copyable, Movable):
 
 @fieldwise_init
 struct LinearForward(Copyable, Movable):
-    """forward_cached's output plus the cache its backward consumes.
+    """Output of forward_cached plus the cache its backward consumes.
 
     Bundling them keeps the forward/backward pairing explicit — the cache travels
     with the output it belongs to.

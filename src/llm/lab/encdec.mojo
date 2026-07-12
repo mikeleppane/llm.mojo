@@ -87,6 +87,16 @@ struct EncDecForward(Copyable, Movable):
 
 @fieldwise_init
 struct EncDec(Copyable, Movable):
+    """A small encoder-decoder Transformer for sequence-to-sequence tasks.
+
+    The encoder embeds the source and runs it through EncoderBlocks to a memory
+    [T_src, C]; the decoder embeds the target, runs DecoderBlocks that self-attend
+    causally and cross-attend to that memory, and projects through a tied head to
+    logits. Assembled from the same layers as the main GPT (weight-tied embeddings,
+    pre-norm blocks) plus cross-attention — the cheapest way to exercise the full
+    encoder-decoder training loop. Quarantined off the main line.
+    """
+
     var src_tok: Embedding  # [V, C]  source token table
     var src_pos: Embedding  # [T_max, C]  source positional table
     var tgt_tok: Embedding  # [V, C]  target token table
