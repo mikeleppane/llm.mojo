@@ -149,7 +149,12 @@ def build_goldens(bin_path: Path, prompts_path: Path) -> str:
         last = logits[-1]
 
         argmax = int(np.argmax(last))
-        top5 = [int(j) for j in np.argsort(last)[::-1][:5]]
+        # Highest logit first, LOWEST id first on a tie — a stable sort of -last
+        # keeps ascending-index order among equal values, matching the Mojo
+        # harness's lowest-index-first _top_k_ids. (np.argmax already returns the
+        # first max, so argmax uses the same tie rule.) Real logits do not tie
+        # exactly, so this only fixes the contract, not any current value.
+        top5 = [int(j) for j in np.argsort(-last, kind="stable")[:5]]
         probes = list(PROBE_INDICES)
         if argmax not in probes:
             probes.append(argmax)
