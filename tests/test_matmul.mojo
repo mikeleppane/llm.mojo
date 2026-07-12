@@ -99,6 +99,12 @@ def test_at_operator_bit_identical_to_scalar_ikj() raises:
         (4, 8, 13),
         (1, 768, 3),
         (5, 64, 64),
+        (64, 128, 512),  # crosses the @ threading threshold (work ~4M, m>=32)
+        (
+            40,
+            100,
+            101,
+        ),  # threaded, m not divisible by the block count, ragged n
     ]
     for s in range(len(shapes)):
         var m = shapes[s][0]
@@ -113,6 +119,20 @@ def test_at_operator_bit_identical_to_scalar_ikj() raises:
         for i in range(m):
             for j in range(n):
                 assert_equal(fast[i, j], reference[i, j])
+
+
+def test_at_operator_threaded_is_deterministic() raises:
+    # The @ operator threads over output rows above the work threshold; that
+    # static partition must be run-to-run bit-identical. Two calls on the same
+    # threaded-size inputs (work ~8M, m=64) must agree EXACTLY.
+    var rng = Rng(20260715)
+    var a = _random_tensor(rng, 64, 256)
+    var b = _random_tensor(rng, 256, 512)
+    var c1 = a @ b
+    var c2 = a @ b
+    for i in range(c1.rows):
+        for j in range(c1.cols):
+            assert_equal(c1[i, j], c2[i, j])
 
 
 def test_at_operator_shape_mismatch_raises() raises:

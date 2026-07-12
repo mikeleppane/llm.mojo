@@ -13,8 +13,16 @@
 # bounds-checks and therefore raises — the debugging/test path. Fast by default,
 # checked on demand.
 
+from std.algorithm import parallelize
 from std.collections import List
 from std.sys import simd_width_of
+
+# Below this many multiply-adds (m*n*k), the @ matmul runs single-threaded: the
+# parallelize dispatch costs more than it saves on the small products (decode's
+# attention weights @ v is tiny and stays serial). Threading independent output
+# ROWS is bit-identical to serial — each row computed by one worker in the same
+# order — so this threshold trades only speed, never numbers.
+comptime _MATMUL_THREAD_MIN_WORK = 1_000_000
 
 
 @fieldwise_init
@@ -90,30 +98,56 @@ struct Tensor2D(Copyable, Movable, Writable):
         # reduction — so every cell is bit-identical to the scalar ikj result (a
         # test pins exact equality against a scalar reference). Contrast
         # _simd_dot / matmul_transpose_b, which DO regroup the k-sum (Class B).
+        # Threading (when the product is large enough) partitions the independent
+        # output ROWS across workers — each result row is computed entirely by one
+        # worker in the unchanged k-order, so it stays bit-identical to serial and
+        # run-to-run stable (Class A, like matmul_transpose_b's column threading).
         if self.cols != other.rows:
             raise Error("matmul shape mismatch")
         comptime W = simd_width_of[DType.float64]()
+        var m = self.rows
+        var kdim = self.cols
         var n = other.cols
-        var result = zeros_2d(self.rows, n)
+        var result = zeros_2d(m, n)
         var pres = result.data.unsafe_ptr()
         var poth = other.data.unsafe_ptr()
-        for i in range(self.rows):
-            var ibase = i * n
-            for k in range(self.cols):
-                # self[i, k] is constant across j; hoist it and broadcast it.
-                var a_ik = self[i, k]
-                var a_vec = SIMD[DType.float64, W](a_ik)
-                var obase = k * n
-                var j = 0
-                while j + W <= n:
-                    var acc = pres.load[width=W](ibase + j) + a_vec * poth.load[
-                        width=W
-                    ](obase + j)
-                    pres.store(ibase + j, acc)
-                    j += W
-                while j < n:
-                    result[i, j] += a_ik * other[k, j]
-                    j += 1
+
+        @parameter
+        def row_block(i0: Int, i1: Int):
+            for i in range(i0, i1):
+                var ibase = i * n
+                for k in range(kdim):
+                    # self[i, k] is constant across j; hoist and broadcast it.
+                    var a_ik = self[i, k]
+                    var a_vec = SIMD[DType.float64, W](a_ik)
+                    var obase = k * n
+                    var j = 0
+                    while j + W <= n:
+                        var acc = pres.load[width=W](
+                            ibase + j
+                        ) + a_vec * poth.load[width=W](obase + j)
+                        pres.store(ibase + j, acc)
+                        j += W
+                    while j < n:
+                        result[i, j] += a_ik * other[k, j]
+                        j += 1
+
+        if m * kdim * n < _MATMUL_THREAD_MIN_WORK or m < 2:
+            row_block(0, m)
+            return result^
+
+        var nblocks = 32 if m >= 32 else m
+        var block = (m + nblocks - 1) // nblocks
+
+        @parameter
+        def worker(t: Int):
+            var i0 = t * block
+            var i1 = i0 + block
+            if i1 > m:
+                i1 = m
+            row_block(i0, i1)
+
+        parallelize[worker](nblocks)
         return result^
 
 
