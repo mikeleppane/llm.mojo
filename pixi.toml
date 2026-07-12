@@ -35,11 +35,11 @@ test-fast = "bash scripts/test_all.sh"
 # (see AGENTS.md). Otherwise prefer running a changed slow file standalone.
 test-full = "RUN_SLOW=1 bash scripts/test_all.sh"
 test-smoke = "mojo run -I src tests/test_smoke.mojo"
-# Tier 2 release gate — the 124M gauntlet. Precompiles the package, then runs the
-# multi-prompt harness against checkpoints/gpt2-124m.bin (needs the real ~475 MB
-# weights; fails with a converter-pointing error if they are absent). Minutes-
-# scale, run locally before every merge to main. NOT run in CI (needs weights).
-gauntlet = "mojo precompile src/llm -o build/llm.mojopkg && mojo run -I build examples/gpt2_gauntlet.mojo"
+# Tier 2 release gate — the 124M gauntlet. Verifies checkpoints/gpt2-124m.bin
+# matches the goldens' pinned sha256, precompiles the package, then runs the
+# multi-prompt harness (fails with a converter-pointing error if the weights are
+# absent). Minutes-scale, run locally before every merge to main. NOT in CI.
+gauntlet = "bash scripts/run_gauntlet.sh"
 # Compile-check (does NOT run) every file in examples/ and benchmarks/ against the
 # precompiled package at -O0 — seconds per file, no weights. Catches example/bench
 # bit-rot that the suite never sees. CI runs this; running the examples stays Tier 2.
