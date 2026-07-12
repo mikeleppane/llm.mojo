@@ -177,13 +177,14 @@ toolchain and Python environment from the lockfile.
 git clone https://github.com/mikeleppane/llm.mojo.git && cd llm.mojo
 pixi install            # exact environment from pixi.lock
 pixi run mojo-version   # verify the pinned Mojo version
-pixi run test-fast      # the green gate (offline, deterministic)
+pixi run test           # the green gate (offline, deterministic)
 ```
 
-`pixi run test-fast` is the canonical gate — it runs the whole suite except one
+`pixi run test` is the canonical gate — it runs the whole suite except one
 file that trips a Mojo compiler stall (see
 [AGENTS.md](AGENTS.md#the-6554-compile-stall-and-how-to-keep-the-tdd-loop-fast)).
-It needs no network: all reference data (~2.5 MB) is committed.
+(`pixi run test-fast` is a retained alias of it.) It needs no network: all
+reference data (~2.5 MB) is committed.
 
 Day-to-day commands:
 
@@ -198,9 +199,10 @@ pixi run mojo run -I src examples/<example>.mojo  # run an example
 **Running the real GPT-2.** The final demo loads OpenAI's released
 124M weights, which are *not* committed: `scripts/convert_gpt2_weights.py`
 downloads and converts them into the repo's `GPT2W v1` format (a ~475 MB file)
-once. Generation then runs in `Float64` on CPU — it holds roughly 2 GB resident
-and, without a KV cache, is on the order of minutes per token. The point of the
-demo is fidelity, not speed.
+once. Generation runs in `Float64` on CPU and holds roughly 2 GB resident. The
+uncached `generate` reruns the whole forward per token; `generate_cached` reuses
+a KV cache and, with the SIMD + threading kernels, decodes at a few hundredths of
+a second per token. The point of the demo is fidelity, not speed.
 
 ## Getting the most out of this if you are learning
 
@@ -228,7 +230,7 @@ demo is fidelity, not speed.
 Working conventions (the Mojo syntax contract, quality gates, dependency
 layering, commit format) live in [AGENTS.md](AGENTS.md), with deeper
 task-specific guidance under [`.agents/skills/`](.agents/skills/). The floor
-for any change: `pixi run fmt` leaves no diff and `pixi run test-fast` is green.
+for any change: `pixi run fmt` leaves no diff and `pixi run test` is green.
 CI enforces both on every push ([ci.yml](.github/workflows/ci.yml)).
 
 ## Data and references

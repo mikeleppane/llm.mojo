@@ -229,10 +229,10 @@ src/llm/          the library — reusable implementation, one package per conce
   data/             text datasets, batch iteration
   tensor/           Tensor2D/Tensor3D and ops (matmul, softmax, ...)
   nn/               parameter, linear, embedding, norm, activation, mlp, optim (AdamW math)
-  transformer/      masks, attention, positional, block, gpt, gpt2_weights (loader)
+  transformer/      masks, attention, positional, block, gpt, kv_cache, gpt2_weights (loader)
   models/           standalone models (bigram); not nn layers, not the GPT
   training/         loss, optimizer, schedule, trainer, checkpoint
-  generation/       sampler, generate  (KV cache is Part XVII — not yet built)
+  generation/       sampler, generate, generate_cached (KV-cache incremental decode)
   lab/              Part-XII encoder-decoder lab — quarantined off the main line
   utils/            random (seeded RNG), timing
 examples/         runnable demonstrations (not core logic)
