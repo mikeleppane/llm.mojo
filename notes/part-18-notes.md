@@ -123,5 +123,47 @@ this. The tied head alone (~49.5 ms) is the single biggest kernel.
 
 ## Per-stage results
 
-<!-- one column appended per stage below -->
+### Stage 1 — call-site retrofits + SIMD dot kernel + SIMD-over-j `@`
+
+Commits: Linear forward retrofit (Class A), attention-score + batch-tied-head
+retrofit (Class A), `_simd_dot` under matvec/matmul_transpose_b (Class B),
+`@` vectorized over output columns (Class A). Whole suite green UNCHANGED
+(the one deliberate test edit is the Class B contract change described above);
+XVII exact step-vs-forward parity untouched and green; 124M 1e-6 goldens green.
+
+**Kernels (median µs, decode m=1):**
+
+| kernel   | baseline | Stage 1 | speedup |
+|----------|----------|---------|---------|
+| c_attn   | 2155     | 155     | 13.9×   |
+| c_proj   | 715      | 49.4    | 14.5×   |
+| mlp_up   | 2903     | 235     | 12.3×   |
+| mlp_down | 2898     | 232     | 12.5×   |
+| tiedhead | 49545    | 12319   | 4.0×    |
+| c_attn batch [64] | 136061 | 10059 | 13.5× |
+| tiedhead batch [64] | 3129594 | 789810 | 4.0× |
+| attn_wv (`@`, ikj) | 353 | 26.5 | 13.3× |
+
+The Linear/score kernels hit ~20–24 GFLOP/s (SIMD-bound); the tied head stays at
+~6.3 GFLOP/s — it is memory-bound, streaming the ~300 MB [50257,768] table once
+per token, so its 4× is bandwidth-limited, not compute-limited. It is now the
+single biggest decode kernel (~12.3 ms of a ~53 ms token).
+
+**End-to-end and training step:**
+
+| metric                         | baseline      | Stage 1        | speedup |
+|--------------------------------|---------------|----------------|---------|
+| one uncached token (len 32)    | 6.371 s       | 0.740 s        | 8.6×    |
+| greedy, KV-cached              | 0.784 s/token | 0.0531 s/token | 14.8×   |
+| nucleus (top-p 0.9), KV-cached | 0.797 s/token | 0.0616 s/token | 12.9×   |
+| training step (doll-house)     | 367.76 ms     | 38.59 ms       | 9.5×    |
+
+**Greedy text unchanged** — character-identical to the baseline/XVII golden. The
+Class B reassociation (~1e-13 relative) flipped no greedy argmax over the 25
+tokens, so D1's near-tie re-pin clause does not trigger; the frozen 124M 1e-6
+logit goldens remain the arbiter and pass. Nucleus text also identical (stream
+parity holds).
+
+<!-- gated stages (threading / fused decode / matmul_transpose_a) below -->
+
 
