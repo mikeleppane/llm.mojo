@@ -340,7 +340,8 @@ struct TransformerBlock(Copyable, Movable):
             d_out: Upstream gradient, shape [T, C].
 
         Returns:
-            d_x [T, C]. Mutates every sublayer's parameter grads (+=); allocates.
+            Gradient d_x [T, C]. Mutates every sublayer's parameter grads (+=);
+            allocates.
 
         Raises:
             Error: On a shape mismatch (via the sublayers).

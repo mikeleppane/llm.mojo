@@ -16,26 +16,32 @@
 # build) fails fast. The remaining tests run in a glob loop so new tests are
 # picked up automatically — no hand-maintained list to drift.
 #
-# Usage:  pixi run test               (preferred, see pixi.toml)
+# Usage:  pixi run test               (canonical green gate — SKIPS the SLOW_6554 files)
 #         bash scripts/test_all.sh
-#         SKIP_SLOW=1 pixi run test    (skip known #6554-slow files for the TDD loop)
+#         RUN_SLOW=1 pixi run test     (equivalently: pixi run test-full — include them)
 #
 # A handful of test files trip Mojo #6554: TestSuite's comptime `discover_tests`
 # builds a thin-function-pointer dispatch table whose compile cost balloons with
 # the module's function count, so the file spends *minutes* in the compiler
-# before a sub-second run. That is intolerable in a red/green TDD loop. Set
-# SKIP_SLOW=1 to skip those files here and run them standalone only when you're
-# actually changing them:  pixi run mojo run --no-optimization -I build tests/<file>
+# before a sub-second run. That is intolerable in a red/green TDD loop, and the
+# standing #6554 member (test_seq_tasks.mojo) stalls so hard it effectively hangs
+# a run. So the DEFAULT here EXCLUDES the SLOW_6554 files and prints a loud
+# per-file SKIPPED line so the exclusion is always visible, never silent. "Green"
+# means green with these files excluded — the mechanics now match the project
+# rule. Set RUN_SLOW=1 (pixi run test-full) to include them: the toolchain-upgrade
+# check that tells you whether a new Mojo version has fixed #6554 (see AGENTS.md).
+# When changing one of those files, prefer running it standalone:
+#   pixi run mojo run --no-optimization -I build tests/<file>
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
 # Files known to hit the Mojo #6554 compile stall (multi-minute compile, trivial
-# run). Skipped only when SKIP_SLOW=1; the default run still covers them. Keep
-# this list short — the real fix is to keep a test module's function count low
-# and split a file if it starts stalling.
+# run). EXCLUDED by default; included only when RUN_SLOW=1. This is the ONE place
+# the list lives. Keep it short — the real fix is to keep a test module's function
+# count low and split a file if it starts stalling.
 SLOW_6554=(test_seq_tasks.mojo)
-SKIP_SLOW="${SKIP_SLOW:-0}"
+RUN_SLOW="${RUN_SLOW:-0}"
 
 is_slow() {
     local base="${1##*/}"
@@ -69,8 +75,8 @@ failed=0
 skipped=()
 for test_file in $(printf '%s\n' tests/test_*.mojo | sort); do
     [[ "$test_file" == "tests/test_smoke.mojo" ]] && continue
-    if [[ "$SKIP_SLOW" == "1" ]] && is_slow "$test_file"; then
-        echo "==> $test_file  (SKIPPED: Mojo #6554 compile stall; run standalone)"
+    if [[ "$RUN_SLOW" != "1" ]] && is_slow "$test_file"; then
+        echo "==> $test_file  SKIPPED (Mojo #6554) — RUN_SLOW=1 (pixi run test-full) to include"
         skipped+=("$test_file")
         continue
     fi
@@ -82,8 +88,9 @@ for test_file in $(printf '%s\n' tests/test_*.mojo | sort); do
 done
 
 if [[ "${#skipped[@]}" -ne 0 ]]; then
-    echo "Skipped ${#skipped[@]} #6554-slow file(s): ${skipped[*]}" >&2
-    echo "  run standalone: pixi run mojo run --no-optimization -I build tests/<file>" >&2
+    echo "SKIPPED ${#skipped[@]} #6554-slow file(s): ${skipped[*]}" >&2
+    echo "  included by: RUN_SLOW=1 (pixi run test-full) — the toolchain-upgrade check" >&2
+    echo "  or standalone: pixi run mojo run --no-optimization -I build tests/<file>" >&2
 fi
 
 if [[ "$failed" -ne 0 ]]; then

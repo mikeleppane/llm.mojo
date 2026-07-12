@@ -16,7 +16,7 @@ with cosine = 0.5*(1 + cos(pi * progress)) and progress = (step - warmup) /
 warmup boundary is continuous) and progress -> 1 gives cosine -> 0 (lr -> min_lr).
 """
 
-from std.math import cos, pi
+from std.math import cos, isfinite, pi
 
 
 def lr_at(
@@ -126,7 +126,8 @@ struct ScheduleConfig(Copyable, Movable):
                 + String(max_steps)
                 + ")"
             )
-        if self.min_lr < 0.0:
+        # isfinite rejects NaN and +inf; the `>= 0` bound alone passes both.
+        if not (isfinite(self.min_lr) and self.min_lr >= 0.0):
             raise Error("ScheduleConfig: min_lr must be >= 0")
         if self.min_lr > peak_lr:
             raise Error(

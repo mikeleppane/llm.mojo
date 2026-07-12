@@ -6,10 +6,10 @@ lists the working rules; this document covers the design: the system's parts,
 the boundaries between them, and the reasoning behind each decision, with
 examples from the actual code.
 
-Parts I–XVI have landed: the full GPT-2 (124M) model, training, generation, and
-loading OpenAI's real released weights all exist and are tested. What remains
-(the KV cache and the performance work, Parts XVII+) is called out as *planned*
-where it appears. [PROGRESS.md](PROGRESS.md) tracks what exists today per part.
+Parts I–XIX have landed: the full GPT-2 (124M) model, training, generation, the
+KV cache (incremental decode), the SIMD + threading performance work, loading
+OpenAI's real released weights, and the validation gauntlet all exist and are
+tested. [PROGRESS.md](PROGRESS.md) tracks what exists today per part.
 
 ## The goal, and the three constraints that shape everything
 
@@ -105,8 +105,8 @@ src/llm/
 
 Tensors currently go up to rank 3 (`Tensor2D`, `Tensor3D`); the four-dimensional
 attention shapes below are realized by indexing and looping over those, not by a
-dedicated `Tensor4D`. The KV cache lives in the roadmap (Part XVII), not yet in
-`generation/`.
+dedicated `Tensor4D`. The KV cache (Part XVII) lives in
+`transformer/kv_cache.mojo`, consumed by `generate_cached` in `generation/`.
 
 Dependencies flow in one direction. A package may import from packages to its
 left in the graph below, never from the right. The **authoritative** version of
@@ -175,12 +175,17 @@ letters are used consistently everywhere:
 Every public tensor function documents four facts: shapes in and out, whether
 it mutates its inputs, whether it allocates, and whether it can raise.
 
-```mojo
-# Row-wise numerically stable softmax.
-# Input:  scores [rows, cols]
-# Output: probs  [rows, cols]  (each row sums to ~1)
-# Allocates a new tensor; does not mutate the input; does not raise.
+```text
 def softmax_rows(scores: Tensor2D) -> Tensor2D:
+    """Row-wise numerically stable softmax.
+
+    Args:
+        scores: Input scores, shape [rows, cols].
+
+    Returns:
+        probs [rows, cols], each row summing to ~1. Allocates a new tensor; does
+        not mutate the input; does not raise.
+    """
     ...
 ```
 
@@ -239,10 +244,10 @@ Higher ranks repeat the same pattern: `Tensor3D` uses
 `(i * d1 + j) * d2 + k`. There is no `Tensor4D` — attention's four-dimensional
 `[B, H, T, D]` shapes are handled by indexing and looping over `Tensor2D`/
 `Tensor3D`, which keeps the storage story simple; a dedicated rank-4 tensor can
-arrive later if batching or the performance work needs it. The `List`-backed
-storage is itself a correctness-phase decision; the performance part replaces it
-with `UnsafePointer` behind the same interface, with the existing tests as the
-safety net.
+arrive later if batching needs it. The `List`-backed storage survived the
+performance work: Part XVIII vectorized and threaded the kernels through
+`List.unsafe_ptr()` without a storage redesign, so the `List` interface stayed
+put and the existing tests stayed the safety net.
 
 ### Integer data stays integer
 
@@ -380,7 +385,7 @@ flowchart TD
         C["BPE merge loop"]
         D["backward passes"]
         E["optimizer"]
-        F["sampling and generation (KV cache: planned)"]
+        F["sampling and generation (with KV cache)"]
     end
 
     subgraph plumbing["Python interop (plumbing)"]
@@ -496,9 +501,12 @@ prove cross-attention and the training loop end to end. The lab is quarantined
 off the main line: nothing in the model imports it, and its one heavy test is the
 file CI's gate skips (see [AGENTS.md](AGENTS.md)).
 
-Generation today is **uncached**: each new token reruns the forward pass over the
-whole sequence. That is the correct, readable baseline; the KV cache (Part XVII,
-planned) is the optimization measured against it.
+Generation comes in two forms. The **uncached** `generate` reruns the forward
+pass over the whole sequence each token — the correct, readable baseline.
+`generate_cached` (Part XVII) reuses a per-layer KV cache to avoid recomputing
+attention over the past, producing logits bit-identical to the uncached path at
+every prefix (pinned by a test); it is the optimization measured against the
+baseline.
 
 ## Performance, last
 
@@ -510,13 +518,14 @@ version is tested against.
 
 The house example of the whole policy is matmul loop order: `ijk` and `ikj`
 compute identical results (a test proves it), but `ikj` walks both inner-loop
-operands contiguously and is several times faster on realistic sizes from
-cache behavior alone. Same math, measured difference, zero readability cost.
-That is the shape of acceptable performance work here. The expected endgame
-bottleneck is single-token decode, which is memory-bandwidth-bound matvec;
-the KV cache part addresses the algorithmic side (never recompute attention
-over the prompt) and must produce output equal to the uncached path, within
-tolerance, as a test.
+operands contiguously and wins on realistic sizes from cache behavior alone —
+same math, measured difference, zero readability cost. The production `@` kernel
+then builds on the `ikj` order with SIMD over columns and threading (Part XVIII),
+each step benchmarked and leaving the scalar reference in place as its oracle.
+That is the shape of acceptable performance work here. The endgame bottleneck is
+single-token decode, memory-bandwidth-bound matvec; the KV cache (Part XVII)
+addresses the algorithmic side — never recompute attention over the prompt — and
+produces output bit-identical to the uncached path, pinned by a test.
 
 ## Where code goes
 
@@ -541,8 +550,8 @@ full suite are green. Branches are kept after merging so the guide can point
 at the exact state of the code as of any part.
 
 Public surfaces (`__init__.mojo` re-exports) are the stable contract; struct
-internals are not. Two internal changes are already planned: tensor storage
-moves from `List` to `UnsafePointer` during the performance part, and the
-model's working dtype narrows from `Float64` to `Float32`. Both happen behind
-existing interfaces, and the definition of "safe to change" is the same in
-both cases: every existing test still passes.
+internals are not. One internal change remains planned: the model's working dtype
+narrows from `Float64` to `Float32` (the Part XVIII performance work kept
+`Float64` and needed no storage redesign — it vectorized through
+`List.unsafe_ptr()`). It will happen behind existing interfaces, and the
+definition of "safe to change" holds: every existing test still passes.

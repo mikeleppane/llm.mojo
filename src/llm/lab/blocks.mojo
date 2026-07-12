@@ -79,6 +79,14 @@ struct EncoderBlockForward(Copyable, Movable):
 
 @fieldwise_init
 struct EncoderBlock(Copyable, Movable):
+    """One pre-norm Transformer encoder block: self-attention then MLP.
+
+    Two residual sublayers, each pre-normed: x + attn(ln1(x)), then + mlp(ln2(.)).
+    The encoder is bidirectional (no causal mask), so every position attends to
+    every other. Stacked to form the encoder that produces the memory the decoder
+    cross-attends to.
+    """
+
     var ln1: LayerNorm  # pre-attention norm
     var attn: MultiHeadAttention  # self-attention
     var ln2: LayerNorm  # pre-MLP norm
@@ -198,7 +206,7 @@ struct EncoderBlock(Copyable, Movable):
             d_out: Upstream gradient, shape [T, C].
 
         Returns:
-            d_x, shape [T, C]. Allocates.
+            Gradient d_x, shape [T, C]. Allocates.
 
         Raises:
             Error: On a shape mismatch (via the sublayers).
@@ -276,6 +284,15 @@ struct DecoderBlockGrads(Copyable, Movable):
 
 @fieldwise_init
 struct DecoderBlock(Copyable, Movable):
+    """One pre-norm Transformer decoder block: masked self-attention, then
+    cross-attention over the encoder memory, then MLP.
+
+    Three residual sublayers, each pre-normed: x + self_attn(ln1(x)) with a causal
+    mask, + cross_attn(ln2(.), memory), + mlp(ln3(.)). The cross-attention is where
+    the target stream reads the source; its backward returns a gradient into both
+    the decoder stream and the memory.
+    """
+
     var ln1: LayerNorm  # pre-self-attention norm
     var self_attn: MultiHeadAttention  # masked self-attention
     var ln2: LayerNorm  # pre-cross-attention norm
@@ -446,7 +463,7 @@ struct DecoderBlock(Copyable, Movable):
             d_out: Upstream gradient, shape [T_tgt, C].
 
         Returns:
-            d_x [T_tgt, C] and d_memory [T_src, C]. Allocates.
+            Gradients d_x [T_tgt, C] and d_memory [T_src, C]. Allocates.
 
         Raises:
             Error: On a shape mismatch.

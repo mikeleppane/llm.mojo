@@ -21,9 +21,11 @@ with a named mismatch: a checkpoint for a different architecture must fail
 loudly, never read garbage. This is a training artifact; loading real GPT-2
 weights is a separate format.
 
-A shuffled-loader run's cursor is not checkpointed, so resuming such a run
-mid-epoch is only approximate. A fixed (overfit-batch) run has no loader state to
-lose, so its resume is exact.
+The loader cursor is not stored, and does not need to be: batch order is a pure
+function of the seed and epoch, so the trainer reconstructs the exact mid-epoch
+position from the restored step counter t. Resume is bit-exact for a fixed
+corpus whether or not the loader shuffles (the overfit-batch run, with no loader
+state at all, is the trivial case).
 """
 
 from std.memory import bitcast

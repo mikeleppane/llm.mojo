@@ -133,7 +133,11 @@ struct Tensor2D(Copyable, Movable, Writable):
                         pres.store(ibase + j, acc)
                         j += W
                     while j < n:
-                        result[i, j] += a_ik * other[k, j]
+                        # Write the ragged tail through the raw pointer too, not
+                        # the `result` capture: this runs inside the parallelize
+                        # worker, and the project's rule is parallel output goes
+                        # through unsafe_ptr, never a mut capture.
+                        pres[ibase + j] += a_ik * poth[obase + j]
                         j += 1
 
         if m * kdim * n < _MATMUL_THREAD_MIN_WORK or m < 2:

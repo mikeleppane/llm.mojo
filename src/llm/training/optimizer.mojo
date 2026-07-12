@@ -7,6 +7,8 @@ applied after gradient accumulation and before the optimizer step.
 """
 
 
+from std.math import isfinite
+
 from llm.tensor.tensor2d import Tensor2D
 from llm.transformer.gpt import GPT
 
@@ -95,16 +97,22 @@ struct AdamWConfig(Copyable, Movable):
         """Validate the hyperparameters.
 
         Raises:
-            Error: On the first invalid field, naming it. Betas live in [0, 1);
-                eps and grad_clip must be positive; weight_decay must be >= 0.
+            Error: On the first invalid or non-finite field, naming it. Betas
+                live in [0, 1); eps and grad_clip must be positive; weight_decay
+                must be >= 0.
         """
-        if self.beta1 < 0.0 or self.beta1 >= 1.0:
+        # Negated ranges reject NaN and +inf too: every comparison with NaN is
+        # false, so a bare `< 0 or >= 1` would let a NaN beta through, and a
+        # non-finite hyperparameter silently poisons every optimizer step. The
+        # lower-bounded fields (eps, weight_decay, grad_clip) also need isfinite,
+        # since +inf passes their one-sided bound.
+        if not (self.beta1 >= 0.0 and self.beta1 < 1.0):
             raise Error("AdamWConfig: beta1 must be in [0, 1)")
-        if self.beta2 < 0.0 or self.beta2 >= 1.0:
+        if not (self.beta2 >= 0.0 and self.beta2 < 1.0):
             raise Error("AdamWConfig: beta2 must be in [0, 1)")
-        if self.eps <= 0.0:
+        if not (isfinite(self.eps) and self.eps > 0.0):
             raise Error("AdamWConfig: eps must be positive")
-        if self.weight_decay < 0.0:
+        if not (isfinite(self.weight_decay) and self.weight_decay >= 0.0):
             raise Error("AdamWConfig: weight_decay must be >= 0")
-        if self.grad_clip <= 0.0:
+        if not (isfinite(self.grad_clip) and self.grad_clip > 0.0):
             raise Error("AdamWConfig: grad_clip must be positive")

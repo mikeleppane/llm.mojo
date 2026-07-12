@@ -80,6 +80,16 @@ struct CrossMHAGrads(Copyable, Movable):
 
 @fieldwise_init
 struct CrossMultiHeadAttention(Copyable, Movable):
+    """Multi-head cross-attention: queries from one stream, keys/values from
+    another (the encoder memory).
+
+    Queries come from the decoder stream x [T_q, C]; keys and values come from a
+    separate memory [T_k, C] via a fused C -> 2C projection. Unlike self-attention
+    the two streams differ in length and origin, so backward returns two gradients
+    (d_x into the decoder stream, d_memory into the encoder output). No causal
+    mask — a decoder position may attend to any source position.
+    """
+
     var q: Linear  # C -> C,  queries from the decoder stream x
     var kv: Linear  # C -> 2C, keys AND values from memory (fused)
     var proj: Linear  # C -> C,  mixes the concatenated head outputs
@@ -274,7 +284,7 @@ struct CrossMultiHeadAttention(Copyable, Movable):
             d_out: Upstream gradient, shape [T_q, C].
 
         Returns:
-            d_x [T_q, C] and d_memory [T_k, C]. Allocates.
+            Gradients d_x [T_q, C] and d_memory [T_k, C]. Allocates.
 
         Raises:
             Error: On a shape/config mismatch or a head-count mismatch.
