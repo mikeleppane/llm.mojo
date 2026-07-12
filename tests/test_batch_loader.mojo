@@ -1,12 +1,11 @@
-# Tests for BatchLoader — the heart of the dataset pipeline.
-#
-# Every test uses a synthetic corpus ids = [0, 1, 2, ..., N-1], so token id ==
-# position and every expected value is computable by eye. That turns otherwise
-# opaque windowing into arithmetic: a window starting at s has input_at(b, t) ==
-# s + t and target_at(b, t) == s + 1 + t. The suite pins the three roadmap
-# criteria — [B, T] shapes, the shift-by-one link between inputs and targets, and
-# same-seed-identical-batches — plus epoch coverage, remainder dropping, and the
-# exact minimum-size boundary.
+"""Tests for BatchLoader, the heart of the dataset pipeline.
+
+Every test uses a synthetic corpus ids = [0, 1, ..., N-1], so token id == position
+and every expected value is computable by eye: a window starting at s has
+input_at(b, t) == s + t and target_at(b, t) == s + 1 + t. The suite pins [B, T]
+shapes, the shift-by-one link between inputs and targets, same-seed-identical
+batches, epoch coverage, remainder dropping, and the minimum-size boundary.
+"""
 
 from std.testing import assert_equal, assert_true, assert_false, assert_raises
 from std.testing import TestSuite
@@ -41,8 +40,8 @@ def _batches_equal(a: TokenBatch, b: TokenBatch) -> Bool:
 
 
 def test_batch_shapes() raises:
-    # B=4, T=8: every produced batch reports [4, 8] and holds 32 flat elements
-    # per array. (Roadmap criterion 1.)
+    """Every batch at B=4, T=8 reports [4, 8] and holds 32 flat elements per array.
+    """
     var loader = BatchLoader(_range_dataset(100), 4, 8, stride=8)
     var seen_any = False
     while loader.has_next():
@@ -56,9 +55,9 @@ def test_batch_shapes() raises:
 
 
 def _check_shift_by_one(mut loader: BatchLoader, seq_len: Int) raises:
-    # For every batch, targets are inputs shifted one position; the last target
-    # is the corpus token immediately after the window. Because id == position,
-    # input_at(b, 0) is the window's start s, so target_at(b, T-1) must be s + T.
+    """Assert every batch's targets are its inputs shifted one position, and the
+    last target is the token immediately after the window (target_at(b, T-1) == s + T).
+    """
     var seen_any = False
     while loader.has_next():
         var batch = loader.next_batch()
@@ -72,8 +71,8 @@ def _check_shift_by_one(mut loader: BatchLoader, seq_len: Int) raises:
 
 
 def test_shift_by_one_property() raises:
-    # The shift-by-one contract holds under overlapping windows (stride 1) and
-    # non-overlapping ones (stride == T). (Roadmap criterion 2.)
+    """The shift-by-one contract holds for overlapping (stride 1) and
+    non-overlapping (stride == T) windows."""
     var overlapping = BatchLoader(_range_dataset(50), 4, 8, stride=1)
     _check_shift_by_one(overlapping, 8)
     var tiling = BatchLoader(_range_dataset(50), 4, 8, stride=8)
@@ -81,9 +80,8 @@ def test_shift_by_one_property() raises:
 
 
 def test_same_seed_identical_batches() raises:
-    # Two loaders over identical data, both seeded 7, produce the same batch
-    # sequence element-for-element across a full epoch; a different seed produces
-    # a different order. (Roadmap criterion 3.)
+    """Two loaders seeded alike produce the same batch sequence across an epoch; a
+    different seed produces a different order."""
     var a = BatchLoader(_range_dataset(80), 3, 5, stride=5)
     var b = BatchLoader(_range_dataset(80), 3, 5, stride=5)
     a.start_epoch(7)
@@ -109,11 +107,8 @@ def test_same_seed_identical_batches() raises:
 
 
 def test_start_epoch_depends_only_on_seed() raises:
-    # start_epoch(seed) must reproduce the same order regardless of what the
-    # loader did before — otherwise the order would depend on the whole history
-    # of prior epochs, not just the seed, and "same seed -> same batches" would
-    # quietly fail mid-training. Run a full epoch, then re-seed with the same
-    # value: the first batch must match the first batch of the first epoch.
+    """Re-seeding reproduces the same order regardless of prior epochs: after a full
+    epoch, start_epoch with the same seed yields the same first batch."""
     var loader = BatchLoader(_range_dataset(80), 3, 5, stride=5)
     loader.start_epoch(5)
     var first = loader.next_batch()
@@ -125,9 +120,9 @@ def test_start_epoch_depends_only_on_seed() raises:
 
 
 def test_epoch_covers_all_windows_once() raises:
-    # N=46, B=3, T=5, stride=5 -> exactly 9 windows (starts 0,5,...,40), 3 full
-    # batches, nothing dropped. Collect the start of every window seen in one
-    # epoch; sorted, it must equal the full expected start list with no repeats.
+    """One epoch covers every window exactly once (N=46, B=3, T=5, stride=5 -> 9
+    windows, 3 batches): sorted window starts equal 0,5,...,40 with no repeats.
+    """
     var loader = BatchLoader(_range_dataset(46), 3, 5, stride=5)
     assert_equal(loader.num_windows(), 9)
     assert_equal(loader.num_batches(), 3)
@@ -144,10 +139,9 @@ def test_epoch_covers_all_windows_once() raises:
 
 
 def test_num_batches_drops_remainder() raises:
-    # N=51, B=4, T=5, stride=5 -> 10 windows; 10 // 4 == 2 batches, and the two
-    # leftover windows are dropped. The iterator yields exactly 2 batches, and —
-    # the point of a remainder case — exactly 8 *distinct* windows appear (no
-    # duplicate and no over-run past the dropped tail).
+    """A remainder is dropped (N=51, B=4, T=5 -> 10 windows, 2 batches): exactly 2
+    batches and 8 distinct windows appear, no duplicate or over-run past the tail.
+    """
     var loader = BatchLoader(_range_dataset(51), 4, 5, stride=5)
     assert_equal(loader.num_windows(), 10)
     assert_equal(loader.num_batches(), 2)
@@ -171,8 +165,8 @@ def test_num_batches_drops_remainder() raises:
 
 
 def test_window_bounds() raises:
-    # B=2, T=3, stride=3: the minimum viable corpus is (B-1)*stride + T + 1 == 7
-    # tokens (exactly 2 windows, 1 batch). It constructs and iterates cleanly.
+    """The minimum viable corpus (B-1)*stride + T + 1 == 7 tokens constructs and
+    iterates cleanly; one token fewer raises."""
     var loader = BatchLoader(_range_dataset(7), 2, 3, stride=3)
     assert_equal(loader.num_windows(), 2)
     assert_equal(loader.num_batches(), 1)
@@ -185,7 +179,7 @@ def test_window_bounds() raises:
 
 
 def test_construct_invalid_args_raise() raises:
-    # Degenerate batch/seq/stride arguments are rejected at construction.
+    """Degenerate batch/seq/stride arguments are rejected at construction."""
     with assert_raises():
         _ = BatchLoader(_range_dataset(50), 0, 8, stride=8)  # B < 1
     with assert_raises():
@@ -195,16 +189,15 @@ def test_construct_invalid_args_raise() raises:
 
 
 def test_overfit_batch_too_small_raises() raises:
-    # overfit_batch delegates to the loader's construction guard: a dataset too
-    # small for one non-overlapping [B, T+1] batch must raise, not return a
-    # short batch. B=2, T=3 needs 2*3+1 == 7 tokens; 6 is one too few.
+    """A dataset too small for one non-overlapping [B, T+1] batch raises (B=2, T=3
+    needs 7 tokens; 6 is one too few)."""
     with assert_raises():
         _ = overfit_batch(_range_dataset(6), 2, 3)
 
 
 def test_overfit_batch_is_fixed() raises:
-    # overfit_batch returns the first B consecutive non-overlapping windows and
-    # is bit-stable across calls — the fixed batch later parts drive to ~0 loss.
+    """The overfit batch is the first B non-overlapping windows and is bit-stable
+    across calls."""
     var first = overfit_batch(_range_dataset(20), 2, 3)
     var second = overfit_batch(_range_dataset(20), 2, 3)
     assert_true(_batches_equal(first, second))
@@ -215,9 +208,8 @@ def test_overfit_batch_is_fixed() raises:
 
 
 def test_end_to_end_tinyshakespeare() raises:
-    # The whole pipeline on the real corpus: load text, build a char vocab,
-    # encode, split 90/10, and window it. Proves the pieces compose and that a
-    # decoded input row is the actual corpus text — not just shape-correct noise.
+    """The whole pipeline on the real corpus: load, build a char vocab, encode,
+    split 90/10, window it; a decoded input row is the actual corpus text."""
     var text = load_text("data/tinyshakespeare/input.txt")
     var tok = CharTokenizer.from_text(text)
     var ids = tok.encode(text)

@@ -1,10 +1,10 @@
-# Tests for the BigramLM model: loss plumbing, the count model, and the gradient.
-#
-# The gradient is the load-bearing part, so it gets two independent checks: a
-# full finite-difference comparison on every table entry (V = 3) and the
-# structural invariant that every gradient row sums to zero (each p - onehot
-# contribution sums to 0). The zeros-table loss (log V) and the hand-computed
-# count model pin the forward pass before any training runs.
+"""Tests for the BigramLM model: loss plumbing, the count model, and the gradient.
+
+The gradient gets two independent checks: a full finite-difference comparison on
+every table entry (V=3) and the structural invariant that every gradient row sums
+to zero. The zeros-table loss (log V) and the hand-computed count model pin the
+forward pass.
+"""
 
 from std.testing import assert_almost_equal, assert_raises, TestSuite
 from std.math import log, exp
@@ -23,18 +23,16 @@ def _batch(
 
 
 def test_zeros_table_loss_is_log_v() raises:
-    # An untrained (zeros) model is uniform, so the loss is log(V) on any batch.
+    """An untrained (zeros) model is uniform, so the loss is log(V) on any batch.
+    """
     var model = BigramLM(3)
     var batch = _batch([0, 1, 2], [1, 2, 0], 1, 3)
     assert_almost_equal(model.loss_on_batch(batch), log(3.0), atol=1e-12)
 
 
 def test_from_counts_hand_computed() raises:
-    # Corpus [0,1,0,1,0], V=2, smoothing 1. Bigrams: (0->1) x2, (1->0) x2.
-    # counts: c(0,0)=0, c(0,1)=2, c(1,0)=2, c(1,1)=0; row totals 2 and 2.
-    # table[i,j] = log((c+1) / (2 + 2*1)):
-    #   table[0,0]=log(1/4), table[0,1]=log(3/4),
-    #   table[1,0]=log(3/4), table[1,1]=log(1/4).
+    """Count model on corpus [0,1,0,1,0], V=2, smoothing 1: table entries
+    log((c+1)/4) and loss -log(3/4) match hand computation."""
     var model = BigramLM.from_counts([0, 1, 0, 1, 0], 2, 1.0)
     assert_almost_equal(model.table[0, 0], log(0.25), atol=1e-12)
     assert_almost_equal(model.table[0, 1], log(0.75), atol=1e-12)
@@ -47,24 +45,25 @@ def test_from_counts_hand_computed() raises:
 
 
 def test_from_counts_requires_positive_smoothing() raises:
+    """Rejects non-positive smoothing in from_counts."""
     with assert_raises(contains="smoothing"):
         _ = BigramLM.from_counts([0, 1, 0], 2, 0.0)
 
 
 def test_from_counts_rejects_out_of_range_id() raises:
+    """Rejects a token id outside [0, V) in from_counts."""
     with assert_raises(contains="out of range"):
         _ = BigramLM.from_counts([0, 5, 1], 2, 1.0)
 
 
 def test_from_counts_rejects_out_of_range_single_token() raises:
-    # A single-token corpus forms no bigram pairs, but a bad id must still be
-    # rejected rather than silently yielding a uniform model.
+    """A single-token corpus forms no bigram, but a bad id is still rejected."""
     with assert_raises(contains="out of range"):
         _ = BigramLM.from_counts([5], 2, 1.0)
 
 
 def test_next_logits_returns_independent_copy() raises:
-    # Mutating the returned row must not touch the table.
+    """Mutating the returned logits row does not touch the table."""
     var model = BigramLM.from_counts([0, 1, 0, 1, 0], 2, 1.0)
     var before = model.table[0, 0]
     var row = model.next_logits(0)
@@ -73,9 +72,8 @@ def test_next_logits_returns_independent_copy() raises:
 
 
 def test_next_probs_temperature() raises:
-    # next_probs runs the row through temperature softmax: probs sum to 1, and a
-    # high temperature flattens toward uniform. On the [0,1,0,1,0] count model,
-    # row 0 is log([1/4, 3/4]); at T=1 that recovers [1/4, 3/4].
+    """Temperature softmax over the row: probs sum to 1, T=1 recovers [1/4, 3/4],
+    and a high temperature flattens toward uniform."""
     var model = BigramLM.from_counts([0, 1, 0, 1, 0], 2, 1.0)
     var p = model.next_probs(0, 1.0)
     assert_almost_equal(p[0] + p[1], 1.0, atol=1e-12)
@@ -87,14 +85,15 @@ def test_next_probs_temperature() raises:
 
 
 def test_next_probs_rejects_bad_temperature() raises:
+    """Rejects a non-positive temperature in next_probs."""
     var model = BigramLM(3)
     with assert_raises(contains="temperature"):
         _ = model.next_probs(0, 0.0)
 
 
 def test_grad_matches_finite_difference() raises:
-    # Central-difference check of every table entry against loss_and_grad, on a
-    # tiny V=3 case with a non-trivial batch and a random (non-uniform) table.
+    """Every table entry's gradient from loss_and_grad matches a central finite
+    difference (V=3, random non-uniform table)."""
     var rng = Rng(7)
     var model = BigramLM.random_init(3, 0.5, rng)
     var batch = _batch([0, 1, 2, 0], [1, 2, 0, 2], 1, 4)
@@ -116,8 +115,8 @@ def test_grad_matches_finite_difference() raises:
 
 
 def test_grad_rows_sum_to_zero() raises:
-    # Each gradient row accumulates (softmax - onehot) contributions, and every
-    # such contribution sums to 0, so every row sums to 0.
+    """Each gradient row accumulates (softmax - onehot) contributions that sum to 0,
+    so every row sums to 0."""
     var rng = Rng(3)
     var model = BigramLM.random_init(4, 0.7, rng)
     var batch = _batch([0, 1, 2, 3, 0, 2], [1, 2, 3, 0, 2, 1], 2, 3)
@@ -131,7 +130,7 @@ def test_grad_rows_sum_to_zero() raises:
 
 
 def test_loss_and_grad_matches_loss_on_batch() raises:
-    # The loss returned by loss_and_grad is the same mean CE as loss_on_batch.
+    """The loss from loss_and_grad equals the mean CE from loss_on_batch."""
     var rng = Rng(9)
     var model = BigramLM.random_init(3, 0.4, rng)
     var batch = _batch([0, 1, 2], [2, 0, 1], 1, 3)
@@ -141,6 +140,7 @@ def test_loss_and_grad_matches_loss_on_batch() raises:
 
 
 def test_loss_and_grad_rejects_wrong_grad_shape() raises:
+    """Rejects a grad tensor of the wrong shape in loss_and_grad."""
     var model = BigramLM(3)
     var batch = _batch([0, 1], [1, 2], 1, 2)
     var grad = zeros_2d(2, 3)  # wrong shape
@@ -149,6 +149,7 @@ def test_loss_and_grad_rejects_wrong_grad_shape() raises:
 
 
 def test_perplexity_is_exp_loss() raises:
+    """Perplexity is exp(loss); a uniform model over V=5 scores exactly 5."""
     var model = BigramLM(5)
     var batch = _batch([0, 1, 2, 3], [1, 2, 3, 4], 1, 4)
     var loss = model.loss_on_batch(batch)

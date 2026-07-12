@@ -1,33 +1,23 @@
-# THE MONEY DEMO: the same real GPT-2 124M, now with a KV cache — seconds per
-# token instead of minutes, and BIT-IDENTICAL text.
-#
-# Part XVI played the instrument honestly but slowly: every generated token
-# re-ran the FULL forward over the whole growing context, ~minutes per token on
-# CPU. That was the opening argument for this part. Here the KV cache answers it:
-# each layer's keys and values are cached, and per step only the ONE new token
-# flows through the network. Per-token cost drops from O(T·C²·L) — a full forward
-# over T positions — to O(C²·L + T·C·L): one position's linear layers plus
-# attention reads over the cache.
-#
-# The demo makes the before/after concrete on the SAME machine and weights:
-#   1. Time ONE uncached token — a single full gpt.forward at the FINAL sequence
-#      length (prompt + budget). The uncached path re-runs that whole forward per
-#      token and it grows as the sequence grows, so the final-length forward is the
-#      honest peak "before" number the cache is measured against.
-#   2. Generate the continuation with the cache, printing the per-token wall-clock
-#      and the measured speedup.
-# The greedy run reproduces Part XVI's continuation CHARACTER-FOR-CHARACTER — the
-# proof that caching changed the ALGORITHM, not the arithmetic, on all
-# 124,439,808 real parameters. Then a nucleus run for variety.
-#
-# What is STILL not done: the arithmetic is scalar float64 — no SIMD, no
-# threading, no blocked matmul. That is the next part's job. This part changed
-# recompute-everything into cache-and-reuse; the part after changes how fast each
-# remaining flop runs. The two compose.
-#
-# Run (after downloading the weights and running the converter — see
-# scripts/convert_gpt2_weights.py):
-#   pixi run mojo run -I build examples/gpt2_generate_cached.mojo
+"""Generate from real GPT-2 124M with a KV cache: seconds per token, not minutes.
+
+Without the cache every generated token re-runs the full forward over the whole
+growing context (~minutes per token on CPU). The KV cache caches each layer's
+keys and values so per step only the one new token flows through the network,
+dropping per-token cost from O(T*C^2*L) to O(C^2*L + T*C*L).
+
+The demo makes the before/after concrete on the same machine and weights:
+  1. Time one uncached token: a single full gpt.forward at the final sequence
+     length (prompt + budget), the honest peak the cache is measured against.
+  2. Generate the continuation with the cache, printing per-token wall-clock and
+     the measured speedup.
+The greedy run reproduces the uncached continuation character-for-character,
+proving caching changed the algorithm, not the arithmetic. Then a nucleus run
+for variety. The arithmetic is still scalar float64: no SIMD, no threading.
+
+Run (after downloading the weights and running the converter, see
+scripts/convert_gpt2_weights.py):
+    pixi run mojo run -I build examples/gpt2_generate_cached.mojo
+"""
 
 from std.time import perf_counter_ns
 
@@ -46,8 +36,17 @@ comptime SEED = 1337
 
 
 def _require_file(path: String) raises:
-    # Cheap existence probe (open, do not read the 498 MB payload) with a message
-    # pointing at the converter. NO fallback to random weights.
+    """Raise a converter-pointing error unless `path` exists.
+
+    Cheap existence probe (open, do not read the 498 MB payload); there is no
+    fallback to random weights.
+
+    Args:
+        path: File that must exist.
+
+    Raises:
+        Error: If the file cannot be opened.
+    """
     try:
         var probe = open(path, "r")
         probe.close()
@@ -63,6 +62,8 @@ def _require_file(path: String) raises:
 
 
 def main() raises:
+    """Time one uncached token, then generate greedy and nucleus with the cache.
+    """
     _require_file(WEIGHTS_PATH)
     _require_file(VOCAB_PATH)
     _require_file(MERGES_PATH)

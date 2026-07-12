@@ -1,15 +1,4 @@
-# Tests for the GELU backward — the scalar derivative and its elementwise VJP.
-#
-# GELU is elementwise, so its backward reduces to a per-element product with
-# gelu_derivative. Two things to pin: the scalar derivative matches a central
-# finite difference of gelu across a grid (including 0 and ±large, where the
-# derivative approaches its 1 and 0 asymptotes), and gelu_rows_backward applies
-# exactly that derivative entrywise.
-#
-# Finite-difference convention (D5, shared across this part's backward tests):
-#   central diff h = 1e-5; tolerance |analytic - numeric| <= 1e-7 + 1e-5 * |n|.
-# GELU's tanh form is smooth everywhere (no kink), so the finite difference is
-# well behaved at every grid point.
+"""Tests for the GELU backward: the scalar derivative matches a central finite difference across a grid, and gelu_rows_backward applies that derivative entrywise. Gradient checks use central diff h = 1e-5 with mixed absolute/relative tolerance 1e-7 + 1e-5*|n|."""
 
 from std.testing import (
     assert_almost_equal,
@@ -23,7 +12,8 @@ from llm.tensor.tensor2d import from_rows, zeros_2d
 
 
 def assert_grad_close(analytic: Float64, numeric: Float64) raises:
-    # D5 mixed tolerance |a - n| <= 1e-7 + 1e-5 * |n|.
+    """Assert analytic vs numeric agree within tolerance 1e-7 + 1e-5 * |numeric|.
+    """
     assert_true(
         abs(analytic - numeric) <= 1e-7 + 1e-5 * abs(numeric),
         String("grad mismatch: analytic=")
@@ -34,6 +24,8 @@ def assert_grad_close(analytic: Float64, numeric: Float64) raises:
 
 
 def test_scalar_derivative_matches_finite_difference() raises:
+    """gelu_derivative matches a central finite difference of gelu across a grid.
+    """
     var grid = [-5.0, -2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0, 5.0]
     var h = 1e-5
     for i in range(len(grid)):
@@ -43,6 +35,7 @@ def test_scalar_derivative_matches_finite_difference() raises:
 
 
 def test_derivative_asymptotes() raises:
+    """The derivative approaches its 1 and 0 asymptotes for large |x|."""
     # gelu'(x) -> 1 as x -> +inf and -> 0 as x -> -inf. At ±20 the tanh has
     # saturated, so the derivative is within a hair of its asymptote.
     assert_almost_equal(gelu_derivative(20.0), 1.0, atol=1e-6)
@@ -50,6 +43,7 @@ def test_derivative_asymptotes() raises:
 
 
 def test_rows_backward_applies_scalar_derivative() raises:
+    """gelu_rows_backward multiplies d_out entrywise by gelu_derivative(x)."""
     # gelu_rows_backward(x, d_out)[i, j] == d_out[i, j] * gelu_derivative(x[i, j]).
     var x = from_rows([[0.5, -1.0, 2.0], [-0.3, 0.8, -2.1]])
     var d_out = from_rows([[0.7, -0.2, 1.3], [0.1, 0.9, -1.1]])
@@ -64,6 +58,7 @@ def test_rows_backward_applies_scalar_derivative() raises:
 
 
 def test_shape_mismatch_raises() raises:
+    """A shape mismatch between x and d_out raises."""
     var x = zeros_2d(2, 3)
     var d_out = zeros_2d(2, 4)
     with assert_raises(contains="shape mismatch"):

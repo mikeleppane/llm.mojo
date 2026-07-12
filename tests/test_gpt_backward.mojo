@@ -1,24 +1,15 @@
-# The capstone wire check: model-level gradients by finite difference.
-#
-# The longest-standing promise in the repo is the weight-tied head: the token
-# table wte receives gradient through TWO paths — the head matmul at the top
-# (d_logits^T @ h) and the embedding gather at the bottom — that SUM into its one
-# Parameter.grad. A model-level finite difference of the wte-table grad is the
-# test that both paths are present and summing: a missing head path, a missing
-# gather path, or `=` instead of `+=` is off by a whole term. The head path
-# reaches EVERY row of wte (logits = h @ wte^T depends on all rows), so unused
-# rows check the head path alone; the used ids' rows check both paths together.
-#
-# wpe, a mid-block parameter, and ln_f are finite-diff'd too (the gradient
-# threads the whole stack), and the model backward doubles exactly on a second
-# pass (with wte combining its two paths into one delta — see GPT.backward).
-#
-# The model is built from explicit `fill` weights (dropout 0, no residual
-# scaling), so every check runs the deterministic inference forward and its
-# cached twin, no rng in play.
-#
-# Finite-difference convention (inline): central diff h = 1e-5, mixed tolerance
-# |analytic - numeric| <= 1e-7 + 1e-5 * |numeric|.
+"""Model-level gradient checks by finite difference.
+
+The weight-tied head means wte receives gradient through two paths — the head
+matmul (d_logits^T @ h) and the embedding gather — that sum into its one
+Parameter.grad; a finite difference of the wte-table grad checks both are present
+and summing. The head path reaches every row of wte, so unused rows check the
+head path alone and used rows check both together. wpe, a mid-block parameter,
+and ln_f are finite-diff'd too, and backward doubles exactly on a second pass.
+Weights are explicit `fill` values (dropout 0, no residual scaling), so no rng is
+in play. Finite-difference convention: central diff h = 1e-5, mixed absolute/
+relative tolerance |analytic - numeric| <= 1e-7 + 1e-5 * |numeric|.
+"""
 
 from std.testing import assert_true, TestSuite
 
@@ -37,7 +28,8 @@ from llm.utils.random import Rng
 
 
 def fill(rows: Int, cols: Int, base: Int) raises -> Tensor2D:
-    # Bit-identical to gpt_reference.py's `fill`.
+    """Deterministic sentinel weights, bit-identical to gpt_reference.py's `fill`.
+    """
     var t = zeros_2d(rows, cols)
     for r in range(rows):
         for c in range(cols):
@@ -74,7 +66,8 @@ def build_block_off(off: Int) raises -> TransformerBlock:
 
 
 def build_gpt() raises -> GPT:
-    # V=5, C=4, H=2, L=2, context_length=8, dropout=0, `fill` weights.
+    """A tiny GPT (V=5, C=4, H=2, L=2, context_length=8, dropout=0) from `fill` weights.
+    """
     var cfg = GPTConfig(5, 8, 4, 2, 2, 0.0)
     var wte = Embedding(Parameter(fill(5, 4, 1000)))
     var wpe = Embedding(Parameter(fill(8, 4, 2000)))
@@ -114,8 +107,8 @@ def assert_grad_close(analytic: Float64, numeric: Float64) raises:
 
 
 def analytic_backward(mut gpt: GPT) raises:
-    # Run one loss backward, leaving grads populated. Uses the inference-equivalent
-    # cached path (dropout 0), d_logits from cross_entropy_rows_backward.
+    """Run one loss backward, leaving grads populated (inference-equivalent cached path, dropout 0).
+    """
     var rng = Rng(0)
     var fwd = gpt.forward_cached(ids(), False, rng)
     var d_logits = cross_entropy_rows_backward(fwd.logits, targets())
@@ -123,9 +116,8 @@ def analytic_backward(mut gpt: GPT) raises:
 
 
 def test_wte_table_grad_finite_difference() raises:
-    # The capstone: every entry of the tied wte table, both paths summing. Rows for
-    # unused ids (0, 2) exercise the head path alone; rows for used ids (1, 3, 4)
-    # exercise head + gather together.
+    """Every entry of the tied wte table matches finite difference, both paths summing: unused-id rows (0, 2) exercise the head path alone, used-id rows (1, 3, 4) head + gather together.
+    """
     var gpt = build_gpt()
     gpt.zero_grad()
     analytic_backward(gpt)
@@ -145,8 +137,8 @@ def test_wte_table_grad_finite_difference() raises:
 
 
 def test_wpe_grad_finite_difference() raises:
-    # wpe is reached only by the gather path (the head never touches it), so only
-    # the used position rows (0, 1, 2) carry gradient; the rest are exactly zero.
+    """The wpe table (gather path only) matches finite difference on used position rows (0, 1, 2); unused rows are exactly zero.
+    """
     var gpt = build_gpt()
     gpt.zero_grad()
     analytic_backward(gpt)
@@ -173,8 +165,8 @@ def test_wpe_grad_finite_difference() raises:
 
 
 def test_midblock_param_finite_difference() raises:
-    # A mid-block parameter — block 0's fused qkv weight [12, 4] — reached only
-    # through the whole block stack below ln_f.
+    """Block 0's fused qkv weight [12, 4], reached only through the whole block stack below ln_f, matches finite difference.
+    """
     var gpt = build_gpt()
     gpt.zero_grad()
     analytic_backward(gpt)
@@ -198,7 +190,8 @@ def test_midblock_param_finite_difference() raises:
 
 
 def test_lnf_grad_finite_difference() raises:
-    # The final LayerNorm's weight, the last parameter before the tied head.
+    """The final LayerNorm's weight, the last parameter before the tied head, matches finite difference.
+    """
     var gpt = build_gpt()
     gpt.zero_grad()
     analytic_backward(gpt)
@@ -217,9 +210,8 @@ def test_lnf_grad_finite_difference() raises:
 
 
 def test_model_exact_doubling() raises:
-    # Two backward passes without a zero_grad between them double every grad
-    # bit-for-bit — including the tied wte, whose two paths are combined into one
-    # delta per call precisely so this holds.
+    """Two backward passes without an intervening zero_grad double every grad bit-for-bit, including the tied wte whose two paths combine into one delta per call.
+    """
     var gpt = build_gpt()
     gpt.zero_grad()
     var rng = Rng(0)
@@ -251,8 +243,8 @@ def test_model_exact_doubling() raises:
 
 
 def test_backward_stale_cache_raises() raises:
-    # A cache from a T=3 forward paired with a T=2 d_logits is a shape mismatch the
-    # backward must reject rather than read out of bounds.
+    """A T=3 cache paired with T=2 d_logits is a shape mismatch backward rejects rather than reading out of bounds.
+    """
     var gpt = build_gpt()
     var rng = Rng(0)
     var fwd = gpt.forward_cached(ids(), False, rng)  # T=3 cache

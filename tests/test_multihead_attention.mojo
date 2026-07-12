@@ -1,11 +1,10 @@
-# Tests for MultiHeadAttention — GPT-2's fused-QKV multi-head self-attention.
-#
-# These pin the structural contract (shape, parameter layout), determinism, the
-# invalid-config guards, and two behavioral properties that catch a wrong head
-# split: single-head equivalence (H=1 must be the plain qkv -> core -> proj
-# composition) and causal locality (row 0 attends only to itself). The parameter
-# count reconciles the layer's REAL tensors against the architecture's committed
-# attention arithmetic 4*C^2 + 4*C.
+"""Tests for MultiHeadAttention — GPT-2's fused-QKV multi-head self-attention.
+
+These pin the structural contract (shape, parameter layout, count 4*C^2 + 4*C),
+determinism, the invalid-config guards, and two behavioral properties that catch
+a wrong head split: single-head equivalence (H=1 is the plain qkv -> core -> proj
+composition) and causal locality (row 0 attends only to itself).
+"""
 
 from std.testing import (
     assert_almost_equal,
@@ -27,7 +26,7 @@ from llm.utils.random import Rng
 
 
 def test_forward_shape_contract() raises:
-    # [T, C] + mask [T, T] -> [T, C]. C = 4, H = 2, T = 3.
+    """`forward` maps [T, C] plus mask [T, T] to [T, C]."""
     var rng = Rng(42)
     var mha = MultiHeadAttention.init_random(rng, 4, 2)
     var x = from_rows(
@@ -39,10 +38,10 @@ def test_forward_shape_contract() raises:
 
 
 def test_parameter_count_reconciles() raises:
-    # The layer's real Parameter tensors must sum to 4*C^2 + 4*C: qkv is [3C, C]
-    # weight (3C^2) + [1, 3C] bias (3C); proj is [C, C] weight (C^2) + [1, C]
-    # bias (C). This is the first structural cross-check of the attention rows of
-    # the architecture's committed parameter count.
+    """The layer's real Parameter tensors sum to 4*C^2 + 4*C, with the layout spelled out.
+    """
+    # qkv is [3C, C] weight (3C^2) + [1, 3C] bias (3C); proj is [C, C] weight
+    # (C^2) + [1, C] bias (C).
     var rng = Rng(1)
     var c = 8
     var mha = MultiHeadAttention.init_random(rng, c, 4)
@@ -64,7 +63,7 @@ def test_parameter_count_reconciles() raises:
 
 
 def test_init_random_is_deterministic() raises:
-    # Same seed -> identical weights -> identical forward output on a fixed input.
+    """Same seed gives identical weights and identical forward output."""
     var rng_a = Rng(7)
     var rng_b = Rng(7)
     var a = MultiHeadAttention.init_random(rng_a, 4, 2)
@@ -78,6 +77,8 @@ def test_init_random_is_deterministic() raises:
 
 
 def test_invalid_config_raises() raises:
+    """`init_random` raises on zero heads, non-divisible width, and zero width.
+    """
     var rng = Rng(0)
     with assert_raises(contains="n_heads must be positive"):
         _ = MultiHeadAttention.init_random(rng, 4, 0)  # zero heads
@@ -88,11 +89,9 @@ def test_invalid_config_raises() raises:
 
 
 def test_single_head_equals_manual_composition() raises:
-    # With H = 1 there is nothing to split, so the layer must equal the plain
-    # composition qkv-projection -> core -> output-projection computed from the
-    # layer's OWN seeded weights. This proves the head plumbing (split thirds,
-    # slice heads, run core, concat) is the identity when H = 1 — a wrong split
-    # axis or a dropped third would diverge here.
+    """With H=1 the layer equals qkv-projection -> core -> output-projection."""
+    # This proves the head plumbing (split thirds, slice heads, run core, concat)
+    # is the identity when H=1 — a wrong split axis or dropped third would diverge.
     var rng = Rng(99)
     var c = 4
     var mha = MultiHeadAttention.init_random(rng, c, 1)
@@ -118,15 +117,12 @@ def test_single_head_equals_manual_composition() raises:
 
 
 def test_multihead_forward_contiguous_split_oracle() raises:
-    # The single-head test (H=1) can't distinguish a contiguous head split from
-    # an interleaved one, and causal locality is split-invariant at row 0 — so
-    # without this case an interleaved split or a swapped head order would pass
-    # green. Here H=2, C=4, D=2, causal, with hand-built qkv/proj weights so the
-    # Mojo layer rebuilds the exact Linears the NumPy oracle used. The expected
-    # output (Case E in tests/oracles/attention_reference.py) is computed with a
-    # CONTIGUOUS split ([0:2], [2:4]); an interleaved split ([0,2]/[1,3]) or
-    # swapped heads yields different columns (E_output_INTERLEAVED in the
-    # oracle), so this frozen output pins both the split axis and head ordering.
+    """H=2 forward matches the oracle's contiguous head split (Case E)."""
+    # The single-head test can't distinguish a contiguous split from an
+    # interleaved one, and causal locality is split-invariant at row 0 — so this
+    # case pins the split axis and head ordering. Expected output (Case E in
+    # tests/oracles/attention_reference.py) uses a CONTIGUOUS split ([0:2], [2:4]);
+    # an interleaved split ([0,2]/[1,3]) or swapped heads yields different columns.
     var w_qkv = from_rows(
         [
             [0.10, -0.20, 0.30, 0.05],
@@ -196,11 +192,10 @@ def test_multihead_forward_contiguous_split_oracle() raises:
 
 
 def test_causal_row0_ignores_later_positions() raises:
-    # Under a causal mask, query 0 attends only to key 0, and the qkv projection
-    # is position-wise, so output row 0 depends solely on input row 0. Permuting
-    # the later input rows must leave output row 0 unchanged — locality falling
-    # out of causality. A leaked future position (wrong mask wiring, or a head
-    # split that mixes positions) would move row 0.
+    """Under a causal mask, output row 0 is unchanged by permuting later rows.
+    """
+    # Query 0 attends only to key 0 and the qkv projection is position-wise, so
+    # row 0 depends solely on input row 0 — locality falling out of causality.
     var rng = Rng(123)
     var mha = MultiHeadAttention.init_random(rng, 4, 2)
     var x = from_rows(

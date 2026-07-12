@@ -1,13 +1,12 @@
-# Tests for Embedding backward — the scatter-add of the upstream gradient.
-#
-# The forward gathers table rows by id; the backward scatters d_out back to those
-# rows with +=. Three properties matter: touched rows match a finite difference;
-# a repeated id ACCUMULATES (both occurrences sum into the one row — the classic
-# scatter bug is to overwrite); and rows no id selected stay exactly zero.
-#
-# Finite-difference convention (D5, shared across this part's backward tests):
-#   L = sum(cotangent ⊙ output); central diff h = 1e-5; tolerance
-#   |analytic - numeric| <= 1e-7 + 1e-5 * |numeric|.
+"""Tests for Embedding backward, the scatter-add of the upstream gradient.
+
+The forward gathers table rows by id; the backward scatters d_out back to those
+rows with +=. Three properties matter: touched rows match a finite difference; a
+repeated id accumulates (both occurrences sum into the one row, rather than
+overwriting); and rows no id selected stay exactly zero. Finite-difference
+convention: L = sum(cotangent * output); central diff h = 1e-5; mixed
+absolute/relative tolerance |analytic - numeric| <= 1e-7 + 1e-5 * |numeric|.
+"""
 
 from std.testing import assert_almost_equal, assert_true, TestSuite
 
@@ -17,7 +16,8 @@ from llm.tensor.tensor2d import Tensor2D, from_rows
 
 
 def assert_grad_close(analytic: Float64, numeric: Float64) raises:
-    # D5 mixed tolerance |a - n| <= 1e-7 + 1e-5 * |n|.
+    """Assert analytic and numeric grads agree within mixed absolute/relative tolerance 1e-7 + 1e-5 * |numeric|.
+    """
     assert_true(
         abs(analytic - numeric) <= 1e-7 + 1e-5 * abs(numeric),
         String("grad mismatch: analytic=")
@@ -28,7 +28,7 @@ def assert_grad_close(analytic: Float64, numeric: Float64) raises:
 
 
 def make_embedding() raises -> Embedding:
-    # Table [V=5, C=3], asymmetric.
+    """Build an Embedding with an asymmetric [V=5, C=3] table."""
     var t = from_rows(
         [
             [0.1, -0.2, 0.3],
@@ -42,12 +42,13 @@ def make_embedding() raises -> Embedding:
 
 
 def sample_ids() raises -> List[Int]:
-    # id 1 appears twice (positions 0 and 2); ids 2 and 4 never appear.
+    """Sample ids where id 1 appears twice (positions 0 and 2) and ids 2 and 4 never appear.
+    """
     return [1, 3, 1, 0]
 
 
 def cotangent() raises -> Tensor2D:
-    # Fixed asymmetric d_out [N=4, C=3].
+    """A fixed asymmetric d_out, shape [N=4, C=3]."""
     return from_rows(
         [[0.7, -0.2, 1.3], [0.1, 0.9, -1.1], [-0.6, 0.3, 0.2], [0.4, -0.5, 0.8]]
     )
@@ -63,6 +64,8 @@ def projected(emb: Embedding, ids: List[Int], cot: Tensor2D) raises -> Float64:
 
 
 def test_touched_rows_match_finite_difference() raises:
+    """Table gradients match a central finite difference of the projected loss.
+    """
     var emb = make_embedding()
     var ids = sample_ids()
     var cot = cotangent()
@@ -86,8 +89,10 @@ def test_touched_rows_match_finite_difference() raises:
 
 
 def test_repeated_id_accumulates() raises:
+    """A repeated id's row gradient is the sum of its cotangent rows; a single-occurrence id gets its one row.
+    """
     # id 1 is at positions 0 and 2, so its row gradient is the SUM of those two
-    # cotangent rows — not just the last one written.
+    # cotangent rows, not just the last one written.
     var emb = make_embedding()
     var ids = sample_ids()
     var cot = cotangent()
@@ -106,8 +111,8 @@ def test_repeated_id_accumulates() raises:
 
 
 def test_untouched_rows_stay_zero() raises:
-    # ids used are {0, 1, 3}; rows 2 and 4 are never gathered, so their gradient
-    # must remain exactly zero (not merely small).
+    """Rows no id gathered (2 and 4) keep exactly zero gradient, not merely small.
+    """
     var emb = make_embedding()
     var ids = sample_ids()
     var cot = cotangent()
@@ -120,8 +125,8 @@ def test_untouched_rows_stay_zero() raises:
 
 
 def test_backward_accumulates_across_calls() raises:
-    # Two backward calls without zero_grad() between them exactly double the row
-    # gradients — the same accumulation contract the other layers pin.
+    """Two backward calls without zero_grad() between them exactly double the row gradients.
+    """
     var emb = make_embedding()
     var ids = sample_ids()
     var cot = cotangent()
@@ -136,14 +141,14 @@ def test_backward_accumulates_across_calls() raises:
 
 
 def test_repeated_id_doubling_is_bit_exact() raises:
-    # The exact-doubling contract must hold bit-for-bit for a REPEATED id, whose
-    # several cotangent rows are summed into one table row. If backward sums them
-    # with a running += straight into table.grad, the second call's partial sums
-    # interleave with the first call's stored result and round differently than
-    # 2*grad1 — so exact `==` fails on adversarial values. These three values
-    # (id 0, three positions, C=1) drift by one ulp under the running-+= order;
-    # the fix (sum this call's contribution into a local, add once) makes the
-    # doubling exact for any data, matching LayerNorm.
+    """Exact `==` doubling holds bit-for-bit for a repeated id whose cotangent rows sum into one table row.
+
+    A running += straight into table.grad interleaves the second call's partial
+    sums with the first call's stored result and rounds differently than
+    2*grad1; summing this call's contribution into a local and adding once makes
+    the doubling exact for any data. These three adversarial values (id 0, three
+    positions, C=1) drift by one ulp under the running-+= order.
+    """
     var emb = Embedding(Parameter(from_rows([[0.0]])))  # table [V=1, C=1]
     var ids = [0, 0, 0]
     var d_out = from_rows(

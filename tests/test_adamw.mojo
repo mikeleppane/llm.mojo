@@ -1,14 +1,7 @@
-# Tests for nn.optim.adamw_update — one tensor's decoupled-decay AdamW step.
-#
-# Goldens are frozen from tests/oracles/adamw_reference.py (independent NumPy
-# math; nothing under src/ or the suite imports it). Coverage:
-#   - multi-step oracle goldens, decay ON and OFF (value, and the m/v moments);
-#   - the hand-computed step 1: at t=1 the (1 - beta^1) bias correction exactly
-#     cancels the (1 - beta) that formed the moment, so mhat = g and vhat = g^2;
-#   - the decoupled-decay pin: with g = 0 the moments stay EXACTLY zero yet the
-#     value still shrinks to value*(1 - lr*wd) — decay never flows through g/m/v;
-#   - raises on t < 1 and on a mis-shaped state tensor;
-#   - determinism (pure arithmetic: two identical runs agree bit-for-bit).
+"""Tests for nn.optim.adamw_update, one tensor's decoupled-decay AdamW step.
+
+Goldens are frozen from tests/oracles/adamw_reference.py (independent NumPy math).
+"""
 
 from std.math import sqrt
 
@@ -25,12 +18,12 @@ from llm.tensor.tensor2d import Tensor2D, from_rows, zeros_2d
 
 
 def _param(value: Tensor2D) raises -> Parameter:
-    # A Parameter holding `value` with a fresh zeros grad.
+    """Return a Parameter holding `value` with a fresh zeros grad."""
     return Parameter(value.copy())
 
 
 def _set_grad(mut p: Parameter, g: Tensor2D):
-    # Overwrite p.grad with g (same shape).
+    """Overwrite p.grad with g (same shape)."""
     for i in range(g.rows):
         for j in range(g.cols):
             p.grad[i, j] = g[i, j]
@@ -43,8 +36,8 @@ comptime EPS = 1e-8
 
 
 def test_oracle_constant_grad_decay_on() raises:
-    # Case A: value0 = [[0.5,-1.0],[2.0,0.25]], constant grad [[0.1,-0.2],
-    # [0.3,0.05]], lr=0.01, wd=0.1, three steps. Goldens: adamw_reference.py.
+    """Constant grad, decay on: value and m/v moments match the oracle over 3 steps.
+    """
     var p = _param(from_rows([[0.5, -1.0], [2.0, 0.25]]))
     var grad = from_rows([[0.1, -0.2], [0.3, 0.05]])
     var m = zeros_2d(2, 2)
@@ -71,8 +64,8 @@ def test_oracle_constant_grad_decay_on() raises:
 
 
 def test_oracle_constant_grad_decay_off() raises:
-    # Case B: identical to A but wd=0.0. Same moments (decay never touches them),
-    # different values. Goldens: adamw_reference.py.
+    """Constant grad, decay off: same moments as the decay-on run, different values.
+    """
     var p = _param(from_rows([[0.5, -1.0], [2.0, 0.25]]))
     var grad = from_rows([[0.1, -0.2], [0.3, 0.05]])
     var m = zeros_2d(2, 2)
@@ -91,9 +84,8 @@ def test_oracle_constant_grad_decay_off() raises:
 
 
 def test_oracle_varying_grad_four_steps() raises:
-    # Case C: value0 as above, lr=0.05, wd=0.1, four DIFFERENT gradients. A
-    # varying-gradient run exercises the bias correction at t=1..4, not just the
-    # steady state. Goldens: adamw_reference.py (step-4 value).
+    """Four differing gradients exercise the bias correction at t=1..4 vs the oracle.
+    """
     var p = _param(from_rows([[0.5, -1.0], [2.0, 0.25]]))
     var grads = List[Tensor2D]()
     grads.append(from_rows([[0.1, -0.2], [0.3, 0.05]]))
@@ -113,13 +105,8 @@ def test_oracle_varying_grad_four_steps() raises:
 
 
 def test_step_one_bias_correction_cancels() raises:
-    # Hand check at t=1. With m=v=0 and one gradient g:
-    #   m1   = (1-b1)*g,  v1 = (1-b2)*g^2
-    #   mhat = m1/(1-b1^1) = m1/(1-b1) = g          (bias correction cancels)
-    #   vhat = v1/(1-b2^1) = v1/(1-b2) = g^2
-    #   value <- value - lr*( g/(sqrt(g^2)+eps) + wd*value )
-    # For value=2.0, g=0.3, lr=0.01, wd=0.1:
-    #   = 2.0 - 0.01*( 0.3/(0.3+1e-8) + 0.02 )  ~ 1.9880000003333334
+    """At t=1 the (1-beta^t) bias correction cancels the (1-beta), so mhat=g, vhat=g^2.
+    """
     var p = _param(from_rows([[2.0]]))
     _set_grad(p, from_rows([[0.3]]))
     var m = zeros_2d(1, 1)
@@ -133,11 +120,8 @@ def test_step_one_bias_correction_cancels() raises:
 
 
 def test_decoupled_decay_g_zero_shrinks_value() raises:
-    # The W in AdamW. With g = 0 the moments stay EXACTLY zero (nothing to
-    # accumulate) and the adaptive term is 0/(0+eps) = 0, so the ONLY change is
-    # the decoupled decay: value <- value - lr*wd*value = value*(1 - lr*wd).
-    # If decay were coupled through the gradient (Adam+L2), g=0 would leave the
-    # value untouched — this is the test that tells the two apart.
+    """The W in AdamW: with g=0 the moments stay zero yet decoupled decay still
+    shrinks the value to value*(1 - lr*wd)."""
     var p = _param(from_rows([[3.0]]))
     _set_grad(p, from_rows([[0.0]]))
     var m = zeros_2d(1, 1)
@@ -157,6 +141,7 @@ def test_decoupled_decay_g_zero_shrinks_value() raises:
 
 
 def test_raises_on_t_below_one() raises:
+    """Rejects a step index t < 1."""
     var p = _param(from_rows([[1.0]]))
     var m = zeros_2d(1, 1)
     var v = zeros_2d(1, 1)
@@ -165,6 +150,7 @@ def test_raises_on_t_below_one() raises:
 
 
 def test_raises_on_shape_mismatch() raises:
+    """Rejects a mis-shaped moment tensor."""
     var p = _param(from_rows([[1.0, 2.0]]))  # [1, 2]
     var m = zeros_2d(1, 2)
     var v = zeros_2d(2, 1)  # wrong shape
@@ -173,7 +159,7 @@ def test_raises_on_shape_mismatch() raises:
 
 
 def test_deterministic() raises:
-    # Pure arithmetic: two identical runs produce bit-identical results.
+    """Pure arithmetic: two identical runs produce bit-identical results."""
     var pa = _param(from_rows([[0.5, -1.0], [2.0, 0.25]]))
     var pb = _param(from_rows([[0.5, -1.0], [2.0, 0.25]]))
     var grad = from_rows([[0.1, -0.2], [0.3, 0.05]])

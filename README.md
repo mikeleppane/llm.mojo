@@ -8,11 +8,6 @@ written out, tested, and explained. It is the companion codebase to a written
 guide currently in preparation: every chapter's code is built and verified here
 first, so nothing gets published that doesn't compile and pass its tests.
 
-**Current status:** Parts I–XVI are complete — the from-scratch Mojo model,
-fed OpenAI's real released GPT-2 (124M) weights, generates coherent English and
-agrees with a Hugging Face reference to ~6e-5. Parts XVII+ (KV cache and
-performance) are next. Live per-part status is in [PROGRESS.md](PROGRESS.md).
-
 ## What this is
 
 - A readable, tested path from a bigram model (a lookup table that predicts
@@ -83,8 +78,8 @@ drift would break that, so the tests forbid it.
 
 ## How we are building it
 
-The project proceeds in strictly ordered parts (see the roadmap below). Each
-part follows the same loop:
+The project proceeds in strictly ordered parts. Each part follows the same
+loop:
 
 1. **Specified before built.** Each part's scope is fixed up front: which
    files, which signatures, which tests, and what "done" means, before any
@@ -173,42 +168,6 @@ reasoning behind it, with diagrams. Reference data (~2.5 MB total) is committed 
 offline and deterministically; download scripts with pinned URLs and SHA-256
 checksums document provenance.
 
-## Roadmap
-
-| Part | Topic |
-|---|---|
-| I-IV | Foundations: toolchain, Mojo language, numerics, tensors, ops, RNG |
-| V | Tokenization: char tokenizer, byte-level BPE in Mojo, GPT-2 vocab parity |
-| VI | Dataset pipeline: tiny Shakespeare, windows, batching, seeded shuffling |
-| VII | Bigram language model: table logits, cross-entropy, first training loop |
-| VIII-IX | Architecture overview; NN building blocks (linear, GELU, LayerNorm, MLP) |
-| X | Attention: multi-head, causal + padding masks, `[B, H, T, D]` discipline |
-| XI | Backpropagation by hand: every backward finite-difference-checked |
-| XII | Encoder-decoder lab: copy/reverse tasks validate cross-attention |
-| XIII | The GPT-2 model: pre-LN blocks, weight tying, 124,439,808 parameters |
-| XIV | Training: AdamW, LR schedules, clipping, checkpoints, overfit-one-batch |
-| XV | Generation: greedy, temperature, top-k, top-p, stop tokens |
-| XVI | Loading real GPT-2 weights and generating coherent text (the MVP) |
-| XVII | KV cache: exact-match cached generation, measured speedup |
-| XVIII | Performance: profiling, allocation removal, tiling, SIMD |
-| XIX | Validation and CI: the full gauntlet, logit-parity capstone |
-| XX | Finetuning and extensions: SFT, LoRA, RoPE/RMSNorm/SwiGLU variants |
-
-The order is deliberate, and the first model is deliberately weak. A *bigram*
-language model predicts the next token from only the current token: no
-context, no attention, just a `vocab × vocab` table of scores, trained with
-gradient descent. It cannot write Shakespeare, but it exercises the complete
-machinery end to end: tokenized data in, batches through a loss, gradients
-into an optimizer, samples out. Because the model is trivial, every number it
-produces can be verified by hand, including its theoretical best loss, which
-the training loop must converge to. From there, each part replaces one piece
-with something stronger (embeddings, attention, full Transformer blocks) while
-the surrounding machinery (data pipeline, loss, training loop, sampling)
-stays tested and familiar. When something breaks, you always know which layer
-broke, because everything under it was already proven.
-
-Live status per part is tracked in [PROGRESS.md](PROGRESS.md).
-
 ## Getting started
 
 The only prerequisite is [pixi](https://pixi.sh); it installs the pinned Mojo
@@ -236,12 +195,12 @@ pixi run mojo run -I src examples/<example>.mojo  # run an example
 
 `-I src` puts the `llm` package on the import path.
 
-**Running the real GPT-2 (Part XVI).** The final demo loads OpenAI's released
+**Running the real GPT-2.** The final demo loads OpenAI's released
 124M weights, which are *not* committed: `scripts/convert_gpt2_weights.py`
 downloads and converts them into the repo's `GPT2W v1` format (a ~475 MB file)
 once. Generation then runs in `Float64` on CPU — it holds roughly 2 GB resident
-and, without the KV cache (Part XVII, not yet built), is on the order of minutes
-per token. The point of Part XVI is fidelity, not speed; the speed comes later.
+and, without a KV cache, is on the order of minutes per token. The point of the
+demo is fidelity, not speed.
 
 ## Getting the most out of this if you are learning
 

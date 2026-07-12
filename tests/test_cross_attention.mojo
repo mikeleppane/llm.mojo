@@ -1,16 +1,14 @@
-# Tests for CrossMultiHeadAttention — the lab's separate-q + fused-kv cross
-# attention. The forward golden (Case CA) comes from
-# tests/oracles/encdec_reference.py, run once and frozen here; it uses T_q=3 !=
-# T_k=4 so a transposed mask or a [T_k, ...] output shape fails it. The rest are
-# structural (parameter count 4C²+4C, shape contract, init determinism, invalid
-# config) and the finite-difference backward checks for BOTH input gradients
-# (d_x through q, d_memory through the fused kv) and all six parameter grads,
-# plus exact accumulation doubling.
-#
-# Finite-difference convention (Part XI, inline per file — no shared closure):
-#   projected scalar loss L = sum(cotangent ⊙ forward), central diff h = 1e-5,
-#   mixed tolerance |analytic - numeric| <= 1e-7 + 1e-5 * |numeric|. A failing
-#   check indicts the wiring first, the test second, the tolerance never.
+"""Tests for CrossMultiHeadAttention, the lab's separate-q + fused-kv cross attention.
+
+The forward golden comes from tests/oracles/encdec_reference.py and uses T_q=3 !=
+T_k=4, so a transposed mask or a [T_k, ...] output shape fails it. The rest are
+structural (parameter count 4C²+4C, shape contract, init determinism, invalid
+config), finite-difference checks for both input gradients (d_x through q, d_memory
+through the fused kv) and all six parameter grads, plus exact accumulation doubling.
+
+Finite difference: L = sum(cotangent ⊙ forward), central diff h = 1e-5, mixed
+tolerance |analytic - numeric| <= 1e-7 + 1e-5 * |numeric|.
+"""
 
 from std.testing import (
     assert_almost_equal,
@@ -30,8 +28,8 @@ from llm.utils.random import Rng
 
 
 def mat(flat: List[Float64], rows: Int, cols: Int) raises -> Tensor2D:
-    # Build a [rows, cols] tensor from a flat row-major list (the shape the
-    # oracle prints). Raises if the list length disagrees with rows*cols.
+    """Build a [rows, cols] tensor from a flat row-major list; raises if the length
+    disagrees with rows*cols."""
     if len(flat) != rows * cols:
         raise Error("mat: length mismatch")
     var t = zeros_2d(rows, cols)
@@ -42,7 +40,8 @@ def mat(flat: List[Float64], rows: Int, cols: Int) raises -> Tensor2D:
 
 
 def assert_grad_close(analytic: Float64, numeric: Float64) raises:
-    # Part XI mixed tolerance |a - n| <= 1e-7 + 1e-5 * |n|.
+    """Assert |analytic - numeric| <= 1e-7 + 1e-5 * |numeric| (mixed tolerance).
+    """
     assert_true(
         abs(analytic - numeric) <= 1e-7 + 1e-5 * abs(numeric),
         String("grad mismatch: analytic=")
@@ -62,7 +61,7 @@ def assert_equal_exact(a: Float64, b: Float64) raises:
     )
 
 
-# --- Case CA golden data (frozen from tests/oracles/encdec_reference.py) ---
+# --- Golden data (frozen from tests/oracles/encdec_reference.py) ---
 
 
 def ca_x() raises -> Tensor2D:
@@ -112,7 +111,8 @@ def ca_mem() raises -> Tensor2D:
 
 
 def ca_weights() raises -> List[Tensor2D]:
-    # [q_w, q_b, kv_w, kv_b, proj_w, proj_b] as tensors (biases as [1, out]).
+    """[q_w, q_b, kv_w, kv_b, proj_w, proj_b] as tensors (biases as [1, out]).
+    """
     var out = List[Tensor2D]()
     out.append(
         mat(
@@ -226,8 +226,8 @@ def ca_weights() raises -> List[Tensor2D]:
 def build_cmha(
     w: List[Tensor2D], n_heads: Int
 ) raises -> CrossMultiHeadAttention:
-    # Assemble a cross-MHA from [q_w, q_b, kv_w, kv_b, proj_w, proj_b], copied in
-    # so a finite-difference loop can perturb any entry and rebuild.
+    """Assemble a cross-MHA from [q_w, q_b, kv_w, kv_b, proj_w, proj_b], copied in so
+    a finite-difference loop can perturb any entry and rebuild."""
     var q = Linear(Parameter(w[0].copy()), Parameter(w[1].copy()))
     var kv = Linear(Parameter(w[2].copy()), Parameter(w[3].copy()))
     var proj = Linear(Parameter(w[4].copy()), Parameter(w[5].copy()))
@@ -235,7 +235,7 @@ def build_cmha(
 
 
 def cotangent() raises -> Tensor2D:
-    # Fixed asymmetric d_out [T_q=3, C=4].
+    """Fixed asymmetric d_out [T_q=3, C=4]."""
     return mat(
         [0.7, -0.2, 1.3, -0.5, 0.1, 0.9, -1.1, 0.4, -0.6, 0.3, 0.2, -0.8], 3, 4
     )
@@ -256,9 +256,8 @@ def projected(
 
 
 def test_case_ca_forward_oracle() raises:
-    # Golden Case CA: cross-MHA forward, T_q=3, T_k=4, H=2, C=4, no mask. The
-    # cross shape (T_q != T_k) proves the separate q vs k/v lengths work; the
-    # output must be [T_q, C] = [3, 4].
+    """Cross-MHA forward golden (T_q=3, T_k=4, H=2, C=4, no mask): the separate q vs
+    k/v lengths work and the output is [T_q, C] = [3, 4]."""
     var layer = build_cmha(ca_weights(), 2)
     var x = ca_x()
     var mem = ca_mem()
@@ -284,8 +283,8 @@ def test_case_ca_forward_oracle() raises:
 
 
 def test_shape_contract() raises:
-    # Output is [T_q, C] regardless of T_k; a swapped-length bug would surface as
-    # [T_k, C]. Here T_q=2, T_k=5.
+    """Output is [T_q, C] regardless of T_k (here T_q=2, T_k=5); a swapped-length bug
+    would surface as [T_k, C]."""
     var rng = Rng(3)
     var layer = CrossMultiHeadAttention.init_random(rng, 4, 2)
     var x = zeros_2d(2, 4)
@@ -296,8 +295,8 @@ def test_shape_contract() raises:
 
 
 def test_parameter_count_is_4c2_plus_4c() raises:
-    # The lab's one pinned count: q(C²+C) + kv(2C²+2C) + proj(C²+C) = 4C²+4C, the
-    # same total as self-MHA, summed over the layer's REAL Parameter tensors.
+    """Parameter count q(C²+C) + kv(2C²+2C) + proj(C²+C) = 4C²+4C, summed over the
+    layer's real Parameter tensors (same total as self-MHA)."""
     var c = 8
     var rng = Rng(1)
     var layer = CrossMultiHeadAttention.init_random(rng, c, 2)
@@ -313,7 +312,8 @@ def test_parameter_count_is_4c2_plus_4c() raises:
 
 
 def test_init_determinism() raises:
-    # Same seed reproduces the same layer (draw order q, kv, proj is pinned).
+    """Same seed reproduces the same layer (draw order q, kv, proj is pinned).
+    """
     var a = Rng(42)
     var b = Rng(42)
     var la = CrossMultiHeadAttention.init_random(a, 4, 2)
@@ -324,6 +324,7 @@ def test_init_determinism() raises:
 
 
 def test_invalid_config_raises() raises:
+    """Zero heads or a non-divisible head split raises."""
     var rng = Rng(1)
     with assert_raises():
         _ = CrossMultiHeadAttention.init_random(rng, 4, 0)  # n_heads = 0
@@ -332,10 +333,9 @@ def test_invalid_config_raises() raises:
 
 
 def test_single_head_equals_core_and_projections() raises:
-    # With H=1 the head loop does nothing structural: the layer is exactly
-    # proj(sdpa(q(x), k, v)) with k, v the two halves of kv(memory). Recomputing
-    # that path by hand and matching pins that the fused-kv split feeds the core
-    # the right columns.
+    """With H=1 the layer is exactly proj(sdpa(q(x), k, v)) with k, v the two halves
+    of kv(memory): recomputing that path by hand pins the fused-kv column split.
+    """
     var rng = Rng(9)
     var layer = CrossMultiHeadAttention.init_random(rng, 4, 1)
     var x = ca_x()
@@ -358,6 +358,8 @@ def test_single_head_equals_core_and_projections() raises:
 
 
 def test_d_x_matches_finite_difference() raises:
+    """The input gradient d_x (through q) matches a central finite difference.
+    """
     var w = ca_weights()
     var layer = build_cmha(w, 2)
     var x = ca_x()
@@ -381,6 +383,8 @@ def test_d_x_matches_finite_difference() raises:
 
 
 def test_d_memory_matches_finite_difference() raises:
+    """The input gradient d_memory (through the fused kv) matches a central finite
+    difference."""
     var w = ca_weights()
     var layer = build_cmha(w, 2)
     var x = ca_x()
@@ -405,8 +409,8 @@ def test_d_memory_matches_finite_difference() raises:
 def finite_diff_param(
     w: List[Tensor2D], which: Int, r: Int, c: Int, cot: Tensor2D
 ) raises -> Float64:
-    # Central difference of the projected loss wrt one parameter entry. `which`
-    # indexes [q_w, q_b, kv_w, kv_b, proj_w, proj_b].
+    """Central difference of the projected loss wrt one parameter entry; `which`
+    indexes [q_w, q_b, kv_w, kv_b, proj_w, proj_b]."""
     var h = 1e-5
     var wp = List[Tensor2D]()
     var wm = List[Tensor2D]()
@@ -423,6 +427,7 @@ def finite_diff_param(
 
 
 def test_parameter_grads_match_finite_difference() raises:
+    """All six parameter grads match finite differences."""
     var w = ca_weights()
     var layer = build_cmha(w, 2)
     var x = ca_x()
@@ -449,9 +454,8 @@ def test_parameter_grads_match_finite_difference() raises:
 
 
 def test_backward_accumulates_exactly() raises:
-    # Two backward calls without a zero_grad() between them exactly double every
-    # parameter grad — the += contract the d_memory summing and any later weight
-    # tying rely on.
+    """Two backward calls without zero_grad exactly double every parameter grad (the
+    += contract the d_memory summing relies on)."""
     var w = ca_weights()
     var layer = build_cmha(w, 2)
     var x = ca_x()

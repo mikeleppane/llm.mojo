@@ -1,11 +1,11 @@
-# Tests for global-norm gradient clipping: GPT.grad_norm (the whole-model L2),
-# GPT.scale_grads (the clip multiply), and clip_grad_norm (the composition).
-#
-# The norm is GLOBAL — one vector norm over every gradient entry in the model,
-# not a per-tensor norm — so the hand-computed cases set entries on SEVERAL
-# different parameters (wte, ln_f.bias, a block bias) and check the single
-# combined norm. Clipping is a no-op below the threshold (bit-for-bit) and brings
-# the norm to exactly the threshold above it.
+"""Tests for global-norm gradient clipping: GPT.grad_norm (whole-model L2),
+GPT.scale_grads (the clip multiply), and clip_grad_norm (the composition).
+
+The norm is global (one vector norm over every gradient entry, not per-tensor), so
+the hand-computed cases plant entries on several parameters and check the single
+combined norm. Clipping is a bit-for-bit no-op below the threshold and brings the
+norm to exactly the threshold above it.
+"""
 
 from std.testing import (
     assert_almost_equal,
@@ -22,14 +22,15 @@ from llm.utils.random import Rng
 
 
 def _tiny_gpt(seed: UInt64) raises -> GPT:
-    # V=8, context=8, C=8, L=2, H=2, dropout 0.
+    """A tiny GPT: V=8, context=8, C=8, L=2, H=2, dropout 0."""
     var cfg = GPTConfig(8, 8, 8, 2, 2, 0.0)
     var rng = Rng(seed)
     return GPT.init_random(cfg, rng)
 
 
 def _backward_into(mut gpt: GPT) raises:
-    # Real, nonzero gradients across the model (dropout off; no rng drawn).
+    """Plant real, nonzero gradients across the model (dropout off; no rng drawn).
+    """
     var ids = List[Int]()
     ids.append(1)
     ids.append(4)
@@ -48,10 +49,8 @@ def _backward_into(mut gpt: GPT) raises:
 
 
 def test_grad_norm_hand_computed_across_tensors() raises:
-    # Zero every gradient, then plant three entries on three DIFFERENT parameters:
-    # 3 on wte, 4 on ln_f.bias, 12 on block 0's mlp.down.bias. The global norm is
-    # sqrt(3^2 + 4^2 + 12^2) = sqrt(169) = 13 — a per-tensor norm would report
-    # 3, 4, or 12, never 13.
+    """Entries 3, 4, 12 planted on three different parameters give a global norm
+    sqrt(3^2+4^2+12^2)=13, which a per-tensor norm could never report."""
     var gpt = _tiny_gpt(1)
     gpt.zero_grad()
     gpt.wte.table.grad[0, 0] = 3.0
@@ -61,8 +60,8 @@ def test_grad_norm_hand_computed_across_tensors() raises:
 
 
 def test_clip_below_threshold_is_exact_noop() raises:
-    # Norm 0.5 (from 0.3 and 0.4) is below clip 1.0, so clip_grad_norm returns the
-    # norm and leaves every gradient byte-for-byte unchanged.
+    """Norm 0.5 below clip 1.0: clip_grad_norm returns the norm and leaves every
+    gradient byte-for-byte unchanged."""
     var gpt = _tiny_gpt(1)
     gpt.zero_grad()
     gpt.wte.table.grad[0, 0] = 0.3
@@ -79,9 +78,8 @@ def test_clip_below_threshold_is_exact_noop() raises:
 
 
 def test_clip_above_threshold_scales_to_clip() raises:
-    # Norm 5 (from 3 and 4) exceeds clip 1.0: every grad is scaled by 1/5, the
-    # post-clip global norm is exactly the clip, and the returned norm is the
-    # PRE-clip value.
+    """Norm 5 exceeds clip 1.0: every grad scales by 1/5, the post-clip norm equals
+    the clip, and the returned norm is the pre-clip value."""
     var gpt = _tiny_gpt(1)
     gpt.zero_grad()
     gpt.wte.table.grad[0, 0] = 3.0
@@ -95,8 +93,8 @@ def test_clip_above_threshold_scales_to_clip() raises:
 
 
 def test_clip_zero_grad_no_blowup() raises:
-    # All grads zero: norm 0 never exceeds a positive clip, so no division occurs
-    # and the gradients stay exactly zero (no NaN from 0/0).
+    """All-zero grads: norm 0 never exceeds a positive clip, so no division occurs
+    and the gradients stay exactly zero (no NaN from 0/0)."""
     var gpt = _tiny_gpt(1)
     gpt.zero_grad()
     var norm = clip_grad_norm(gpt, 1.0)
@@ -106,9 +104,8 @@ def test_clip_zero_grad_no_blowup() raises:
 
 
 def test_scale_grads_touches_every_grad() raises:
-    # scale_grads must multiply EVERY gradient. With real grads, exporting before
-    # and after a scale by 2.0, every entry must be exactly doubled — a skipped
-    # parameter would keep its original value.
+    """Scaling multiplies every gradient: after scale_grads by 2.0, every entry is
+    exactly doubled (a skipped parameter would keep its value)."""
     var gpt = _tiny_gpt(2)
     _backward_into(gpt)
     var before = gpt.export_gradients()
@@ -124,6 +121,7 @@ def test_scale_grads_touches_every_grad() raises:
 
 
 def test_clip_grad_norm_rejects_nonpositive() raises:
+    """Rejects a non-positive max_norm in clip_grad_norm."""
     var gpt = _tiny_gpt(1)
     gpt.zero_grad()
     with assert_raises(contains="max_norm must be positive"):

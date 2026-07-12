@@ -1,28 +1,22 @@
-# EncDec — the small encoder-decoder Transformer the lab assembles and trains.
-#
-# This is the first model in the repo built by ASSEMBLING already-proven layers,
-# and the first to train through cross-attention back into an encoder. The
-# architecture (all pre-LN, GPT-2's layout):
-#
-#   Encoder:  x = src_tok(src) + src_pos(0..T-1)
-#             x = enc_block(x, no_mask)   (xN)
-#             memory = enc_ln_f(x)                      # final LN, GPT-2's ln_f
-#   Decoder:  y = tgt_tok(tgt_in) + tgt_pos(0..T-1)
-#             y = dec_block(y, memory, causal, no_mask) (xN)
-#             y = dec_ln_f(y)                           # final LN
-#             logits = head(y)                          # [T, V], untied
-#
-# Teacher forcing: tgt_in = [BOS] + tgt[:-1], and the loss is
-# cross_entropy_rows(logits, tgt) — the target, NOT the input. Source and target
-# get SEPARATE token and positional embeddings, and the head is UNTIED (weight
-# tying is a later concept); the enumeration in zero_grad/apply_sgd below is the
-# model's full parameter inventory.
-#
-# The backward's one subtle wire is d_memory. Every decoder block's
-# cross-attention produces a gradient with respect to memory; the encoder's
-# backward starts from their SUM (and nothing else — the head and the decoder
-# self-attention never touch memory). With one decoder block the sum is trivial;
-# the += accumulator is what keeps it correct when there is more than one.
+"""EncDec: the small encoder-decoder Transformer the lab assembles and trains.
+
+Built by assembling already-proven layers and trained through cross-attention
+back into an encoder. All pre-LN, GPT-2's layout:
+
+    Encoder:  x = src_tok(src) + src_pos(0..T-1)
+              x = enc_block(x, no_mask)   (xN)
+              memory = enc_ln_f(x)                      # final LN
+    Decoder:  y = tgt_tok(tgt_in) + tgt_pos(0..T-1)
+              y = dec_block(y, memory, causal, no_mask) (xN)
+              y = dec_ln_f(y)                           # final LN
+              logits = head(y)                          # [T, V], untied
+
+Teacher forcing: tgt_in = [BOS] + tgt[:-1], and the loss targets tgt, not the
+input. Source and target get separate token and positional embeddings, and the
+head is untied. In backward, every decoder block's cross-attention produces a
+gradient w.r.t. memory; the encoder backward starts from their sum, which the
++= accumulator keeps correct for more than one decoder block.
+"""
 
 from llm.lab.blocks import (
     DecoderBlock,
@@ -48,8 +42,14 @@ from llm.utils.random import Rng
 
 
 def position_ids(t: Int) -> List[Int]:
-    # The positional ids [0, 1, ..., t-1] a learned positional Embedding gathers.
-    # Reads nothing; allocates the result; cannot fail.
+    """Build the positional ids [0, 1, ..., t-1] a positional Embedding gathers.
+
+    Args:
+        t: Sequence length.
+
+    Returns:
+        The id list. Allocates.
+    """
     var out = List[Int]()
     for i in range(t):
         out.append(i)
@@ -58,11 +58,14 @@ def position_ids(t: Int) -> List[Int]:
 
 @fieldwise_init
 struct EncDecCache(Copyable, Movable):
-    # Everything EncDec.backward needs, mirroring the forward flow: the four
-    # embedding caches (source token/pos, target token/pos), one cache per
-    # encoder block, the encoder final-LN cache, one cache per decoder block, the
-    # decoder final-LN cache, and the head cache. Valid only for the forward call
-    # that produced it.
+    """Everything EncDec.backward needs, mirroring the forward flow.
+
+    The four embedding caches (source token/pos, target token/pos), one cache per
+    encoder block, the encoder final-LN cache, one cache per decoder block, the
+    decoder final-LN cache, and the head cache. Valid only for the forward call
+    that produced it.
+    """
+
     var src_tok_cache: EmbeddingCache
     var src_pos_cache: EmbeddingCache
     var tgt_tok_cache: EmbeddingCache
@@ -76,7 +79,8 @@ struct EncDecCache(Copyable, Movable):
 
 @fieldwise_init
 struct EncDecForward(Copyable, Movable):
-    # forward_cached's output (the logits) plus the cache its backward consumes.
+    """The logits from forward_cached plus the cache its backward consumes."""
+
     var logits: Tensor2D  # [T, V]
     var cache: EncDecCache
 
@@ -104,12 +108,29 @@ struct EncDec(Copyable, Movable):
         d_hidden: Int,
         t_max: Int,
     ) raises -> EncDec:
-        # Build a seeded encoder-decoder. Draw order: source token, source pos,
-        # target token, target pos embeddings; then each encoder block (attn then
-        # mlp inside); then each decoder block (self-attn, cross-attn, mlp); then
-        # the head. The two final LayerNorms are parameter-free at init (weight
-        # ones, bias zeros). Mutates rng; allocates every layer; raises on
-        # non-positive dims (via the sublayer factories) or n_enc/n_dec < 1.
+        """Build a seeded encoder-decoder Transformer.
+
+        Draw order: source token, source pos, target token, target pos
+        embeddings; then each encoder block; then each decoder block; then the
+        head. The two final LayerNorms are parameter-free at init.
+
+        Args:
+            rng: Random generator; its state is advanced.
+            vocab_size: Model vocabulary size V.
+            d_model: Model width C.
+            n_heads: Number of attention heads.
+            n_enc: Number of encoder blocks; must be >= 1.
+            n_dec: Number of decoder blocks; must be >= 1.
+            d_hidden: MLP hidden width.
+            t_max: Maximum sequence length for the positional tables.
+
+        Returns:
+            A new model. Allocates every layer.
+
+        Raises:
+            Error: On non-positive dims (via the sublayer factories) or
+                n_enc/n_dec < 1.
+        """
         if n_enc < 1 or n_dec < 1:
             raise Error(
                 "EncDec.init_random: need at least one encoder and one decoder"
@@ -148,11 +169,20 @@ struct EncDec(Copyable, Movable):
         )
 
     def encode(self, src: List[Int]) raises -> Tensor2D:
-        # Run the encoder stack and final LN, returning memory [T_src, C]. Shared
-        # by forward and greedy_decode (which encodes once, then decodes many
-        # steps). Exposed so the training capstone can ablate by decoding from a
-        # corrupted (zeroed) memory without re-encoding. Reads self; allocates;
-        # raises on a bad id or shape.
+        """Run the encoder stack and final LN, returning memory.
+
+        Shared by forward and greedy_decode. Exposed so a caller can decode from a
+        corrupted (zeroed) memory without re-encoding.
+
+        Args:
+            src: Source token ids, length T_src.
+
+        Returns:
+            Encoder memory, shape [T_src, C]. Reads self; allocates.
+
+        Raises:
+            Error: On a bad id or shape.
+        """
         var t_src = len(src)
         var x = add(
             self.src_tok.forward(src),
@@ -164,11 +194,22 @@ struct EncDec(Copyable, Movable):
         return self.enc_ln_f.forward(x)  # memory [T_src, C]
 
     def forward(self, src: List[Int], tgt_in: List[Int]) raises -> Tensor2D:
-        # Full teacher-forced forward: src [T_src], tgt_in [T_tgt] -> logits
-        # [T_tgt, V]. Encodes src to memory, then decodes tgt_in under a causal
-        # self-mask and a no-mask cross-attention over memory. Reads self;
-        # allocates; raises on a bad id, an out-of-range position (T > T_max), or
-        # a shape mismatch.
+        """Run the full teacher-forced forward pass.
+
+        Encodes src to memory, then decodes tgt_in under a causal self-mask and a
+        no-mask cross-attention over memory.
+
+        Args:
+            src: Source token ids, length T_src.
+            tgt_in: Teacher-forced decoder inputs, length T_tgt.
+
+        Returns:
+            Logits, shape [T_tgt, V]. Reads self; allocates.
+
+        Raises:
+            Error: On a bad id, an out-of-range position (T > T_max), or a shape
+                mismatch.
+        """
         var memory = self.encode(src)  # [T_src, C]
         var t_src = len(src)
         var t_tgt = len(tgt_in)
@@ -186,10 +227,18 @@ struct EncDec(Copyable, Movable):
     def forward_cached(
         self, src: List[Int], tgt_in: List[Int]
     ) raises -> EncDecForward:
-        # Same computation as forward, capturing every layer's cache for
-        # backward. Reads self; allocates the intermediates, caches, and logits;
-        # raises on the same conditions forward does. The cache is valid only for
-        # this call.
+        """Run the forward pass, capturing every layer's cache for backward.
+
+        Args:
+            src: Source token ids, length T_src.
+            tgt_in: Teacher-forced decoder inputs, length T_tgt.
+
+        Returns:
+            Logits [T_tgt, V] plus a cache valid only for this call. Allocates.
+
+        Raises:
+            Error: On the same conditions forward raises.
+        """
         var t_src = len(src)
         var t_tgt = len(tgt_in)
 
@@ -267,27 +316,42 @@ struct EncDec(Copyable, Movable):
     def loss(
         self, src: List[Int], tgt_in: List[Int], tgt: List[Int]
     ) raises -> Float64:
-        # Teacher-forced mean cross-entropy: forward(src, tgt_in) then
-        # cross_entropy_rows(logits, tgt). The loss targets tgt (the true next
-        # tokens), NOT tgt_in (the shifted inputs) — the off-by-one that would
-        # otherwise cap training at the uniform baseline. Reads self; allocates;
-        # raises on a shape/id/target-range error.
+        """Compute teacher-forced mean cross-entropy loss.
+
+        Forwards then cross_entropy_rows(logits, tgt). The loss targets tgt, the
+        true next tokens, not tgt_in (the shifted inputs).
+
+        Args:
+            src: Source token ids, length T_src.
+            tgt_in: Teacher-forced decoder inputs, length T_tgt.
+            tgt: True target tokens, length T_tgt.
+
+        Returns:
+            Mean cross-entropy loss. Reads self; allocates.
+
+        Raises:
+            Error: On a shape/id/target-range error.
+        """
         var logits = self.forward(src, tgt_in)
         return cross_entropy_rows(logits, tgt)
 
     def backward(mut self, cache: EncDecCache, d_logits: Tensor2D) raises:
-        # Thread d_logits [T_tgt, V] back through the whole model, accumulating
-        # every parameter grad (+=). Order (reverse of forward):
-        #   head -> dec_ln_f -> each decoder block (reverse), SUMMING each block's
-        #   d_memory into a running encoder-output gradient -> tgt embeddings ->
-        #   enc_ln_f (seeded by the summed d_memory) -> each encoder block
-        #   (reverse) -> src embeddings.
-        # The token and positional embeddings were ADDED to form each stream, so
-        # the same stream gradient feeds both tables. d_memory is seeded to zeros
-        # and each decoder block adds its contribution — with n_dec > 1 every
-        # block contributes, and nothing but cross-attention feeds it. Mutates
-        # every parameter grad; allocates the intermediate gradients; raises on a
-        # shape mismatch.
+        """Thread d_logits back through the whole model, accumulating every grad.
+
+        Order (reverse of forward): head, dec_ln_f, each decoder block (summing
+        each block's d_memory into a running encoder-output gradient), tgt
+        embeddings, enc_ln_f (seeded by the summed d_memory), each encoder block,
+        src embeddings. The token and positional embeddings were added to form
+        each stream, so the same stream gradient feeds both tables. Mutates every
+        parameter grad (+=).
+
+        Args:
+            cache: The cache from the matching forward_cached call.
+            d_logits: Upstream gradient of the logits, shape [T_tgt, V].
+
+        Raises:
+            Error: On a shape mismatch.
+        """
         var d_y = self.head.backward(cache.head_cache, d_logits)  # [T_tgt, C]
         d_y = self.dec_ln_f.backward(cache.dec_ln_f_cache, d_y)
 
@@ -313,9 +377,8 @@ struct EncDec(Copyable, Movable):
         self.src_pos.backward(cache.src_pos_cache, d_x)
 
     def zero_grad(mut self):
-        # Reset every parameter gradient to zero — the model's full inventory.
-        # Called before each grad-accumulation batch. Mutates in place; cannot
-        # raise.
+        """Reset every parameter gradient to zero, before each grad-accum batch.
+        """
         zero_embedding(self.src_tok)
         zero_embedding(self.src_pos)
         zero_embedding(self.tgt_tok)
@@ -329,9 +392,14 @@ struct EncDec(Copyable, Movable):
         zero_linear(self.head)
 
     def apply_sgd(mut self, lr: Float64) raises:
-        # One plain-SGD step (param -= lr * grad) on every parameter — the same
-        # inventory as zero_grad. Mutates parameter values; raises on a shape
-        # mismatch (via sgd_step — never for a well-formed model).
+        """Apply one plain-SGD step (param -= lr * grad) to every parameter.
+
+        Args:
+            lr: Learning rate.
+
+        Raises:
+            Error: On a shape mismatch (never for a well-formed model).
+        """
         sgd_embedding(self.src_tok, lr)
         sgd_embedding(self.src_pos, lr)
         sgd_embedding(self.tgt_tok, lr)
@@ -347,22 +415,44 @@ struct EncDec(Copyable, Movable):
     def greedy_decode(
         self, src: List[Int], t_out: Int, bos: Int
     ) raises -> List[Int]:
-        # Autoregressive greedy decoding, no KV cache: encode src once, then
-        # decode t_out steps from that memory. Reads self; allocates; raises on a
-        # shape/id error or an out-of-range position (t_out > T_max). Returns the
-        # t_out emitted ids.
+        """Greedily decode, no KV cache: encode src once, then decode t_out steps.
+
+        Args:
+            src: Source token ids, length T_src.
+            t_out: Number of decode steps / emitted ids.
+            bos: Beginning-of-sequence token id.
+
+        Returns:
+            The t_out emitted ids. Reads self; allocates.
+
+        Raises:
+            Error: On a shape/id error or an out-of-range position (t_out >
+                T_max).
+        """
         return self.greedy_decode_from_memory(self.encode(src), t_out, bos)
 
     def greedy_decode_from_memory(
         self, memory: Tensor2D, t_out: Int, bos: Int
     ) raises -> List[Int]:
-        # The decode loop given a fixed memory: loop t_out steps feeding [BOS] +
-        # tokens-emitted-so-far, take the argmax of the LAST logits row, append
-        # it, repeat. Recomputes the decoder per step (fine at the lab's tiny T).
-        # Split out from greedy_decode so a test can pass a CORRUPTED memory (e.g.
-        # zeros) and watch exact-match collapse — the proof the decoder actually
-        # reads the encoder. Reads self; allocates; raises on a shape/id error or
-        # an out-of-range position (t_out > T_max). Returns the t_out emitted ids.
+        """Run the decode loop against a fixed memory.
+
+        Loops t_out steps feeding [BOS] + tokens-emitted-so-far, takes the argmax
+        of the last logits row, appends it, repeats (recomputing the decoder per
+        step). Split out from greedy_decode so a caller can pass a corrupted memory
+        and watch exact-match collapse.
+
+        Args:
+            memory: Encoder output, shape [T_src, C].
+            t_out: Number of decode steps / emitted ids.
+            bos: Beginning-of-sequence token id.
+
+        Returns:
+            The t_out emitted ids. Reads self; allocates.
+
+        Raises:
+            Error: On a shape/id error or an out-of-range position (t_out >
+                T_max).
+        """
         var t_src = memory.rows
         var emitted = List[Int]()
         for _ in range(t_out):

@@ -1,16 +1,12 @@
-# Tests for the GPT2W v1 weight loader (transformer/gpt2_weights.mojo).
-#
-# The doll-house fixture (V 11, T 8, C 8, L 1, H 2) is written at TEST TIME by
-# the Python oracle tests/oracles/gpt2_weights_reference.py — the same live-Python
-# arrangement the tokenizer test uses — so the suite stays offline and touches no
-# large files. The oracle's sentinel weights are ASYMMETRIC (a per-slot base plus
-# different row/column coefficients), so the pins below catch the failure this
-# whole part exists to defeat: a missing transpose on a SQUARE kernel, a swapped
-# walk slot, an ingested buffer — none of which a shape check can see.
-#
-# Every golden here is ALSO frozen inline (printed once by the oracle's main and
-# pasted), so a silently broken fixture writer is caught: the file under test and
-# the numbers it is checked against come from independent transcriptions.
+"""Tests for the GPT2W v1 weight loader (transformer/gpt2_weights.mojo).
+
+The doll-house fixture (V 11, T 8, C 8, L 1, H 2) is written at test time by the
+Python oracle tests/oracles/gpt2_weights_reference.py, so the suite stays offline.
+The oracle's sentinel weights are asymmetric (a per-slot base plus different
+row/column coefficients), so the pins catch failures a shape check cannot see: a
+missing transpose on a square kernel, a swapped walk slot, an ingested buffer.
+Every golden is also frozen inline, so a silently broken fixture writer is caught.
+"""
 
 from std.memory import bitcast
 from std.tempfile import gettempdir
@@ -37,7 +33,7 @@ comptime DOLLHOUSE_PARAM_COUNT = 1040
 
 
 def _oracle() raises -> PythonObject:
-    # The doll-house fixture writer + reference (tests/oracles/).
+    """The doll-house fixture writer + reference (tests/oracles/)."""
     Python.add_to_path("tests/oracles")
     return Python.import_module("gpt2_weights_reference")
 
@@ -50,8 +46,8 @@ def _tmp_path(name: String) raises -> String:
 
 
 def _write_and_path(oracle_fn: String, name: String) raises -> String:
-    # Call one of the oracle's writer functions to drop a fixture at a tempdir
-    # path, returning that path.
+    """Call an oracle writer function to drop a fixture at a tempdir path, returning that path.
+    """
     var path = _tmp_path(name)
     var oracle = _oracle()
     _ = oracle.__getattr__(oracle_fn)(path)
@@ -59,8 +55,8 @@ def _write_and_path(oracle_fn: String, name: String) raises -> String:
 
 
 def test_load_reconciles_shapes_and_count() raises:
-    # The happy path loads, the dims come back as written, and the built model's
-    # actual float count reconciles with the doll-house parameter count.
+    """The happy path loads, dims come back as written, and the model's float count reconciles with the doll-house parameter count.
+    """
     var path = _write_and_path("write_fixture", "gpt2w_ok.bin")
     var gpt = load_gpt2(path)
     assert_equal(gpt.cfg.vocab_size, V)
@@ -92,11 +88,12 @@ def test_load_reconciles_shapes_and_count() raises:
 
 
 def test_transpose_and_walk_pins() raises:
-    # Asymmetric sentinels pin the layout per slot. proj is the SQUARE [C, C]
-    # kernel — proj.w[0,1] != proj.w[1,0], so a loader that transposed it (a bug a
-    # shape check cannot catch) would swap these two and fail. The distinct wte,
-    # qkv, and ln_f values pin that each of the 16 tensors landed in its named
-    # field: a swapped walk slot (ln1<->ln2, up<->down) lands a wrong base.
+    """Asymmetric sentinels pin each tensor's layout: the square proj kernel proves no transpose, and distinct bases prove each of the 16 tensors landed in its named field.
+
+    proj.w[0,1] != proj.w[1,0], so a loader that transposed the square [C, C]
+    kernel would swap these and fail; a swapped walk slot (ln1<->ln2, up<->down)
+    lands a wrong base.
+    """
     var path = _write_and_path("write_fixture", "gpt2w_pins.bin")
     var gpt = load_gpt2(path)
 
@@ -135,11 +132,8 @@ def test_transpose_and_walk_pins() raises:
 
 
 def test_widening_is_bit_exact() raises:
-    # A probe file sets wte[0,0] to float32(0.1); after loading, its float64 bit
-    # pattern must be EXACTLY the float64 image of 0.1f32 (0x3FB99999A0000000 =
-    # 4591870180174331904). This is exact equality on the raw bits, not a
-    # tolerance: the f32 -> f64 read is a widening (every float32 is a float64),
-    # never a decimal re-parse.
+    """A float32(0.1) weight loads to the exact float64 image of 0.1f32 (bit-exact, not a tolerance): the f32 -> f64 read is a widening, never a decimal re-parse.
+    """
     var path = _write_and_path("write_widen_probe", "gpt2w_widen.bin")
     var gpt = load_gpt2(path)
     var bits = gpt.wte.table.value[0, 0].to_bits[DType.uint64]()
@@ -147,9 +141,8 @@ def test_widening_is_bit_exact() raises:
 
 
 def test_header_errors_are_named() raises:
-    # Each malformed file raises. Bad family token, wrong version tag, a dim that
-    # fails validation (C not divisible by H), a payload short by one float, and a
-    # payload long by one float — the five ways a GPT2W file can be wrong.
+    """Each malformed GPT2W file raises: bad family token, wrong version, an invalid dim (C not divisible by H), a payload short or long by one float, a missing header line, a wrong token count, and a count that disagrees with the dims.
+    """
     with assert_raises():
         _ = load_gpt2(_write_and_path("write_bad_magic", "gpt2w_badmagic.bin"))
     with assert_raises():
@@ -176,9 +169,8 @@ def test_header_errors_are_named() raises:
 
 
 def _reference_logits() raises -> List[Float64]:
-    # The oracle's frozen doll-house logits [T=5, V=11] for ids=[1,3,4,0,2], row
-    # major. Frozen inline from `pixi run python
-    # tests/oracles/gpt2_weights_reference.py` (never from memory).
+    """The oracle's frozen doll-house logits [T=5, V=11] for ids=[1,3,4,0,2], row major, from tests/oracles/gpt2_weights_reference.py.
+    """
     var vals = List[Float64]()
     vals.append(-0.019278374374598506)
     vals.append(0.002201473184772337)
@@ -249,10 +241,8 @@ def _fixture_ids() raises -> List[Int]:
 
 
 def test_forward_matches_reference() raises:
-    # End to end: file -> loader -> forward -> the NumPy f64 reference logits, one
-    # assertion chain at 1e-9. A wrong transpose, a swapped slot, an off-by-one
-    # walk, or a missing tensor lands a wrong number somewhere in the 55-value
-    # comparison.
+    """End to end (file -> loader -> forward) matches the NumPy f64 reference logits at 1e-9; a wrong transpose, swapped slot, off-by-one walk, or missing tensor lands a wrong number in the 55-value comparison.
+    """
     var path = _write_and_path("write_fixture", "gpt2w_fwd.bin")
     var gpt = load_gpt2(path)
     var logits = gpt.forward(_fixture_ids())
@@ -264,8 +254,8 @@ def test_forward_matches_reference() raises:
 
 
 def test_loaded_model_generates() raises:
-    # The XV/XVI seam: a loaded model runs greedily for 3 tokens without raising,
-    # every emitted id in range. Greedy (temperature 0) draws no rng.
+    """A loaded model runs greedily for 3 tokens without raising, every emitted id in range; greedy draws no rng.
+    """
     var path = _write_and_path("write_fixture", "gpt2w_gen.bin")
     var gpt = load_gpt2(path)
     var prompt = List[Int]()

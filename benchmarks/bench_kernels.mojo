@@ -1,21 +1,17 @@
-# Decode-shape kernel timing table.
-#
-# Part XVII made every decoded token one forward pass; the flops in that pass run
-# almost entirely through `matmul_transpose_b` (Linear forwards, attention
-# scores, the tied head, after the Part-XVIII call-site retrofit) and the `@`
-# matmul (attention weights @ v). This harness times those kernels at the SHAPES
-# the 124M model actually hits during greedy decode, plus a couple of batch
-# shapes, so an optimization shows up as a kernel time, not a guess.
-#
-# This is outside the test gate — it measures, it does not assert (the house
-# rule: timing lives in benchmarks/examples, never in tests). Run it, ideally a
-# release build, and record the numbers in notes/part-18-notes.md:
-#     pixi run mojo precompile src/llm -o build/llm.mojopkg
-#     pixi run mojo run -I build benchmarks/bench_kernels.mojo
-#
-# The timer uses perf_counter_ns; the median comes from the unit-tested helper in
-# llm.utils.timing. Best-of is reported as the median of `runs` samples after
-# `warmup` untimed calls.
+"""Decode-shape kernel timing table.
+
+Each decoded token is one forward pass whose flops run almost entirely through
+`matmul_transpose_b` (Linear forwards, attention scores, the tied head) and the
+`@` matmul (attention weights @ v). This harness times those kernels at the
+shapes the 124M model actually hits during greedy decode, plus a couple of batch
+shapes, so an optimization shows up as a kernel time, not a guess. It measures,
+it does not assert. Each result is the median of `runs` samples after `warmup`
+untimed calls.
+
+Run (ideally a release build) and record the numbers:
+    pixi run mojo precompile src/llm -o build/llm.mojopkg
+    pixi run mojo run -I build benchmarks/bench_kernels.mojo
+"""
 
 from std.time import perf_counter_ns
 from std.collections import List
@@ -26,8 +22,18 @@ from llm.utils.timing import median_ns
 
 
 def _filled(rows: Int, cols: Int) -> Tensor2D:
-    # A rows x cols tensor of small non-trivial values (timing is content-blind,
-    # but non-zero data avoids any zero-special-casing surprises down the line).
+    """Return a rows x cols tensor of small non-trivial values.
+
+    Timing is content-blind, but non-zero data avoids any zero-special-casing
+    surprises.
+
+    Args:
+        rows: Row count.
+        cols: Column count.
+
+    Returns:
+        A newly allocated [rows, cols] tensor.
+    """
     var t = zeros_2d(rows, cols)
     for i in range(rows):
         for j in range(cols):
@@ -38,9 +44,19 @@ def _filled(rows: Int, cols: Int) -> Tensor2D:
 def bench_mtb(
     name: String, m: Int, k: Int, n: Int, warmup: Int, runs: Int
 ) raises:
-    # matmul_transpose_b(a[m, k], b[n, k]) -> [m, n]: c[i,j] = sum_k a[i,k]*b[j,k].
-    # This is x @ W^T for a Linear (m rows, k in-features, n out-features), the
-    # attention score kernel, and the tied head (m=1, k=C, n=V).
+    """Time matmul_transpose_b at [m, k] . [n, k]^T and print median us + GFLOP/s.
+
+    This kernel is x @ W^T for a Linear (m rows, k in-features, n out-features),
+    the attention score kernel, and the tied head (m=1, k=C, n=V).
+
+    Args:
+        name: Label for the printed row.
+        m: Rows of the left operand.
+        k: Shared inner dimension (in-features).
+        n: Rows of the right operand (out-features).
+        warmup: Untimed warmup calls.
+        runs: Timed calls; the median is reported.
+    """
     var a = _filled(m, k)
     var b = _filled(n, k)
     for _ in range(warmup):
@@ -76,8 +92,19 @@ def bench_mtb(
 def bench_ikj(
     name: String, m: Int, k: Int, n: Int, warmup: Int, runs: Int
 ) raises:
-    # matmul_ikj(a[m, k], b[k, n]) -> [m, n]: the true-matmul path (attention
-    # weights @ v, and the `@` operator it delegates to).
+    """Time matmul_ikj at [m, k] @ [k, n] and print median us + GFLOP/s.
+
+    This is the true-matmul path (attention weights @ v, and the `@` operator it
+    delegates to).
+
+    Args:
+        name: Label for the printed row.
+        m: Rows of the left operand.
+        k: Shared inner dimension.
+        n: Columns of the right operand.
+        warmup: Untimed warmup calls.
+        runs: Timed calls; the median is reported.
+    """
     var a = _filled(m, k)
     var b = _filled(k, n)
     for _ in range(warmup):
@@ -111,6 +138,8 @@ def bench_ikj(
 
 
 def main() raises:
+    """Run the kernel timing table over decode, prefill, and attention shapes.
+    """
     print("== decode shapes (single-token, m=1), 124M dims ==")
     bench_mtb("c_attn  ", 1, 768, 2304, warmup=3, runs=11)
     bench_mtb("c_proj  ", 1, 768, 768, warmup=3, runs=11)

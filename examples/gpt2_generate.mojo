@@ -1,22 +1,18 @@
-# THE MVP: our from-scratch Mojo forward pass, fed OpenAI's real GPT-2 124M
-# weights, generating coherent English.
-#
-# Every part before this built an instrument; this one plays it. Load the
-# converted weights, load the GPT-2 tokenizer, encode a classic prompt, and let
-# Part XV's generate() speak — once greedily (argmax, deterministic) and once with
-# nucleus sampling (top-p 0.9, temperature 1.0). The text it prints is the whole
-# project's payoff.
-#
-# Honest arithmetic (this model is COHERENT, not FAST): there is NO KV cache yet,
-# so every new token re-runs the FULL forward over the entire growing context —
-# ~10^10 float64 flops per token at these lengths in a naive scalar matmul. Expect
-# MINUTES PER TOKEN on CPU. That pain is precisely the opening argument for the KV
-# cache and the performance work in the parts that follow. If the wall-clock is
-# too long, shrink MAX_NEW_TOKENS — never the model.
-#
-# Run (after downloading the weights and running the converter — see
-# scripts/convert_gpt2_weights.py):
-#   pixi run mojo run -I build examples/gpt2_generate.mojo
+"""Generate coherent English from a from-scratch Mojo forward over real GPT-2 124M.
+
+Loads the converted weights and the GPT-2 tokenizer, encodes a classic prompt,
+and calls generate() once greedily (argmax, deterministic) and once with nucleus
+sampling (top-p 0.9, temperature 1.0).
+
+This model is coherent, not fast: there is no KV cache, so every new token
+re-runs the full forward over the entire growing context (~10^10 float64 flops
+per token in a naive scalar matmul), which is minutes per token on CPU. If the
+wall-clock is too long, shrink MAX_NEW_TOKENS, never the model.
+
+Run (after downloading the weights and running the converter, see
+scripts/convert_gpt2_weights.py):
+    pixi run mojo run -I build examples/gpt2_generate.mojo
+"""
 
 from std.time import perf_counter_ns
 
@@ -35,8 +31,17 @@ comptime SEED = 1337
 
 
 def _require_file(path: String) raises:
-    # Cheap existence probe (open, do not read the 498 MB payload) with a message
-    # pointing at the converter. NO fallback to random weights.
+    """Raise a converter-pointing error unless `path` exists.
+
+    Cheap existence probe (open, do not read the 498 MB payload); there is no
+    fallback to random weights.
+
+    Args:
+        path: File that must exist.
+
+    Raises:
+        Error: If the file cannot be opened.
+    """
     try:
         var probe = open(path, "r")
         probe.close()
@@ -52,6 +57,7 @@ def _require_file(path: String) raises:
 
 
 def main() raises:
+    """Generate greedy and nucleus continuations, printing per-token timings."""
     _require_file(WEIGHTS_PATH)
     _require_file(VOCAB_PATH)
     _require_file(MERGES_PATH)

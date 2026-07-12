@@ -1,51 +1,30 @@
-# Loading released GPT-2 weights into our GPT — the `GPT2W v1` reader.
-#
-# This is the module that pours OpenAI's actual GPT-2 124M weights into the
-# from-scratch GPT struct so the Mojo forward pass generates real English. It
-# reads ONE file format, `GPT2W v1`, produced offline by
-# `scripts/convert_gpt2_weights.py`. All GPT-2-specific knowledge — the HF tensor
-# names, the Conv1D transposes, the 1-D-to-row reshapes, the buffers to skip —
-# lives in that converter, in one heavily-commented place. This loader is
-# deliberately DUMB: it validates a header, streams a float32 payload in the
-# model's walk order, and builds the model. It knows the walk order and the
-# shapes; it knows nothing about where the weights came from.
-#
-# The `GPT2W v1` format (the single spec the converter, the fixture oracle
-# `tests/oracles/gpt2_weights_reference.py`, and this loader all agree on):
-#
-#   line 0 (ASCII, newline-terminated):
-#       GPT2W v1 <V> <T> <C> <L> <H> <param_count>
-#   then the raw little-endian float32 payload, every parameter tensor back to
-#   back in THE MODEL'S WALK ORDER, row-major within each tensor:
-#       wte [V,C], wpe [T,C],
-#       per block (x L): ln1.w [1,C], ln1.b [1,C], qkv.w [3C,C], qkv.b [1,3C],
-#                        proj.w [C,C], proj.b [1,C], ln2.w [1,C], ln2.b [1,C],
-#                        up.w [4C,C], up.b [1,4C], down.w [C,4C], down.b [1,C],
-#       ln_f.w [1,C], ln_f.b [1,C].
-#
-#   There are NO per-tensor shape records: the shapes are DERIVED from (V,T,C,L,H)
-#   by both writer and reader, so the walk IS the single source of truth (the same
-#   walk order the optimizer, gradient clipping, and the checkpoint all lean on).
-#   The header's declared param_count and the payload's byte length cross-check
-#   each other, and both cross-check the shapes implied by the dims.
-#
-# Why this format coexists with the Part XIV checkpoint (`GPTCKPT 1`): the two
-# serve different contracts. The checkpoint is a TEXT format (one hex Float64 per
-# line) built for BIT-EXACT trainer resume — it carries the AdamW moments (m, v),
-# the step counter, and the rng state a training run needs to continue
-# identically. A released model has none of that: it is just parameters. At 124M
-# parameters the checkpoint's hex-text encoding would be a multi-gigabyte file
-# parsed line by line; `GPT2W v1` stores the released float32 precision as raw
-# bytes (~475 MB) and widens f32 -> f64 exactly on read (every float32 is
-# representable as a float64 — a bit-level test pins it). Released weights and
-# resume checkpoints are different jobs, so they are different formats.
-#
-# Memory honesty: at 124M the returned GPT holds ~124M Float64 values plus a
-# same-sized zero gradient per Parameter (allocated by `Parameter` as always),
-# so expect ~2 GB resident. `load_gpt2` consumes NO rng and touches no global
-# state; it raises (named) on any malformed or mismatched input and never reads
-# garbage. The returned model's `cfg.dropout` is 0.0 — an inference artifact
-# (dropout is a training-time concern; a loaded released model is for inference).
+"""Load released GPT-2 weights into our GPT: the `GPT2W v1` reader.
+
+Pours OpenAI's GPT-2 124M weights into the from-scratch GPT struct so the Mojo
+forward pass generates real English. Reads one file format, `GPT2W v1`, produced
+offline by scripts/convert_gpt2_weights.py, which owns all GPT-2-specific
+knowledge (HF tensor names, Conv1D transposes, reshapes). This loader is
+deliberately dumb: it validates a header, streams the float32 payload in the
+model's walk order, and builds the model.
+
+Format: an ASCII newline-terminated header line
+
+    GPT2W v1 <V> <T> <C> <L> <H> <param_count>
+
+then the raw little-endian float32 payload, every parameter tensor back to back
+in the model's walk order (wte, wpe, then per block ln1/qkv/proj/ln2/up/down,
+then ln_f), row-major within each tensor. There are no per-tensor shape records:
+shapes are derived from (V,T,C,L,H) by both writer and reader, so the walk is the
+single source of truth. The declared param_count and the payload byte length
+cross-check each other and the dims.
+
+Distinct from the `GPTCKPT 1` checkpoint, a hex-text format for bit-exact trainer
+resume (AdamW moments, step counter, rng state). A released model is just
+parameters, so `GPT2W v1` stores raw float32 bytes (~475 MB) widened to f64
+exactly on read. The returned GPT is ~2 GB resident at 124M (values plus zero
+grads); load_gpt2 consumes no rng, raises named on any bad input, and sets
+cfg.dropout to 0.0 (an inference artifact).
+"""
 
 from std.memory import bitcast
 
@@ -60,10 +39,9 @@ from llm.transformer.attention import MultiHeadAttention
 from llm.transformer.block import TransformerBlock
 from llm.transformer.gpt import GPT
 
-# The format's magic/version tag. "GPT2W" is the file family; "v1" is the format
-# version. The header's first two whitespace tokens must be exactly these, or the
-# loader raises (a wrong family -> "bad magic"; a wrong version -> "unsupported
-# version"), so a future v2 payload can never be misread as a v1.
+# The format's magic/version tag: "GPT2W" is the file family, "v1" the version.
+# The header's first two tokens must be exactly these, else the loader raises, so
+# a future v2 payload can never be misread as a v1.
 comptime GPT2W_MAGIC = "GPT2W v1"
 comptime GPT2W_FAMILY = "GPT2W"
 comptime GPT2W_VERSION_TAG = "v1"
@@ -74,11 +52,20 @@ comptime GPT2W_HEADER_TOKENS = 8
 
 
 def _f32_bytes_to_f64(b0: UInt8, b1: UInt8, b2: UInt8, b3: UInt8) -> Float64:
-    # Reconstruct one little-endian IEEE-754 float32 from its 4 bytes and widen it
-    # to float64. The widening is EXACT: every float32 value is representable as a
-    # float64 (float64 has strictly more mantissa and exponent range), so no
-    # rounding occurs — a bit-level test pins that 0.1f32 loads as its exact f64
-    # image. Reads its args; allocates nothing; cannot raise.
+    """Reconstruct a little-endian IEEE-754 float32 from 4 bytes, widened to float64.
+
+    The widening is exact: every float32 is representable as a float64, so no
+    rounding occurs. Allocates nothing; cannot raise.
+
+    Args:
+        b0: Least-significant byte.
+        b1: Second byte.
+        b2: Third byte.
+        b3: Most-significant byte.
+
+    Returns:
+        The reconstructed value as a Float64.
+    """
     var bits = (
         UInt32(Int(b0))
         | (UInt32(Int(b1)) << 8)
@@ -92,12 +79,24 @@ def _f32_bytes_to_f64(b0: UInt8, b1: UInt8, b2: UInt8, b3: UInt8) -> Float64:
 def _read_tensor(
     raw: List[UInt8], mut cursor: Int, rows: Int, cols: Int
 ) raises -> Tensor2D:
-    # Read rows*cols little-endian float32 values from `raw` starting at byte
-    # `cursor`, row-major, into a fresh [rows, cols] tensor widened to float64,
-    # advancing the cursor by 4 bytes per value. The caller has already validated
-    # the payload length, so this cannot run off the end; the bound check is a
-    # cheap defensive guard that raises rather than reads garbage. Allocates the
-    # tensor; mutates the cursor.
+    """Read rows*cols little-endian float32 values into a fresh [rows, cols] f64 tensor.
+
+    Reads row-major from `raw` at byte `cursor`, advancing 4 bytes per value. The
+    caller has already validated the payload length; the bound check is a cheap
+    defensive guard.
+
+    Args:
+        raw: The payload bytes.
+        cursor: Byte offset to start reading; advanced past the tensor.
+        rows: Tensor row count.
+        cols: Tensor column count.
+
+    Returns:
+        The [rows, cols] tensor. Allocates it; mutates the cursor.
+
+    Raises:
+        Error: If the payload runs out mid-tensor.
+    """
     var out = zeros_2d(rows, cols)
     for i in range(rows):
         for j in range(cols):
@@ -115,23 +114,45 @@ def _read_tensor(
 def _read_param(
     raw: List[UInt8], mut cursor: Int, rows: Int, cols: Int
 ) raises -> Parameter:
-    # Read one [rows, cols] tensor off the payload and wrap it as a Parameter
-    # (which allocates a matching zero gradient, as every layer's Parameters do).
-    # Mutates the cursor; allocates the value and grad; raises on truncation.
+    """Read one [rows, cols] tensor off the payload and wrap it as a Parameter.
+
+    The Parameter allocates a matching zero gradient. Mutates the cursor.
+
+    Args:
+        raw: The payload bytes.
+        cursor: Byte offset to start reading; advanced past the tensor.
+        rows: Tensor row count.
+        cols: Tensor column count.
+
+    Returns:
+        The Parameter (value plus a zero grad). Allocates both.
+
+    Raises:
+        Error: On truncation.
+    """
     var value = _read_tensor(raw, cursor, rows, cols)
     return Parameter(value^)
 
 
 def load_gpt2(path: String) raises -> GPT:
-    # Read a `GPT2W v1` file and build the GPT it describes. Validates the header
-    # (family, version, dims, declared count, payload byte length) with NAMED
-    # errors, streams the float32 payload in walk order widening f32 -> f64
-    # exactly, and constructs Parameter/Linear/Embedding/LayerNorm/
-    # TransformerBlock/GPT directly via their fieldwise constructors — no donor
-    # model, so no rng is drawn (a random donor would burn ~124M Box-Muller draws
-    # only to overwrite them). Reads the file; allocates the model (~2 GB at 124M
-    # incl. the zero grads every Parameter carries); consumes no rng; raises on
-    # any malformed or mismatched input. The returned model's cfg.dropout is 0.0.
+    """Read a `GPT2W v1` file and build the GPT it describes.
+
+    Validates the header (family, version, dims, declared count, payload byte
+    length) with named errors, streams the float32 payload in walk order widening
+    f32 -> f64 exactly, and constructs the model directly via fieldwise
+    constructors — no donor model, so no rng is drawn. The returned model's
+    cfg.dropout is 0.0.
+
+    Args:
+        path: Path to the GPT2W v1 file.
+
+    Returns:
+        The loaded GPT (~2 GB at 124M incl. the zero grads). Reads the file;
+        allocates the model; consumes no rng.
+
+    Raises:
+        Error: On any malformed or mismatched input.
+    """
     var raw = open(path, "r").read_bytes()
 
     # --- header line: bytes up to the first newline ---------------------------

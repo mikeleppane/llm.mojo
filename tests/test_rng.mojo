@@ -1,11 +1,11 @@
-# Tests for the deterministic LCG random generator.
-#
-# The Rng is the seed of every "seeded" behavior downstream — shuffled batches,
-# and later weight init. These tests pin the three things a reader must trust:
-# the recurrence produces the exact hand-computed values (golden oracle against
-# the Knuth MMIX constants), the same seed always replays the same sequence, and
-# the derived helpers (next_below, shuffle) stay in range and stay deterministic.
-# Everything here is integer-valued, so every assertion is exact.
+"""Tests for the deterministic LCG random generator.
+
+The Rng seeds every "seeded" behavior downstream (shuffled batches, weight init).
+These pin the three things a reader must trust: the recurrence produces the exact
+hand-computed values (golden oracle against the Knuth MMIX constants), the same
+seed always replays the same sequence, and the derived helpers (next_below,
+shuffle) stay in range and deterministic.
+"""
 
 from std.testing import (
     assert_equal,
@@ -21,8 +21,7 @@ from llm.tensor.init_weights import xavier_2d
 
 
 def test_same_seed_same_sequence() raises:
-    # Two generators seeded alike replay identical streams; a different seed
-    # diverges almost immediately.
+    """Equal seeds replay identical streams; a different seed diverges."""
     var a = Rng(42)
     var b = Rng(42)
     for _ in range(100):
@@ -38,15 +37,15 @@ def test_same_seed_same_sequence() raises:
 
 
 def test_first_values_golden() raises:
-    # Oracle for the recurrence itself: state_{n+1} = state_n * A + C (mod 2**64),
-    # returning the new state. Values computed independently in Python from the
-    # MMIX constants A = 6364136223846793005, C = 1442695040888963407. A wrong
-    # constant or a non-wrapping multiply fails this instantly.
+    """`next_u64` matches goldens computed independently from the MMIX constants.
+    """
+    # Recurrence: state_{n+1} = state_n * A + C (mod 2**64), returning the new
+    # state, with A = 6364136223846793005, C = 1442695040888963407. A wrong
+    # constant or a non-wrapping multiply fails instantly.
     #
-    # Note: two goldens below (seed0[2] and seed42[0]) exceed 2**63 - 1. They are
-    # fine as written because Mojo's arbitrary-precision IntLiteral flows straight
-    # into UInt64(...); keep them going directly into UInt64 — routing either
-    # through an Int intermediate would overflow.
+    # Note: two goldens below (seed0[2] and seed42[0]) exceed 2**63 - 1. They flow
+    # straight into UInt64(...) via Mojo's arbitrary-precision IntLiteral; keep
+    # them going directly into UInt64 — an Int intermediate would overflow.
     var r0 = Rng(0)
     assert_equal(r0.next_u64(), UInt64(1442695040888963407))
     assert_equal(r0.next_u64(), UInt64(1876011003808476466))
@@ -59,8 +58,7 @@ def test_first_values_golden() raises:
 
 
 def test_next_below_in_range() raises:
-    # 1000 draws below 7 all land in [0, 7) and every value shows up at least
-    # once (a sanity check on coverage, not a statistical test).
+    """1000 draws below 7 all land in [0, 7) and every value appears."""
     var r = Rng(123)
     var seen: List[Bool] = []
     for _ in range(7):
@@ -74,6 +72,7 @@ def test_next_below_in_range() raises:
 
 
 def test_next_below_invalid_raises() raises:
+    """`next_below` raises on a non-positive bound."""
     var r = Rng(1)
     with assert_raises():
         _ = r.next_below(0)
@@ -82,8 +81,7 @@ def test_next_below_invalid_raises() raises:
 
 
 def test_shuffle_is_permutation() raises:
-    # Shuffling preserves the multiset (sort the result, compare to the input)
-    # and actually reorders (seed 1 does not leave [0..99] fixed).
+    """`shuffle` preserves the multiset and actually reorders."""
     var items: List[Int] = []
     for i in range(100):
         items.append(i)
@@ -102,7 +100,7 @@ def test_shuffle_is_permutation() raises:
 
 
 def test_shuffle_deterministic() raises:
-    # Same seed -> identical permutation, element for element.
+    """Same seed produces an identical permutation, element for element."""
     var a: List[Int] = []
     var b: List[Int] = []
     for i in range(50):
@@ -117,7 +115,7 @@ def test_shuffle_deterministic() raises:
 
 
 def test_uniform_in_unit_interval() raises:
-    # 1000 draws all land in [0, 1).
+    """1000 uniform draws all land in [0, 1)."""
     var r = Rng(7)
     for _ in range(1000):
         var u = r.uniform()
@@ -125,11 +123,10 @@ def test_uniform_in_unit_interval() raises:
 
 
 def test_uniform_first_values_golden() raises:
-    # Oracle derived independently from the next_u64 goldens: uniform() is
-    # (next_u64() >> 11) / 2**53. Multiplying by the exact power of two 2**-53 is
-    # bit-exact, so these pin the transform, not just its range — a stubbed
-    # uniform() returning 0.5 fails here. (seed 0 -> 1442695040888963407 >> 11,
-    # seed 42 -> 10481999410520546993 >> 11, both / 2**53.)
+    """`uniform` matches goldens derived from the next_u64 stream."""
+    # uniform() is (next_u64() >> 11) / 2**53. Multiplying by the exact power of
+    # two 2**-53 is bit-exact, so these pin the transform, not just its range — a
+    # stubbed uniform() returning 0.5 fails here.
     var r0 = Rng(0)
     assert_almost_equal(r0.uniform(), 0.07820865487829387, atol=1e-15)
     var r42 = Rng(42)
@@ -137,8 +134,7 @@ def test_uniform_first_values_golden() raises:
 
 
 def test_uniform_produces_distinct_values() raises:
-    # A constant stub would pass the range and golden checks on a single draw;
-    # this catches a stuck generator by requiring spread across many draws.
+    """`uniform` spreads across many draws (catches a stuck generator)."""
     var r = Rng(55)
     var first = r.uniform()
     var all_same = True
@@ -149,8 +145,8 @@ def test_uniform_produces_distinct_values() raises:
 
 
 def test_uniform_deterministic() raises:
-    # Same seed -> identical float stream, draw for draw. Exact equality is the
-    # property under test (bit-reproducibility), so == is correct here.
+    """Same seed produces an identical uniform stream, draw for draw."""
+    # Exact equality is the property under test (bit-reproducibility).
     var a = Rng(99)
     var b = Rng(99)
     for _ in range(100):
@@ -158,6 +154,7 @@ def test_uniform_deterministic() raises:
 
 
 def test_uniform_range_within_bounds() raises:
+    """`uniform_range`(lo, hi) draws all land in [lo, hi)."""
     var r = Rng(3)
     for _ in range(1000):
         var u = r.uniform_range(-2.0, 5.0)
@@ -165,8 +162,8 @@ def test_uniform_range_within_bounds() raises:
 
 
 def test_normal_is_finite() raises:
-    # Box-Muller must never produce NaN or infinity, even across many draws
-    # (the log(0) guard is what makes this hold).
+    """Box-Muller normal draws are always finite (never NaN or infinity)."""
+    # The log(0) guard is what makes this hold across many draws.
     var r = Rng(11)
     for _ in range(1000):
         var z = r.normal(0.0, 1.0)
@@ -175,17 +172,18 @@ def test_normal_is_finite() raises:
 
 
 def test_normal_first_value_golden() raises:
-    # Independent Box-Muller oracle from the seed-0 stream: with u1, u2 the first
-    # two uniform() draws, z = sqrt(-2 ln u1) * cos(2 pi u2). A transcription bug
-    # (wrong constant, sin instead of cos, one draw instead of two) fails here
-    # even though "finite + deterministic" would still pass. Slightly looser
-    # tolerance because sqrt/log/cos may differ by a ULP across math libraries.
+    """`normal` matches an independent Box-Muller oracle from the seed-0 stream.
+    """
+    # With u1, u2 the first two uniform() draws, z = sqrt(-2 ln u1) * cos(2 pi u2).
+    # A transcription bug (wrong constant, sin instead of cos, one draw instead of
+    # two) fails here. Looser tolerance because sqrt/log/cos may differ by a ULP
+    # across math libraries.
     var r = Rng(0)
     assert_almost_equal(r.normal(0.0, 1.0), 1.812167873138187, atol=1e-12)
 
 
 def test_normal_deterministic() raises:
-    # Exact equality is the property under test (bit-reproducibility).
+    """Same seed produces an identical normal stream, draw for draw."""
     var a = Rng(5)
     var b = Rng(5)
     for _ in range(100):
@@ -193,7 +191,8 @@ def test_normal_deterministic() raises:
 
 
 def test_xavier_shape() raises:
-    # xavier_2d(fan_in, fan_out) produces a [fan_out, fan_in] weight tensor.
+    """`xavier_2d`(fan_in, fan_out) produces a [fan_out, fan_in] weight tensor.
+    """
     var r = Rng(1)
     var w = xavier_2d(r, 4, 6)
     assert_equal(w.rows, 6)  # fan_out
@@ -201,6 +200,7 @@ def test_xavier_shape() raises:
 
 
 def test_xavier_deterministic() raises:
+    """Same seed produces identical xavier weights."""
     var ra = Rng(2)
     var rb = Rng(2)
     var wa = xavier_2d(ra, 3, 5)
@@ -211,6 +211,7 @@ def test_xavier_deterministic() raises:
 
 
 def test_xavier_no_nan() raises:
+    """`xavier_2d` produces no NaN entries."""
     var r = Rng(4)
     var w = xavier_2d(r, 8, 8)
     for i in range(w.rows):
@@ -219,6 +220,7 @@ def test_xavier_no_nan() raises:
 
 
 def test_xavier_rejects_nonpositive_fan() raises:
+    """`xavier_2d` raises on a non-positive fan_in or fan_out."""
     var r = Rng(4)
     with assert_raises(contains="must be positive"):
         _ = xavier_2d(r, 0, 4)

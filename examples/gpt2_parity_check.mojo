@@ -1,20 +1,20 @@
-# The fast go/no-go gate: does our forward pass reproduce GPT-2's logits?
-#
-# Loads the converted real GPT-2 124M weights, reconciles the parameter count,
-# runs ONE forward over a fixed prompt, and asserts a handful of frozen logit
-# goldens BEFORE printing anything — so a broken port fails loudly here instead of
-# emitting plausible-looking token soup. The goldens come from
-# scripts/gpt2_reference_logits.py (NumPy float64 over the SAME .bin bytes this
-# loads), so the comparison is a tight f64-vs-f64 check at 1e-6, not a
-# cross-precision one. Then it prints the top-5 next-token candidates with their
-# decoded strings — the human-readable "yes, this is really GPT-2" signal.
-#
-# Run (after downloading the weights and running the converter — see
-# scripts/convert_gpt2_weights.py):
-#   pixi run mojo run -I build examples/gpt2_parity_check.mojo
-#
-# This is the CHEAP gate (one forward, seconds). examples/gpt2_generate.mojo is
-# the slow MVP that actually generates text.
+"""Fast go/no-go gate: does our forward pass reproduce GPT-2's logits?
+
+Loads the converted real GPT-2 124M weights, reconciles the parameter count, runs
+one forward over a fixed prompt, and asserts a handful of frozen logit goldens
+before printing anything, so a broken port fails loudly here instead of emitting
+plausible-looking token soup. The goldens come from
+scripts/gpt2_reference_logits.py (NumPy float64 over the same .bin bytes this
+loads), so the comparison is a tight f64-vs-f64 check at 1e-6. Then it prints the
+top-5 next-token candidates with their decoded strings.
+
+This is the cheap gate (one forward, seconds); examples/gpt2_generate.mojo is the
+slow demo that actually generates text.
+
+Run (after downloading the weights and running the converter, see
+scripts/convert_gpt2_weights.py):
+    pixi run mojo run -I build examples/gpt2_parity_check.mojo
+"""
 
 from llm.tensor.tensor2d import Tensor2D
 from llm.tokenizer.gpt2 import GPT2Tokenizer
@@ -31,9 +31,17 @@ comptime GOLDEN_ARGMAX = 407
 
 
 def _require_file(path: String) raises:
-    # A cheap existence probe (open, do not read the 498 MB payload) with a message
-    # pointing at the converter, so a missing weights file is a clear instruction
-    # rather than an opaque IO error. There is NO fallback to random weights.
+    """Raise a converter-pointing error unless `path` exists.
+
+    Cheap existence probe (open, do not read the 498 MB payload); there is no
+    fallback to random weights.
+
+    Args:
+        path: File that must exist.
+
+    Raises:
+        Error: If the file cannot be opened.
+    """
     try:
         var probe = open(path, "r")
         probe.close()
@@ -49,8 +57,16 @@ def _require_file(path: String) raises:
 
 
 def _check(got: Float64, want: Float64, label: String) raises:
-    # Raise (with the gap) unless got matches want within 1e-6 — the f64-vs-f64
-    # parity tolerance. A broken transpose or a swapped slot lands here.
+    """Raise unless `got` matches `want` within the 1e-6 f64-vs-f64 tolerance.
+
+    Args:
+        got: Computed value.
+        want: Golden reference value.
+        label: Identifier included in the error message.
+
+    Raises:
+        Error: If the absolute gap exceeds 1e-6.
+    """
     var diff = got - want
     if diff < 0.0:
         diff = -diff
@@ -71,6 +87,7 @@ def _check(got: Float64, want: Float64, label: String) raises:
 
 
 def _argmax_row(logits: Tensor2D, row: Int) -> Int:
+    """Return the column index of the max value in `row` of `logits`."""
     var best = 0
     var best_v = logits[row, 0]
     for c in range(1, logits.cols):
@@ -81,6 +98,8 @@ def _argmax_row(logits: Tensor2D, row: Int) -> Int:
 
 
 def main() raises:
+    """Reconcile params, assert the logit goldens, then print top-5 candidates.
+    """
     _require_file(WEIGHTS_PATH)
     _require_file(VOCAB_PATH)
     _require_file(MERGES_PATH)

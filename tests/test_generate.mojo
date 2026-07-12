@@ -1,16 +1,11 @@
-# Tests for the autoregressive generate loop.
-#
-# generate() is pure assembly over a tested forward and a tested sampler, so these
-# tests measure the ASSEMBLY: the length contract, determinism (and the greedy
-# no-draw invariant carried up from sample_next), stop-token semantics
-# (appended-then-halt, prompt occurrences ignored), the sliding-window context
-# crop (the off-by-one catcher), and — as the capstone — that a model overfit on a
-# repeating pattern actually SPEAKS that pattern back when greedily generated.
-#
-# The non-capstone tests run on a random tiny GPT: loop mechanics don't need a
-# trained model, only a real forward. The capstone trains with plain Part XIII SGD
-# (not the Part XIV trainer) so a trainer regression can never masquerade as a
-# generation failure.
+"""Tests for the autoregressive generate loop.
+
+generate() is pure assembly over a tested forward and a tested sampler, so these
+tests measure the assembly: length contract, determinism (and the greedy no-draw
+invariant), stop-token semantics, the sliding-window context crop, and — the
+capstone — that a model overfit on a repeating pattern speaks it back when
+greedily generated.
+"""
 
 from std.math import log
 
@@ -56,6 +51,7 @@ def _first_index(values: List[Int], target: Int) -> Int:
 
 
 def test_length_equals_budget_when_no_stop() raises:
+    """Output length equals the token budget when no stop token fires."""
     var gpt = _tiny_gpt(1)
     var prompt: List[Int] = [3, 1, 4]
     var rng = Rng(0)
@@ -66,6 +62,7 @@ def test_length_equals_budget_when_no_stop() raises:
 
 
 def test_max_new_tokens_zero_returns_empty() raises:
+    """A zero budget returns an empty list."""
     var gpt = _tiny_gpt(1)
     var prompt: List[Int] = [3, 1, 4]
     var rng = Rng(0)
@@ -76,6 +73,7 @@ def test_max_new_tokens_zero_returns_empty() raises:
 
 
 def test_negative_max_new_tokens_raises() raises:
+    """A negative budget raises a named error."""
     var gpt = _tiny_gpt(1)
     var prompt: List[Int] = [3, 1, 4]
     var rng = Rng(0)
@@ -84,6 +82,7 @@ def test_negative_max_new_tokens_raises() raises:
 
 
 def test_empty_prompt_raises() raises:
+    """An empty prompt raises a named error."""
     var gpt = _tiny_gpt(1)
     var rng = Rng(0)
     with assert_raises(contains="empty prompt"):
@@ -96,8 +95,7 @@ def test_empty_prompt_raises() raises:
 
 
 def test_greedy_is_deterministic_and_draws_nothing() raises:
-    # Greedy twice => identical ids, and rng.state is bit-untouched, so a greedy
-    # generate can be dropped anywhere into a seeded pipeline.
+    """Greedy generation is reproducible and leaves rng.state bit-untouched."""
     var gpt = _tiny_gpt(2)
     var prompt: List[Int] = [7, 2]
     var rng = Rng(4242)
@@ -111,6 +109,7 @@ def test_greedy_is_deterministic_and_draws_nothing() raises:
 
 
 def test_equal_seeds_give_identical_sampled_runs() raises:
+    """Equal seeds give identical sampled runs and consume the same draws."""
     var gpt = _tiny_gpt(2)
     var prompt: List[Int] = [7, 2]
     var cfg = SamplerConfig(1.0, 0, 1.0)
@@ -126,8 +125,8 @@ def test_equal_seeds_give_identical_sampled_runs() raises:
 
 
 def test_stop_token_appended_then_halts() raises:
-    # The triggering stop token is APPENDED, then the loop halts — the output's
-    # last element records why it stopped, and the run is shorter than the budget.
+    """The triggering stop token is appended, then the loop halts short of budget.
+    """
     var gpt = _tiny_gpt(3)
     var prompt: List[Int] = [5, 9]
     var budget = 10
@@ -151,9 +150,10 @@ def test_stop_token_appended_then_halts() raises:
 
 
 def test_stop_id_in_prompt_does_not_halt() raises:
-    # A stop id that occurs only in the PROMPT must not stop anything — only
-    # emitted tokens are checked. Premise (asserted): the greedy stream does not
-    # re-emit prompt[0], so the stopped and unstopped runs coincide at full budget.
+    """A stop id occurring only in the prompt is ignored; only emitted tokens halt.
+    """
+    # Premise (asserted below): the greedy stream does not re-emit prompt[0], so
+    # the stopped and unstopped runs coincide at full budget.
     var gpt = _tiny_gpt(3)
     var prompt: List[Int] = [5, 9]
     var budget = 6
@@ -175,6 +175,7 @@ def test_stop_id_in_prompt_does_not_halt() raises:
 
 
 def test_empty_stop_list_runs_to_budget() raises:
+    """An empty stop list runs to the full budget."""
     var gpt = _tiny_gpt(3)
     var prompt: List[Int] = [5, 9]
     var rng = _rng()
@@ -186,11 +187,8 @@ def test_empty_stop_list_runs_to_budget() raises:
 
 
 def test_context_crop_equivalence() raises:
-    # Prompt at exactly context_length, generate 4 more. Each emitted token must
-    # equal a manual greedy forward over the HAND-CROPPED last-context_length
-    # window. This is the off-by-one catcher: a crop that kept context_length + 1
-    # tokens would raise on the positional bounds; one that cropped from the front
-    # or dropped a token would diverge here.
+    """Each emitted token matches a manual greedy forward over the hand-cropped last-context_length window (the off-by-one catcher).
+    """
     var gpt = _tiny_gpt(5)
     var prompt: List[Int] = [1, 2, 3, 4, 5, 6, 7, 8]  # length == TINY_C
     assert_equal(len(prompt), TINY_C)
@@ -227,15 +225,13 @@ def test_context_crop_equivalence() raises:
 
 
 def test_capstone_memorize_then_speak() raises:
-    # Overfit a tiny GPT on a pure repeating cycle with PLAIN SGD (the Part XIII
-    # surface: zero_grad / forward_cached / backward / apply_sgd, dropout 0), then
-    # greedy-generate from a 2-token prompt and assert it reproduces the memorized
-    # continuation EXACTLY. This is the end-to-end proof that generation connects
-    # to what training learned; using plain SGD (not the Part XIV trainer) keeps a
-    # trainer bug from reading as a generation failure.
-    #
-    # The pattern is the cycle 1->2->3->4->5->1 (each token has a unique
-    # successor), trained as one fixed sequence.
+    """A tiny GPT overfit on a repeating cycle with plain SGD reproduces the memorized continuation exactly when greedily generated.
+
+    Plain SGD (zero_grad / forward_cached / backward / apply_sgd, dropout 0)
+    keeps a trainer bug from reading as a generation failure. The pattern is the
+    cycle 1->2->3->4->5->1 (each token has a unique successor), trained as one
+    fixed sequence.
+    """
     var cfg = GPTConfig(
         6, 8, 8, 2, 2, 0.0
     )  # V=6, C=8, d_model 8, 2 heads, 2 layers
@@ -275,8 +271,8 @@ def test_capstone_memorize_then_speak() raises:
 
 
 def _rng() -> Rng:
-    # A fresh seeded generator. Greedy calls never draw from it, but generate's
-    # signature takes `mut rng`, and a temporary cannot bind to a mut argument.
+    """A fresh seeded generator to bind to generate's `mut rng` argument."""
+    # Greedy calls never draw from it, but a temporary cannot bind to a mut arg.
     return Rng(0)
 
 
@@ -289,14 +285,16 @@ def _rng() -> Rng:
 
 
 def _tiny_gpt2(seed: UInt64) raises -> GPT:
-    # Two-layer doll-house (V=11, context 8, d_model 8, 2 heads, dropout 0).
+    """Two-layer doll-house GPT (V=11, context 8, d_model 8, 2 heads, dropout 0).
+    """
     var cfg = GPTConfig(TINY_V, TINY_C, 8, 2, 2, 0.0)
     var rng = Rng(seed)
     return GPT.init_random(cfg, rng)
 
 
 def test_cached_matches_uncached_greedy() raises:
-    # Greedy: identical tokens and identical (untouched) rng.state across paths.
+    """Greedy: cached and uncached paths give identical tokens and untouched rng.state.
+    """
     var gpt = _tiny_gpt2(2)
     var prompt: List[Int] = [7, 2, 5]
     var r_un = Rng(4242)
@@ -310,10 +308,8 @@ def test_cached_matches_uncached_greedy() raises:
 
 
 def test_cached_matches_uncached_sampled_with_stream_parity() raises:
-    # Sampled (temperature 0.9, top-k AND top-p engaged): identical tokens AND
-    # identical rng.state — the cached path must consume the draw stream exactly
-    # as the uncached path does, one draw per emitted token via the same
-    # sample_next.
+    """Sampled (top-k and top-p engaged): cached path matches tokens and rng.state, one draw per emitted token.
+    """
     var gpt = _tiny_gpt2(3)
     var prompt: List[Int] = [1, 9, 4]
     var cfg = SamplerConfig(0.9, 5, 0.95)  # temperature, top_k=5, top_p=0.95
@@ -326,8 +322,8 @@ def test_cached_matches_uncached_sampled_with_stream_parity() raises:
 
 
 def test_cached_overflow_raises_up_front() raises:
-    # len(prompt) + max_new_tokens > context_length raises NAMED before any
-    # generation — the cached path cannot slide the window.
+    """A prompt plus budget exceeding context_length raises a named error before any generation.
+    """
     var gpt = _tiny_gpt2(1)
     var prompt: List[Int] = [1, 2, 3, 4, 5]  # len 5, context is 8
     var rng = _rng()
@@ -338,8 +334,8 @@ def test_cached_overflow_raises_up_front() raises:
 
 
 def test_cached_at_exactly_context_length_succeeds() raises:
-    # len(prompt) + max_new_tokens == context_length is the boundary that must
-    # SUCCEED, and it must still match the uncached path token-for-token.
+    """The prompt-plus-budget == context_length boundary succeeds and matches the uncached path token-for-token.
+    """
     var gpt = _tiny_gpt2(1)
     var prompt: List[Int] = [1, 2, 3, 4, 5]  # len 5
     var r_un = Rng(7)
@@ -353,6 +349,7 @@ def test_cached_at_exactly_context_length_succeeds() raises:
 
 
 def test_cached_empty_prompt_raises() raises:
+    """An empty prompt raises a named error."""
     var gpt = _tiny_gpt2(1)
     var rng = _rng()
     with assert_raises(contains="empty prompt"):
@@ -362,6 +359,7 @@ def test_cached_empty_prompt_raises() raises:
 
 
 def test_cached_negative_budget_raises() raises:
+    """A negative budget raises a named error."""
     var gpt = _tiny_gpt2(1)
     var prompt: List[Int] = [3, 1, 4]
     var rng = _rng()
@@ -372,8 +370,8 @@ def test_cached_negative_budget_raises() raises:
 
 
 def test_cached_zero_budget_is_noop_rng_untouched() raises:
-    # 0 budget returns an empty list and does not touch rng (even a sampled cfg
-    # draws nothing, since nothing is emitted).
+    """A zero budget returns an empty list and leaves rng untouched, even for a sampled config.
+    """
     var gpt = _tiny_gpt2(1)
     var prompt: List[Int] = [3, 1, 4]
     var cfg = SamplerConfig(0.9, 5, 0.95)
@@ -385,11 +383,8 @@ def test_cached_zero_budget_is_noop_rng_untouched() raises:
 
 
 def test_cached_zero_budget_noop_ignores_overflow() raises:
-    # A 0-budget call is a no-op for ANY prompt length — even one LONGER than
-    # context_length, which would overflow a real generation. It must return []
-    # WITHOUT raising the overflow error (the check is gated behind the no-op) and
-    # leave rng untouched, matching generate (whose loop never runs, so it never
-    # forwards the over-long prompt either).
+    """A zero budget is a no-op for any prompt length, returning [] without raising overflow and leaving rng untouched, matching generate.
+    """
     var gpt = _tiny_gpt2(1)
     var long_prompt = List[Int]()
     for i in range(TINY_C + 3):  # longer than context_length (8)
@@ -407,8 +402,8 @@ def test_cached_zero_budget_noop_ignores_overflow() raises:
 
 
 def test_cached_stop_token_appended_then_halts() raises:
-    # Append-then-halt: the triggering stop token is the last element, and the run
-    # is shorter than the budget — identical to generate's semantics.
+    """Append-then-halt: the triggering stop token is last and the run is shorter than budget, matching generate.
+    """
     var gpt = _tiny_gpt2(3)
     var prompt: List[Int] = [5, 9]
     var budget = (
@@ -435,7 +430,7 @@ def test_cached_stop_token_appended_then_halts() raises:
 
 
 def test_cached_stop_id_in_prompt_does_not_halt() raises:
-    # A stop id occurring only in the PROMPT must not stop anything.
+    """A stop id occurring only in the prompt does not halt generation."""
     var gpt = _tiny_gpt2(3)
     var prompt: List[Int] = [5, 9]
     var budget = 5
@@ -458,14 +453,13 @@ def test_cached_stop_id_in_prompt_does_not_halt() raises:
 
 
 def test_generate_cached_threaded_is_deterministic() raises:
-    # After threading landed in matmul_transpose_b, prove generation stays
-    # reproducible end to end: same seed, two runs, identical tokens. The config
-    # is sized so the tied head's per-step matmul_transpose_b — [1, 32] . [32000,
-    # 32]^T, ~1.0M multiply-adds — crosses the threading threshold, so this run
-    # actually drives the PARALLEL kernel (a tiny V=11 model would stay serial and
-    # prove nothing about threading). The kernel's own run-to-run determinism is
-    # pinned directly in test_matmul; this is the end-to-end guard. Random weights
-    # are fine — reproducibility, not coherent text, is the property under test.
+    """Generation stays reproducible end to end when the tied head's matmul crosses the parallel-kernel threshold.
+
+    The config is sized so the head's per-step matmul_transpose_b ([1, 32] .
+    [32000, 32]^T, ~1.0M multiply-adds) drives the parallel kernel; a tiny model
+    would stay serial. Random weights are fine — reproducibility, not coherent
+    text, is the property under test.
+    """
     var cfg = GPTConfig(32000, 16, 32, 1, 2, 0.0)  # V, T, C, L, H, dropout
     var init_rng = Rng(7)
     var gpt = GPT.init_random(cfg, init_rng)

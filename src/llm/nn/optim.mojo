@@ -1,13 +1,9 @@
-# Per-parameter optimizer updates — the in-place math one Parameter's step needs.
-#
-# This is the layering-honest home for optimizer arithmetic. A step operates on a
-# Parameter (its value and grad) plus optimizer state tensors the caller owns; it
-# is Parameter-level math, so it belongs in `nn/` — the package that owns
-# Parameter — not in `training/`. The model (`transformer/GPT`) must call this
-# math from its walk methods, and `transformer/` imports `nn/` but never
-# `training/` (the dependency layering runs nn -> transformer -> training). Free
-# `training.optimizer.sgd_step` (over bare Tensor2D) stays where it is; the bigram
-# consumes it. These two functions are what the GPT walk methods delegate to.
+"""Per-parameter optimizer updates — the in-place math one Parameter's step needs.
+
+SGD and AdamW steps that operate directly on a Parameter (its value and grad)
+plus caller-owned optimizer state. Lives in `nn/` because it is Parameter-level
+math.
+"""
 
 from std.math import sqrt
 
@@ -16,12 +12,15 @@ from llm.tensor.tensor2d import Tensor2D
 
 
 def sgd_update(mut p: Parameter, lr: Float64):
-    # Plain SGD, in place: p.value -= lr * p.grad.
-    #   in/out: reads and writes p.value [R, C]; reads p.grad [R, C].
-    #   mutates: p.value in place.
-    #   allocates: nothing.
-    #   raises: never — value and grad always share a shape (allocated together
-    #           in Parameter), so no shape check is needed or possible to trip.
+    """Plain SGD, in place: `p.value -= lr * p.grad`.
+
+    Args:
+        p: Parameter whose value [R, C] is updated from its grad [R, C].
+        lr: Learning rate.
+
+    Mutates p.value in place; allocates nothing. Value and grad always share a
+    shape (allocated together), so no shape check is needed.
+    """
     for i in range(p.value.rows):
         for j in range(p.value.cols):
             p.value[i, j] = p.value[i, j] - lr * p.grad[i, j]
@@ -38,34 +37,37 @@ def adamw_update(
     eps: Float64,
     weight_decay: Float64,
 ) raises:
-    # One tensor's AdamW step, in place (Loshchilov & Hutter's decoupled-decay
-    # variant — the "W" in AdamW). Given the gradient g = p.grad and the running
-    # first/second moments m, v (carried across steps by the caller), with the
-    # step counter t starting at 1:
-    #
-    #   m <- beta1*m + (1 - beta1)*g          first moment  (mean of g)
-    #   v <- beta2*v + (1 - beta2)*g^2        second moment (mean of g^2)
-    #   mhat = m / (1 - beta1^t)              bias-corrected first moment
-    #   vhat = v / (1 - beta2^t)              bias-corrected second moment
-    #   value <- value - lr*( mhat/(sqrt(vhat) + eps) + weight_decay*value )
-    #
-    # The moments are initialized to zero, so early on they are biased toward
-    # zero; the (1 - beta^t) denominators correct that. At t = 1, 1 - beta1^1 =
-    # 1 - beta1, which exactly cancels the (1 - beta1) that formed m, so
-    # mhat = g and vhat = g^2 on the first step (the update's adaptive term is
-    # then g/(|g| + eps), ~ sign(g)) — the check that bias correction starts at 1.
-    #
-    # Decay is DECOUPLED: weight_decay*value is added to the update directly, NOT
-    # folded into g or the moments (that is Adam + L2, a different algorithm). The
-    # observable consequence, and the pin: with g = 0 the moments stay zero and
-    # the adaptive term is zero, yet value still shrinks to value*(1 - lr*wd).
-    #
-    #   in/out: reads and writes p.value [R, C]; reads p.grad [R, C]; reads and
-    #           writes m [R, C] and v [R, C] (the caller's state, advanced here).
-    #   mutates: p.value, m, v in place.
-    #   allocates: nothing.
-    #   raises: on t < 1 (bias correction is undefined), or if p.value, p.grad,
-    #           m, v do not all share one shape (a mis-aligned state tensor).
+    """One tensor's AdamW step, in place (Loshchilov & Hutter decoupled decay).
+
+    Given gradient g = p.grad and running first/second moments m, v (carried
+    across steps by the caller), with step counter t starting at 1:
+
+        m <- beta1*m + (1 - beta1)*g          first moment  (mean of g)
+        v <- beta2*v + (1 - beta2)*g^2        second moment (mean of g^2)
+        mhat = m / (1 - beta1^t)              bias-corrected first moment
+        vhat = v / (1 - beta2^t)              bias-corrected second moment
+        value <- value - lr*( mhat/(sqrt(vhat) + eps) + weight_decay*value )
+
+    Decay is decoupled: weight_decay*value enters the update directly, not folded
+    into g or the moments (that would be Adam + L2). The (1 - beta^t) denominators
+    correct the zero-initialized moments' early bias toward zero.
+
+    Args:
+        p: Parameter whose value [R, C] is updated from its grad [R, C].
+        m: First-moment state [R, C], advanced in place.
+        v: Second-moment state [R, C], advanced in place.
+        t: Step counter, starting at 1.
+        lr: Learning rate.
+        beta1: First-moment decay.
+        beta2: Second-moment decay.
+        eps: Denominator floor.
+        weight_decay: Decoupled decay coefficient.
+
+    Mutates p.value, m, v in place; allocates nothing.
+
+    Raises:
+        Error: If t < 1, or if p.value, p.grad, m, v do not all share one shape.
+    """
     if t < 1:
         raise Error(
             "adamw_update: step t must be >= 1 (bias correction), got "

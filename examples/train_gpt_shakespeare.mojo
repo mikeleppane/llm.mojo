@@ -1,22 +1,20 @@
-# Train a small GPT on character-level tiny Shakespeare — the first real
-# training run of the model this project has been building.
-#
-# It puts the whole Part XIV surface to work end to end: a char tokenizer and
-# batch loader over a train/val split, a mini-GPT, and train_gpt (AdamW with a
-# warmup+cosine schedule and global-norm gradient clipping) run in segments so it
-# can checkpoint periodically and log train/val loss and perplexity. It interrupts
-# the run at a checkpoint, then demonstrates load-and-resume: a freshly built
-# model loads that checkpoint (parameters, optimizer moments, step counter, rng
-# state) and FINISHES the run under the same schedule — no lr discontinuity, a
-# genuine continuation rather than a fresh run.
-#
-# Run (needs a checkpoints/ directory, which is gitignored):
-#     mkdir -p checkpoints
-#     pixi run mojo run -I src examples/train_gpt_shakespeare.mojo
-#
-# There is deliberately NO text generation here — sampling from a trained model
-# is Part XV, and its first demo will be *this* checkpoint speaking. The arc of
-# this chapter ends on the saved checkpoint file.
+"""Train a small GPT on character-level tiny Shakespeare and checkpoint it.
+
+Wires the training surface together end to end: a char tokenizer and batch loader
+over a train/val split, a mini-GPT, and train_gpt (AdamW with a warmup+cosine
+schedule and global-norm gradient clipping) run in segments so it can checkpoint
+periodically and log train/val loss and perplexity. It interrupts the run at a
+checkpoint, then demonstrates load-and-resume: a freshly built model loads that
+checkpoint (parameters, optimizer moments, step counter, rng state) and finishes
+the run under the same schedule, with no lr discontinuity.
+
+There is deliberately no text generation here; the saved checkpoint is the
+artifact examples/generate_shakespeare.mojo makes speak.
+
+Run (needs a checkpoints/ directory, which is gitignored):
+    mkdir -p checkpoints
+    pixi run mojo run -I src examples/train_gpt_shakespeare.mojo
+"""
 
 from llm.config import GPTConfig, TrainingConfig
 from llm.data.corpus import load_text
@@ -62,6 +60,13 @@ comptime CHECKPOINT_PATH = String("checkpoints/gpt_shakespeare.ckpt")
 
 
 def _report_perplexity(label: String, gpt: GPT, mut loader: BatchLoader) raises:
+    """Estimate loss over EVAL_BATCHES and print it with perplexity.
+
+    Args:
+        label: Tag printed alongside the numbers (e.g. "train" or "val").
+        gpt: The model to evaluate.
+        loader: Batch source; advanced as batches are drawn.
+    """
     var loss = estimate_loss(gpt, loader, EVAL_BATCHES)
     print(
         "  ",
@@ -74,6 +79,7 @@ def _report_perplexity(label: String, gpt: GPT, mut loader: BatchLoader) raises:
 
 
 def main() raises:
+    """Train to a checkpoint, then load-and-resume to finish the run."""
     # --- Data -------------------------------------------------------------
     var text = load_text("data/tinyshakespeare/input.txt")
     var tokenizer = CharTokenizer.from_text(text)
@@ -226,5 +232,5 @@ def main() raises:
     print(
         "\nDone. The saved checkpoint",
         CHECKPOINT_PATH,
-        "is the artifact Part XV will make speak — generation comes next.",
+        "is the artifact generate_shakespeare.mojo makes speak.",
     )

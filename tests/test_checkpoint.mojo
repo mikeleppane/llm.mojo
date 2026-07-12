@@ -1,16 +1,12 @@
-# Tests for training checkpoints — bit-exact save/load and the resume gate.
-#
-# Checkpoints must round-trip EXACTLY (bit patterns, not tolerances): a resumed
-# run has to be indistinguishable from an uninterrupted one. So the round-trip
-# and resume checks assert exact equality, and the header-validation checks pin
-# that a wrong-shaped, truncated, or mis-magicked file fails loudly instead of
-# loading garbage.
-#
-# The capstone here is the resume gate: train n steps straight, versus train k,
-# checkpoint, load into a FRESH model, train n-k more — the parameters must be
-# BIT-IDENTICAL. Run on the overfit-batch setup (a fixed batch, no loader state),
-# with the lr driven by the schedule off the step index so a mis-restored step
-# counter would pick the wrong lr and diverge.
+"""Tests for training checkpoints: bit-exact save/load and the resume gate.
+
+Checkpoints must round-trip exactly (bit patterns, not tolerances) so a resumed
+run is indistinguishable from an uninterrupted one. The round-trip and resume
+checks assert exact equality; the header-validation checks pin that a wrong-shaped,
+truncated, or mis-magicked file fails loudly. The capstone is the resume gate:
+n steps straight must equal k steps + checkpoint + fresh model + load + (n-k)
+steps, bit-for-bit, with the lr driven off the step index.
+"""
 
 from std.testing import (
     assert_almost_equal,
@@ -66,7 +62,7 @@ def _targets() raises -> List[Int]:
 
 
 def _zeros_state(gpt: GPT) raises -> List[Tensor2D]:
-    # A parallel list of zeros, one per parameter, shaped by the walk.
+    """A parallel list of zeros, one per parameter, shaped by the walk."""
     var shapes = gpt.parameter_shapes()
     var out = List[Tensor2D]()
     for k in range(len(shapes)):
@@ -81,9 +77,8 @@ def _adamw_step(
     t: Int,
     lr: Float64,
 ) raises:
-    # One full optimizer step on the fixed overfit batch: zero_grad -> cached
-    # forward (dropout 0, deterministic) -> loss backward -> clip -> AdamW. This
-    # is exactly the per-step body train_gpt will run.
+    """One full optimizer step on the fixed overfit batch: zero_grad -> cached
+    forward (dropout 0) -> loss backward -> clip -> AdamW."""
     var rng = Rng(0)  # dropout 0 draws nothing; a named var is still required
     gpt.zero_grad()
     var fwd = gpt.forward_cached(_ids(), False, rng)
@@ -106,8 +101,8 @@ def _assert_params_bit_identical(a: GPT, b: GPT, msg: String) raises:
 
 
 def test_hex_roundtrip_edge_values() raises:
-    # The bit-pattern round-trip is exact for zero, negative zero, subnormals,
-    # and large/small magnitudes — the values a decimal print might mangle.
+    """The hex bit-pattern round-trip is exact for zero, negative zero, subnormals,
+    and large/small magnitudes."""
     var vals = List[Float64]()
     vals.append(0.0)
     vals.append(-0.0)
@@ -125,8 +120,8 @@ def test_hex_roundtrip_edge_values() raises:
 
 
 def test_save_load_roundtrip_bit_exact() raises:
-    # Train a few steps to fill params, m, v, t; save; load into a DIFFERENTLY
-    # seeded fresh model; every restored number matches bit-for-bit.
+    """Save after a few steps, load into a differently seeded fresh model, and every
+    restored number (params, m, v, t, rng state) matches bit-for-bit."""
     var gpt = _tiny_gpt(1)
     var m = _zeros_state(gpt)
     var v = _zeros_state(gpt)
@@ -151,6 +146,7 @@ def test_save_load_roundtrip_bit_exact() raises:
 
 
 def test_load_rejects_bad_magic() raises:
+    """Loading a file with a wrong magic header raises."""
     var path = String("build/ckpt_badmagic.ckpt")
     with open(path, "w") as f:
         f.write("NOTACHECKPOINT\n1\n0\n0000000000000000\n")
@@ -160,9 +156,8 @@ def test_load_rejects_bad_magic() raises:
 
 
 def test_load_rejects_shape_mismatch() raises:
-    # Save from a d_model=8 model, load into a d_model=16 model: same tensor
-    # count, different shapes, so the per-tensor shape check must fire (at tensor
-    # 0, wte, which the wider d_model reshapes).
+    """Loading a d_model=8 checkpoint into a d_model=16 model fires the per-tensor
+    shape check (same tensor count, different shapes)."""
     var small = _tiny_gpt(1)
     var m = _zeros_state(small)
     var v = _zeros_state(small)
@@ -177,7 +172,8 @@ def test_load_rejects_shape_mismatch() raises:
 
 
 def test_load_rejects_parameter_count_mismatch() raises:
-    # A different depth changes the tensor count outright.
+    """A different depth changes the tensor count outright, so load rejects it.
+    """
     var two_layer = _tiny_gpt(1)
     var m = _zeros_state(two_layer)
     var v = _zeros_state(two_layer)
@@ -192,8 +188,8 @@ def test_load_rejects_parameter_count_mismatch() raises:
 
 
 def test_load_rejects_truncated() raises:
-    # Chop the tail off a valid checkpoint: loading must report truncation, not
-    # silently restore a partial model.
+    """A checkpoint with its tail chopped off reports truncation instead of
+    restoring a partial model."""
     var gpt = _tiny_gpt(1)
     var m = _zeros_state(gpt)
     var v = _zeros_state(gpt)
@@ -217,9 +213,8 @@ def test_load_rejects_truncated() raises:
 
 
 def test_save_rejects_misshaped_moment() raises:
-    # A moment list with the right length but a wrong-shaped tensor would write a
-    # payload that no longer lines up with the header shapes; save must reject it
-    # rather than emit a file load would silently mis-read.
+    """Save rejects a moment list of the right length but a wrong-shaped tensor,
+    rather than emitting a payload that misaligns with the header shapes."""
     var gpt = _tiny_gpt(1)
     var m = _zeros_state(gpt)
     var v = _zeros_state(gpt)
@@ -230,8 +225,8 @@ def test_save_rejects_misshaped_moment() raises:
 
 
 def test_load_rejects_trailing_garbage() raises:
-    # A file with extra value lines beyond params+m+v does not match this model;
-    # load must reject it rather than ignore the tail.
+    """A file with extra value lines beyond params+m+v is rejected, not ignored.
+    """
     var gpt = _tiny_gpt(1)
     var m = _zeros_state(gpt)
     var v = _zeros_state(gpt)
@@ -249,9 +244,9 @@ def test_load_rejects_trailing_garbage() raises:
 
 
 def test_resume_gate_bit_identical() raises:
-    # THE resume gate. n steps straight must equal k steps + checkpoint + fresh
-    # model + load + (n-k) steps, bit-for-bit. lr comes from the schedule off the
-    # step index, so a mis-restored step counter would diverge here.
+    """The resume gate: n steps straight equal k steps + checkpoint + fresh model +
+    load + (n-k) steps, bit-for-bit (lr off the step index catches a bad counter).
+    """
     var n = 6
     var k = 3
     var peak = 0.05

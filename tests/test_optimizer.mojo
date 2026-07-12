@@ -1,8 +1,8 @@
-# Tests for the SGD optimizer step.
-#
-# sgd_step is param -= learning_rate * grad in place. Pin the arithmetic on a
-# hand-computed case and the shape-mismatch guard (its own, separate from the
-# model's).
+"""Tests for the SGD optimizer step.
+
+sgd_step is param -= learning_rate * grad in place. These pin the arithmetic on
+a hand-computed case and the shape-mismatch guard.
+"""
 
 from std.testing import assert_almost_equal, assert_raises, TestSuite
 
@@ -11,6 +11,8 @@ from llm.training.optimizer import sgd_step
 
 
 def test_sgd_step_updates_in_place() raises:
+    """`sgd_step` applies param -= lr * grad in place on a hand-computed case.
+    """
     var param = from_rows([[1.0, 2.0], [3.0, 4.0]])
     var grad = from_rows([[0.5, 1.0], [-2.0, 0.0]])
     sgd_step(param, grad, 0.1)
@@ -21,6 +23,7 @@ def test_sgd_step_updates_in_place() raises:
 
 
 def test_sgd_step_shape_mismatch_raises() raises:
+    """`sgd_step` raises when param and grad shapes differ."""
     var param = zeros_2d(2, 3)
     var grad = zeros_2d(3, 2)
     with assert_raises(contains="shapes must match"):

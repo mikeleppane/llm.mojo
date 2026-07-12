@@ -1,17 +1,12 @@
-# Scaled-dot-product attention — the one core that serves both self- and
-# cross-attention.
-#
-# Because q is a separate argument from k/v, each with its own length, the same
-# function *is* the cross-attention core: self-attention passes q, k, v all
-# derived from one sequence; cross-attention passes q from the decoder and k/v
-# from the encoder. Nothing in here knows or cares which — the shape [T_q, D] vs
-# [T_k, D] is the whole story. This is why the tests exercise T_q != T_k now,
-# before any cross-attention layer exists to need it.
-#
-# The pipeline reuses the tested tensor ops (matmul_transpose_b for the q @ k^T
-# scores, the `@` matmul operator for weights @ v, scale, add, softmax_rows)
-# rather than open-coding a second matmul or softmax. The order is load-bearing
-# and pinned in the docstring below.
+"""Scaled-dot-product attention: the one core serving self- and cross-attention.
+
+Because q is a separate argument from k/v, each with its own length, the same
+function is the cross-attention core: self-attention passes q, k, v from one
+sequence; cross-attention passes q from the decoder and k/v from the encoder.
+Nothing here cares which — the shapes [T_q, D] vs [T_k, D] are the whole story.
+The pipeline reuses the tested tensor ops (matmul_transpose_b, the `@` operator,
+scale, add, softmax_rows); the order is load-bearing and pinned below.
+"""
 
 from std.math import sqrt
 
@@ -34,10 +29,13 @@ from llm.utils.random import Rng
 
 
 struct AttentionResult(Copyable, Movable):
-    # The core returns the weights alongside the output on purpose: the weights
-    # are how tests *prove* causality (every entry above the diagonal is 0 after
-    # softmax) and how the chapter visualizes what each query attends to.
-    # Recomputing them in a second code path would test a copy, not the code.
+    """The attention output alongside the post-softmax weights.
+
+    The weights are returned so tests can prove causality (every above-diagonal
+    entry is 0) and callers can visualize what each query attends to, without
+    recomputing them in a second code path.
+    """
+
     var output: Tensor2D  # [T_q, D_v]
     var weights: Tensor2D  # [T_q, T_k] — post-softmax, each row sums to 1
 
@@ -46,16 +44,29 @@ struct AttentionResult(Copyable, Movable):
         self.weights = weights^
 
     def take_output(deinit self) -> Tensor2D:
-        # Consume this result and hand back just the output, dropping the weights
-        # (the inference path needs the output only). A caller that keeps solely
-        # the output moves it out instead of copying it out of a live struct.
+        """Consume this result and return just the output, dropping the weights.
+
+        The inference path needs the output only, so this moves it out instead of
+        copying from a live struct.
+
+        Returns:
+            The output [T_q, D_v], moved out.
+        """
         return self.output^
 
     def split(deinit self, mut weights_slot: Tensor2D) -> Tensor2D:
-        # Consume this result, moving the weights into the caller's slot and
-        # returning the output. A caching forward keeps both pieces; this moves
-        # each out instead of copying it, since a struct's field can't be
-        # transferred with `^` while the struct is still live.
+        """Consume this result: move the weights into `weights_slot`, return the output.
+
+        A caching forward keeps both pieces; this moves each out instead of
+        copying, since a field can't be transferred with `^` while the struct is
+        still live.
+
+        Args:
+            weights_slot: Slot the weights are moved into.
+
+        Returns:
+            The output [T_q, D_v], moved out.
+        """
         weights_slot = self.weights^
         return self.output^
 
@@ -63,22 +74,29 @@ struct AttentionResult(Copyable, Movable):
 def scaled_dot_product_attention(
     q: Tensor2D, k: Tensor2D, v: Tensor2D, mask: Tensor2D
 ) raises -> AttentionResult:
-    # Attention(q, k, v) with an additive mask. Shapes:
-    #   q    [T_q, D]      queries
-    #   k    [T_k, D]      keys   (same feature width D as q)
-    #   v    [T_k, D_v]    values (same count T_k as k, own width D_v)
-    #   mask [T_q, T_k]    additive: 0 attends, large-negative blocks
-    # Returns output [T_q, D_v] and weights [T_q, T_k].
-    #
-    # Pinned order (a wrong order is a classic attention bug):
-    #   1. scores  = q @ k^T                     [T_q, T_k]
-    #   2. scale   = scores * (1 / sqrt(D))      D = q.cols = d_head, NOT d_model
-    #   3. add     = scale + mask                additive mask, AFTER the scale
-    #   4. weights = softmax_rows(add)           row-wise, stable
-    #   5. output  = weights @ v                 [T_q, D_v]
-    # Scaling before the mask keeps a blocked score decisively negative; the mask
-    # is designed as an additive term on already-scaled scores. Reads its args
-    # only; allocates the intermediates and result; raises on any shape mismatch.
+    """Attention(q, k, v) with an additive mask, in the pinned order.
+
+    Pinned order (a wrong order is a classic attention bug):
+        1. scores  = q @ k^T                     [T_q, T_k]
+        2. scale   = scores * (1 / sqrt(D))      D = q.cols = d_head, not d_model
+        3. add     = scale + mask                additive mask, after the scale
+        4. weights = softmax_rows(add)           row-wise, stable
+        5. output  = weights @ v                 [T_q, D_v]
+    Scaling before the mask keeps a blocked score decisively negative.
+
+    Args:
+        q: Queries, shape [T_q, D].
+        k: Keys, shape [T_k, D] (same feature width D as q).
+        v: Values, shape [T_k, D_v] (same count T_k as k, own width D_v).
+        mask: Additive mask, shape [T_q, T_k]; 0 attends, large-negative blocks.
+
+    Returns:
+        The output [T_q, D_v] and weights [T_q, T_k]. Reads its args only;
+        allocates.
+
+    Raises:
+        Error: On any shape mismatch or a zero feature width.
+    """
     var t_q = q.rows
     var d = q.cols
     var t_k = k.rows
@@ -112,11 +130,8 @@ def scaled_dot_product_attention(
         )
 
     # scores[i, j] = sum_d q[i, d] * k[j, d] = q @ k^T, computed directly (no
-    # [D, T_k] transpose copy of k). matmul_transpose_b is a Class B SIMD dot, so
-    # the scores reassociate the d-sum (~d*eps) vs the old `q @ transpose(k)`
-    # scalar spelling — the kernel's 1e-12 test and the attention/124M goldens
-    # bound it, and step and batch scoring share this kernel so they stay
-    # bit-identical to each other (XVII's exact parity).
+    # [D, T_k] transpose copy of k). step and batch scoring share this SIMD
+    # kernel, so their scores stay bit-identical.
     var scores = matmul_transpose_b(q, k)  # [T_q, T_k]
     var scaled = scale(scores, 1.0 / sqrt(Float64(d)))  # 1/sqrt(d_head)
     var biased = add(scaled, mask)  # additive mask, after the scale
@@ -127,11 +142,13 @@ def scaled_dot_product_attention(
 
 @fieldwise_init
 struct AttentionCache(Copyable, Movable):
-    # What the core's backward needs: q, k, v and the post-softmax weights. The
-    # mask is not stored — it is constant additive data with no gradient, and its
-    # effect already lives in `weights` (blocked entries are ~0, so the softmax
-    # backward kills their gradient). Valid only for the forward call that
-    # produced it.
+    """What the core's backward needs: q, k, v and the post-softmax weights.
+
+    The mask is not stored — it is constant additive data with no gradient, and
+    its effect already lives in `weights` (blocked entries are ~0). Valid only
+    for the forward call that produced it.
+    """
+
     var q: Tensor2D  # [T_q, D]
     var k: Tensor2D  # [T_k, D]
     var v: Tensor2D  # [T_k, D_v]
@@ -140,22 +157,33 @@ struct AttentionCache(Copyable, Movable):
 
 @fieldwise_init
 struct AttentionForward(Copyable, Movable):
-    # scaled_dot_product_attention_cached's output plus the cache its backward
-    # consumes.
+    """Bundle scaled_dot_product_attention_cached's output with its backward cache.
+    """
+
     var output: Tensor2D  # [T_q, D_v]
     var cache: AttentionCache
 
     def split(deinit self, mut cache_slot: AttentionCache) -> Tensor2D:
-        # Consume this forward: the cache moves into the caller's slot and the
-        # output is returned. Lets the head loop move a head's output and its
-        # cache into their lists instead of copying each out of a live struct.
+        """Consume this forward: move the cache into `cache_slot`, return the output.
+
+        Lets the head loop move a head's output and cache into their lists
+        instead of copying each out of a live struct.
+
+        Args:
+            cache_slot: Slot the cache is moved into.
+
+        Returns:
+            The output [T_q, D_v], moved out.
+        """
         cache_slot = self.cache^
         return self.output^
 
 
 @fieldwise_init
 struct AttentionGrads(Copyable, Movable):
-    # The core backward's three input gradients, one per differentiable input.
+    """The core backward's three input gradients, one per differentiable input.
+    """
+
     var d_q: Tensor2D  # [T_q, D]
     var d_k: Tensor2D  # [T_k, D]
     var d_v: Tensor2D  # [T_k, D_v]
@@ -164,9 +192,21 @@ struct AttentionGrads(Copyable, Movable):
 def scaled_dot_product_attention_cached(
     q: Tensor2D, k: Tensor2D, v: Tensor2D, mask: Tensor2D
 ) raises -> AttentionForward:
-    # Same forward as scaled_dot_product_attention, additionally returning the
-    # cache its backward needs (q, k, v, weights). Reads its args; allocates the
-    # output and the cache; raises on the same shape mismatches the forward does.
+    """Same forward as scaled_dot_product_attention, plus the backward cache.
+
+    Args:
+        q: Queries, shape [T_q, D].
+        k: Keys, shape [T_k, D].
+        v: Values, shape [T_k, D_v].
+        mask: Additive mask, shape [T_q, T_k].
+
+    Returns:
+        The output and the cache (q, k, v, weights) its backward needs.
+        Allocates.
+
+    Raises:
+        Error: On the same shape mismatches the forward does.
+    """
     var result = scaled_dot_product_attention(q, k, v, mask)
     # q/k/v are borrowed inputs the cache must own, so they copy; the output and
     # weights are owned by `result`, so move them out instead of copying.
@@ -179,20 +219,28 @@ def scaled_dot_product_attention_cached(
 def scaled_dot_product_attention_backward(
     cache: AttentionCache, d_out: Tensor2D
 ) raises -> AttentionGrads:
-    # Reverse of the pinned forward order. Let s = 1/sqrt(D), D = q.cols = d_head
-    # (the SAME scale the forward used, applied once). Forward: S = qk^T, scaled
-    # by s, + mask, softmax -> W, output = Wv. So with dO = d_out [T_q, D_v]:
-    #   dV = W^T @ dO                          [T_k, T_q] @ [T_q, D_v] -> [T_k, D_v]
-    #   dW = dO @ V^T                          [T_q, D_v] @ [D_v, T_k] -> [T_q, T_k]
-    #   dScaled = softmax_rows_backward(W, dW)                          -> [T_q, T_k]
-    #   dScores = dScaled                      (mask is constant; add passes dW through)
-    #   dQ = (dScores @ K) * s                 [T_q, T_k] @ [T_k, D]   -> [T_q, D]
-    #   dK = (dScores^T @ Q) * s               [T_k, T_q] @ [T_q, D]   -> [T_k, D]
-    # The scale s folds into dQ/dK once (dScores = s·(qk^T-backward)); it does NOT
-    # apply to dV, which comes off the value matmul, not the scaled scores. The
-    # mask leaks no gradient: softmax_rows_backward multiplies by W, and a blocked
-    # entry's W is ~0. Reads the cache and d_out; allocates the three gradients;
-    # raises on a shape mismatch or a zero feature width.
+    """Reverse of the pinned forward order. Let s = 1/sqrt(D), D = q.cols = d_head.
+
+    With dO = d_out [T_q, D_v]:
+        dV = W^T @ dO                                       -> [T_k, D_v]
+        dW = dO @ V^T                                       -> [T_q, T_k]
+        dScaled = softmax_rows_backward(W, dW)              -> [T_q, T_k]
+        dScores = dScaled           (mask is constant; add passes dW through)
+        dQ = (dScores @ K) * s                              -> [T_q, D]
+        dK = (dScores^T @ Q) * s                            -> [T_k, D]
+    The scale s folds into dQ/dK once; it does not apply to dV. The mask leaks
+    no gradient (softmax_rows_backward multiplies by W, and a blocked W is ~0).
+
+    Args:
+        cache: The forward cache (q, k, v, weights).
+        d_out: Upstream gradient, shape [T_q, D_v].
+
+    Returns:
+        The gradients d_q [T_q, D], d_k [T_k, D], d_v [T_k, D_v]. Allocates.
+
+    Raises:
+        Error: On a shape mismatch or a zero feature width.
+    """
     var t_q = cache.q.rows
     var d = cache.q.cols
     var t_k = cache.k.rows
@@ -226,21 +274,21 @@ def scaled_dot_product_attention_backward(
 # ===================== Attention-weight dropout (train path) =====================
 #
 # GPT-2 drops the post-softmax attention weights before they weight the values:
-# `output = dropout(W) @ v`. This is an ADDITIVE path over the frozen core above —
-# the existing forward/backward are untouched, so every earlier caller keeps
-# compiling against them. With training = False (or p = 0) `dropout_cached` returns
-# an all-ones mask, unit scale, and consumes NO rng, so this path degenerates to
-# the proven one exactly — a test pins output and gradient equality.
+# `output = dropout(W) @ v`. This is an additive path over the frozen core above,
+# leaving the existing forward/backward untouched. With training = False (or
+# p = 0) dropout_cached returns an all-ones mask, unit scale, and draws no rng, so
+# this path degenerates exactly to the proven one.
 
 
 @fieldwise_init
 struct AttentionTrainCache(Copyable, Movable):
-    # What the train-path backward needs: the core cache (q, k, v, the PRE-dropout
-    # post-softmax weights) plus the dropout mask actually applied to those weights
-    # and the scale the forward used. `weights` is the pre-dropout W — what the
-    # softmax produced, and what softmax_rows_backward must be fed; `drop_mask` and
-    # `inv_keep` reconstruct the DROPPED weights the value-matmul saw. Valid only
-    # for the forward call that produced it.
+    """The train-path backward's inputs: the core cache plus the dropout mask.
+
+    `weights` is the pre-dropout W (what softmax produced, fed to
+    softmax_rows_backward); `drop_mask` and `inv_keep` reconstruct the dropped
+    weights the value-matmul saw. Valid only for the forward call that produced it.
+    """
+
     var q: Tensor2D  # [T_q, D]
     var k: Tensor2D  # [T_k, D]
     var v: Tensor2D  # [T_k, D_v]
@@ -251,15 +299,24 @@ struct AttentionTrainCache(Copyable, Movable):
 
 @fieldwise_init
 struct AttentionTrainForward(Copyable, Movable):
-    # scaled_dot_product_attention_train's output plus the cache its backward
-    # consumes.
+    """Bundle scaled_dot_product_attention_train's output with its backward cache.
+    """
+
     var output: Tensor2D  # [T_q, D_v]
     var cache: AttentionTrainCache
 
     def split(deinit self, mut cache_slot: AttentionTrainCache) -> Tensor2D:
-        # Consume this forward: the cache moves into the caller's slot and the
-        # output is returned. Lets the train-path head loop move a head's output
-        # and its cache into their lists instead of copying each out.
+        """Consume this forward: move the cache into `cache_slot`, return the output.
+
+        Lets the train-path head loop move a head's output and cache into their
+        lists instead of copying each out.
+
+        Args:
+            cache_slot: Slot the cache is moved into.
+
+        Returns:
+            The output [T_q, D_v], moved out.
+        """
         cache_slot = self.cache^
         return self.output^
 
@@ -273,20 +330,30 @@ def scaled_dot_product_attention_train(
     training: Bool,
     mut rng: Rng,
 ) raises -> AttentionTrainForward:
-    # The core forward with GPT-2's attention-weight dropout spliced into the
-    # pinned order:
-    #   scores -> scale -> + mask -> softmax -> W -> dropout_cached(W) -> dropped_W
-    #   output = dropped_W @ v
-    # Shapes exactly as scaled_dot_product_attention (q [T_q, D], k [T_k, D],
-    # v [T_k, D_v], mask [T_q, T_k] -> output [T_q, D_v]). Reads its args; allocates
-    # the weights, the mask, and the output; mutates rng only in the training/p>0
-    # branch (one uniform per weight entry, row-major); raises on the same shape
-    # mismatches the core does or an out-of-range p.
-    #
-    # The base call recomputes the un-dropped W @ v and discards it — a deliberate
-    # simplicity-over-speed choice that keeps the pinned order in ONE place (the
-    # core) rather than re-spelling scores->softmax here; a later performance pass
-    # can fold the throwaway matmul away. Only `base.weights` is used.
+    """The core forward with GPT-2's attention-weight dropout spliced in.
+
+    Pinned order:
+        scores -> scale -> + mask -> softmax -> W -> dropout_cached(W) -> dropped_W
+        output = dropped_W @ v
+
+    Args:
+        q: Queries, shape [T_q, D].
+        k: Keys, shape [T_k, D].
+        v: Values, shape [T_k, D_v].
+        mask: Additive mask, shape [T_q, T_k].
+        p: Dropout probability.
+        training: Whether to apply dropout and draw from rng.
+        rng: Random generator; mutated only in the training/p>0 branch.
+
+    Returns:
+        The output [T_q, D_v] and the backward cache. Allocates.
+
+    Raises:
+        Error: On the same shape mismatches the core does, or an out-of-range p.
+    """
+    # The base call recomputes the un-dropped W @ v and discards it, keeping the
+    # pinned order in one place (the core) rather than re-spelling it here; only
+    # base.weights is used.
     var base = scaled_dot_product_attention(q, k, v, mask)  # base.weights = W
     var drop = dropout_cached(base.weights, p, training, rng)  # dropped_W, mask
     var output = drop.output @ v  # dropped_W @ v -> [T_q, D_v]
@@ -310,20 +377,28 @@ def scaled_dot_product_attention_train(
 def scaled_dot_product_attention_train_backward(
     cache: AttentionTrainCache, d_out: Tensor2D
 ) raises -> AttentionGrads:
-    # Reverse of the train forward — composition of the frozen core backward with
-    # the dropout backward, no new math. Let dropped_W = W ⊙ mask · inv_keep be the
-    # weights the value-matmul actually used. With dO = d_out [T_q, D_v]:
-    #   dV        = dropped_W^T @ dO              (the value matmul saw the DROPPED W)
-    #   d_droppedW = dO @ V^T
-    #   dW        = dropout_backward(mask, inv_keep, d_droppedW)   (undo the drop)
-    #   dS        = softmax_rows_backward(W, dW)   (on the PRE-dropout W — what softmax made)
-    #   dQ = (dS @ K)·s,  dK = (dS^T @ Q)·s,  s = 1/sqrt(D)   (exactly as the core)
-    # The two weight tensors are distinct on purpose: dV is fed the DROPPED weights
-    # (that is what multiplied v in the forward), while softmax_rows_backward is fed
-    # the PRE-dropout W (that is what the softmax produced). Swapping them is the
-    # classic attention-dropout backward bug the finite-diff catches. Reads the
-    # cache and d_out; allocates the three gradients; raises on a shape mismatch or
-    # a zero feature width.
+    """Reverse of the train forward: the core backward composed with dropout backward.
+
+    Let dropped_W = W (elementwise) mask * inv_keep. With dO = d_out [T_q, D_v]:
+        dV        = dropped_W^T @ dO      (the value matmul saw the dropped W)
+        d_droppedW = dO @ V^T
+        dW        = dropout_backward(mask, inv_keep, d_droppedW)
+        dS        = softmax_rows_backward(W, dW)   (on the pre-dropout W)
+        dQ = (dS @ K)*s,  dK = (dS^T @ Q)*s,  s = 1/sqrt(D)
+    dV is fed the dropped weights (what multiplied v), while softmax_rows_backward
+    is fed the pre-dropout W (what softmax produced); swapping them is the classic
+    attention-dropout backward bug.
+
+    Args:
+        cache: The train forward cache.
+        d_out: Upstream gradient, shape [T_q, D_v].
+
+    Returns:
+        The gradients d_q, d_k, d_v. Allocates.
+
+    Raises:
+        Error: On a shape mismatch or a zero feature width.
+    """
     var d = cache.q.cols
     if d == 0:
         raise Error(
@@ -354,10 +429,12 @@ def scaled_dot_product_attention_train_backward(
 
 @fieldwise_init
 struct MHACache(Copyable, Movable):
-    # What MultiHeadAttention.backward needs, mirroring the forward plumbing: the
-    # fused qkv Linear's cache (its input x), one AttentionCache per head, and the
-    # output proj Linear's cache (its input, the concatenated head outputs). Valid
-    # only for the forward call that produced it.
+    """What MultiHeadAttention.backward needs, mirroring the forward plumbing.
+
+    The fused qkv Linear's cache (its input x), one AttentionCache per head, and
+    the output proj Linear's cache. Valid only for the forward that produced it.
+    """
+
     var qkv_cache: LinearCache  # holds x                    [T, C]
     var head_caches: List[AttentionCache]  # per head: q,k,v,weights
     var proj_cache: LinearCache  # holds concat(head outputs) [T, C]
@@ -365,24 +442,36 @@ struct MHACache(Copyable, Movable):
 
 @fieldwise_init
 struct MHAForward(Copyable, Movable):
-    # forward_cached's output plus the cache its backward consumes.
+    """Bundle forward_cached's output with the cache its backward consumes."""
+
     var output: Tensor2D  # [T, C]
     var cache: MHACache
 
     def split(deinit self, mut cache_slot: MHACache) -> Tensor2D:
-        # Consume this forward: the cache moves into the caller's slot and the
-        # output is returned. Lets a block move the (large) attention cache into
-        # its own cache instead of deep-copying it out of a live struct.
+        """Consume this forward: move the cache into `cache_slot`, return the output.
+
+        Lets a block move the (large) attention cache into its own cache instead
+        of deep-copying it out of a live struct.
+
+        Args:
+            cache_slot: Slot the cache is moved into.
+
+        Returns:
+            The output [T, C], moved out.
+        """
         cache_slot = self.cache^
         return self.output^
 
 
 @fieldwise_init
 struct MHATrainCache(Copyable, Movable):
-    # What MultiHeadAttention.backward_train needs — the train-path twin of
-    # MHACache: the fused qkv Linear's cache (its input x), one AttentionTrainCache
-    # per head (each carrying that head's attention-weight dropout mask), and the
-    # output proj Linear's cache. Valid only for the forward call that produced it.
+    """The train-path twin of MHACache.
+
+    The fused qkv Linear's cache (its input x), one AttentionTrainCache per head
+    (each carrying that head's attention-weight dropout mask), and the output
+    proj Linear's cache. Valid only for the forward that produced it.
+    """
+
     var qkv_cache: LinearCache  # holds x                          [T, C]
     var head_caches: List[
         AttentionTrainCache
@@ -392,34 +481,39 @@ struct MHATrainCache(Copyable, Movable):
 
 @fieldwise_init
 struct MHATrainForward(Copyable, Movable):
-    # forward_cached_train's output plus the cache its backward consumes.
+    """Bundle forward_cached_train's output with the cache its backward consumes.
+    """
+
     var output: Tensor2D  # [T, C]
     var cache: MHATrainCache
 
     def split(deinit self, mut cache_slot: MHATrainCache) -> Tensor2D:
-        # Consume this forward: the cache moves into the caller's slot and the
-        # output is returned. Lets a block move the (large) attention cache into
-        # its own cache instead of deep-copying it out of a live struct.
+        """Consume this forward: move the cache into `cache_slot`, return the output.
+
+        Lets a block move the (large) attention cache into its own cache instead
+        of deep-copying it out of a live struct.
+
+        Args:
+            cache_slot: Slot the cache is moved into.
+
+        Returns:
+            The output [T, C], moved out.
+        """
         cache_slot = self.cache^
         return self.output^
 
 
 @fieldwise_init
 struct MultiHeadAttention(Copyable, Movable):
-    # GPT-2's multi-head self-attention with the FUSED QKV projection.
-    #
-    # One Linear(C -> 3C) (GPT-2's `c_attn`) produces Q, K, V for every head in a
-    # single matmul; one Linear(C -> C) (`c_proj`) mixes the concatenated head
-    # outputs. This is the checkpoint layout weight loading will fill, and its
-    # parameter cost (3C^2 + 3C for qkv, C^2 + C for proj) is exactly the
-    # attention arithmetic the architecture's parameter count already commits to.
-    #
-    # Head layout is CONTIGUOUS, matching GPT-2: the [T, 3C] projection splits
-    # into three [T, C] thirds (Q, K, V), and each third splits into H contiguous
-    # [T, D] head slices with D = C / H — head h owns columns [h*D, (h+1)*D), not
-    # an interleaved stride. The [B, H, T, D] shape you see in framework code is
-    # loop discipline here: B is the block's batch loop (a later part), H is the
-    # loop below, and the tile each head works on is [T, D].
+    """GPT-2's multi-head self-attention with the fused QKV projection.
+
+    One Linear(C -> 3C) (GPT-2's `c_attn`) produces Q, K, V for every head in a
+    single matmul; one Linear(C -> C) (`c_proj`) mixes the concatenated head
+    outputs. Head layout is contiguous, matching GPT-2: the [T, 3C] projection
+    splits into three [T, C] thirds (Q, K, V), and each third into H contiguous
+    [T, D] head slices with D = C / H — head h owns columns [h*D, (h+1)*D).
+    """
+
     var qkv: Linear  # C -> 3C, fused c_attn
     var proj: Linear  # C -> C, c_proj
     var n_heads: Int
@@ -428,12 +522,23 @@ struct MultiHeadAttention(Copyable, Movable):
     def init_random(
         mut rng: Rng, d_model: Int, n_heads: Int
     ) raises -> MultiHeadAttention:
-        # An MHA with both Linears drawn from GPT-2's normal(0, 0.02) scheme and
-        # zero biases (qkv weights are drawn first, then proj). Mutates rng
-        # (advances its state); allocates both layers; deterministic given the
-        # generator's state. Raises unless n_heads > 0 and d_model is a positive
-        # multiple of n_heads — otherwise the head width D = C / H is undefined
-        # or degenerate.
+        """Build an MHA with both Linears drawn from GPT-2's normal(0, 0.02).
+
+        Zero biases; qkv weights are drawn first, then proj, so a generator state
+        reproduces the same layer.
+
+        Args:
+            rng: Random generator; advanced by the draws.
+            d_model: Model width C; must be a positive multiple of n_heads.
+            n_heads: Number of heads; must be positive.
+
+        Returns:
+            A fresh MHA. Allocates both layers.
+
+        Raises:
+            Error: Unless n_heads > 0 and d_model is a positive multiple of it
+                (else the head width D = C / H is undefined or degenerate).
+        """
         if n_heads <= 0:
             raise Error(
                 "MultiHeadAttention.init_random: n_heads must be positive, got "
@@ -457,13 +562,22 @@ struct MultiHeadAttention(Copyable, Movable):
         return MultiHeadAttention(qkv^, proj^, n_heads)
 
     def forward(self, x: Tensor2D, mask: Tensor2D) raises -> Tensor2D:
-        # Self-attention over one sequence: [T, C] + mask [T, T] -> [T, C]. Q, K,
-        # V all derive from x. Reads self only; allocates the projections, the
-        # per-head slices, and the result; raises on a feature-count mismatch
-        # (via the qkv Linear) or an indivisible width. The caller's mask is
-        # applied unchanged to every head.
+        """Self-attention over one sequence, with Q, K, V all derived from x.
+
+        The caller's mask is applied unchanged to every head.
+
+        Args:
+            x: Input sequence, shape [T, C].
+            mask: Additive attention mask, shape [T, T].
+
+        Returns:
+            The output [T, C]. Reads self only; allocates.
+
+        Raises:
+            Error: On a feature-count mismatch (via qkv) or an indivisible width.
+        """
         # @fieldwise_init lets a caller build this struct directly, bypassing
-        # init_random's guard, so re-check n_heads here rather than trap on a
+        # init_random's guard, so re-check n_heads rather than trap on a
         # modulo-by-zero below.
         if self.n_heads <= 0:
             raise Error(
@@ -511,29 +625,27 @@ struct MultiHeadAttention(Copyable, Movable):
         mut v_cache: Tensor2D,
         pos: Int,
     ) raises -> Tensor2D:
-        # KV-cached single-token self-attention: one query row [1, C] against the
-        # cached past -> [1, C]. This is `forward` one row wide, reusing the SAME
-        # frozen core with T_q = 1 and T_k = pos + 1 — no new attention math.
-        #
-        # k_cache / v_cache are this layer's [capacity, C] buffers; rows
-        # 0..pos-1 already hold the K/V of the earlier positions (written by
-        # earlier steps). pos is the newest position (= the cache's length on
-        # entry). The steps:
-        #   1. qkv.forward(x) -> [1, 3C], the same fused Linear the batch path
-        #      calls, on one row.
-        #   2. slice the Q, K, V thirds ([1, C] each); WRITE the K and V thirds
-        #      into cache row `pos`.
-        #   3. view the valid region k/v[0 : pos+1] -> [t, C], t = pos + 1.
-        #   4. per head, slice_cols the head's [1, D] query and [t, D] key/value
-        #      band, and call scaled_dot_product_attention with an all-ZEROS
-        #      [1, t] mask. The mask is zeros because a query at the newest
-        #      position attends to everything cached — causality is enforced by
-        #      what is IN the cache, not by masking (the batch causal mask's last
-        #      row is all zeros for the same reason, so the added term matches: 0).
-        #   5. concat the head outputs -> [1, C] and apply the proj Linear.
-        # Reads self; mutates k_cache and v_cache (row `pos`); allocates the
-        # projections, per-head slices, and result; raises on a bad shape/config
-        # or an out-of-range pos.
+        """KV-cached single-token self-attention: one query row against the cached past.
+
+        `forward` one row wide, reusing the same core with T_q = 1 and
+        T_k = pos + 1. Writes this position's K/V thirds into cache row `pos`,
+        views the valid region rows 0..pos, and per head attends with an
+        all-zeros [1, t] mask — causality is enforced by what is in the cache, not
+        by masking (the batch causal mask's last row is all zeros for the same
+        reason).
+
+        Args:
+            x: The single query row, shape [1, C].
+            k_cache: This layer's [capacity, C] key buffer, written at row `pos`.
+            v_cache: This layer's [capacity, C] value buffer, written at row `pos`.
+            pos: The newest position (the cache's length on entry).
+
+        Returns:
+            The output [1, C]. Reads self; mutates the cache buffers; allocates.
+
+        Raises:
+            Error: On a bad shape/config or an out-of-range pos.
+        """
         if self.n_heads <= 0:
             raise Error(
                 "MultiHeadAttention.step: n_heads must be positive, got "
@@ -614,14 +726,23 @@ struct MultiHeadAttention(Copyable, Movable):
     def forward_cached(
         self, var x: Tensor2D, mask: Tensor2D
     ) raises -> MHAForward:
-        # Self-attention over one sequence with the cache backward needs: [T, C] +
-        # mask [T, T] -> MHAForward. Same computation as forward, capturing the
-        # fused-qkv cache, one AttentionCache per head, and the proj cache. Takes x
-        # by value and moves it into the qkv cache; each stage's forward is split
-        # into (output, cache) so both pieces move on with no [T, *] copy. Reads
-        # self; allocates the projections, per-head slices, caches, and result;
-        # raises on a feature-count mismatch or an indivisible width. The cache is
-        # valid only for this call.
+        """Self-attention over one sequence, capturing the cache its backward needs.
+
+        Same computation as forward, capturing the fused-qkv cache, one
+        AttentionCache per head, and the proj cache. Takes x by value and moves
+        it into the qkv cache; each stage's forward is split into (output, cache)
+        so both pieces move on with no [T, *] copy.
+
+        Args:
+            x: Input sequence, shape [T, C]; moved into the qkv cache.
+            mask: Additive attention mask, shape [T, T].
+
+        Returns:
+            The output [T, C] and the cache, valid only for this call. Allocates.
+
+        Raises:
+            Error: On a feature-count mismatch or an indivisible width.
+        """
         if self.n_heads <= 0:
             raise Error(
                 "MultiHeadAttention.forward_cached: n_heads must be positive,"
@@ -673,19 +794,24 @@ struct MultiHeadAttention(Copyable, Movable):
         )
 
     def backward(mut self, cache: MHACache, d_out: Tensor2D) raises -> Tensor2D:
-        # Reverse the forward plumbing exactly, right to left. [T, C] d_out ->
-        # [T, C] d_x, accumulating the qkv and proj parameter grads (+=).
-        #   1. d_concat = proj.backward(proj_cache, d_out)   [T, C]
-        #   2. split d_concat into H contiguous [T, D] head slices; per head run
-        #      the core backward to get d_q_h, d_k_h, d_v_h.
-        #   3. concat the per-head d_q's (and d_k's, d_v's) back to [T, C] — the
-        #      exact inverse of the forward's head split.
-        #   4. d_qkv = [d_q_all | d_k_all | d_v_all]         [T, 3C] — the inverse
-        #      of the forward's Q/K/V third-split.
-        #   5. d_x = qkv.backward(qkv_cache, d_qkv)          [T, C]
-        # slice_cols and concat_cols are exact inverses (pinned in Part X), so the
-        # column bookkeeping round-trips. Mutates self.proj and self.qkv parameter
-        # grads; allocates and returns d_x; raises on a shape/config mismatch.
+        """Reverse the forward plumbing exactly, right to left.
+
+        proj.backward, split into H head slices, run the core backward per head,
+        concat the per-head d_q/d_k/d_v back to [T, C], reassemble the fused
+        d_qkv [T, 3C], then qkv.backward. slice_cols and concat_cols are exact
+        inverses, so the column bookkeeping round-trips.
+
+        Args:
+            cache: The forward cache from forward_cached.
+            d_out: Upstream gradient, shape [T, C].
+
+        Returns:
+            d_x [T, C]. Mutates self.proj and self.qkv parameter grads (+=);
+            allocates.
+
+        Raises:
+            Error: On a shape/config mismatch.
+        """
         if self.n_heads <= 0:
             raise Error(
                 "MultiHeadAttention.backward: n_heads must be positive, got "
@@ -746,17 +872,26 @@ struct MultiHeadAttention(Copyable, Movable):
         training: Bool,
         mut rng: Rng,
     ) raises -> MHATrainForward:
-        # The train-path twin of forward_cached: identical plumbing (fused qkv,
-        # per-head split, concat, proj), but each head runs the attention-weight
-        # dropout core. [T, C] + mask [T, T] -> MHATrainForward. rng is threaded
-        # through the heads in order, so each head draws its own [T, T] weight mask;
-        # with training = False (or p = 0) no head draws and the result equals
-        # forward_cached exactly. Takes x by value and moves it into the qkv cache;
-        # each stage's forward is split into (output, cache) so both pieces move on
-        # with no [T, *] copy. Reads self; allocates the projections, per-head
-        # slices, caches, and result; mutates rng only in the training/p>0 branch;
-        # raises on a feature-count mismatch, an indivisible width, or an
-        # out-of-range p. The cache is valid only for this call.
+        """The train-path twin of forward_cached, with per-head attention-weight dropout.
+
+        Identical plumbing (fused qkv, per-head split, concat, proj), but each
+        head runs the dropout core. rng is threaded through the heads in order, so
+        each head draws its own [T, T] weight mask; with training = False (or
+        p = 0) no head draws and the result equals forward_cached.
+
+        Args:
+            x: Input sequence, shape [T, C]; moved into the qkv cache.
+            mask: Additive attention mask, shape [T, T].
+            p: Dropout probability.
+            training: Whether to apply dropout and draw from rng.
+            rng: Random generator; mutated only in the training/p>0 branch.
+
+        Returns:
+            The output [T, C] and the cache, valid only for this call. Allocates.
+
+        Raises:
+            Error: On a feature-count mismatch, an indivisible width, or a bad p.
+        """
         if self.n_heads <= 0:
             raise Error(
                 "MultiHeadAttention.forward_cached_train: n_heads must be"
@@ -817,13 +952,24 @@ struct MultiHeadAttention(Copyable, Movable):
     def backward_train(
         mut self, cache: MHATrainCache, d_out: Tensor2D
     ) raises -> Tensor2D:
-        # The train-path twin of backward: reverse the same plumbing right to left,
-        # but each head runs the attention-weight-dropout core backward. [T, C]
-        # d_out -> [T, C] d_x, accumulating qkv and proj parameter grads (+=). With
-        # training = False (or p = 0) each head cache carries an all-ones mask and
-        # unit scale, so this returns exactly what backward returns — a test pins
-        # the equality. Mutates self.proj and self.qkv parameter grads; allocates
-        # and returns d_x; raises on a shape/config mismatch.
+        """The train-path twin of backward, with per-head dropout backward.
+
+        Reverse the same plumbing right to left, each head running the
+        attention-weight-dropout core backward. With training = False (or p = 0)
+        each head cache carries an all-ones mask and unit scale, so this returns
+        exactly what backward returns.
+
+        Args:
+            cache: The train forward cache from forward_cached_train.
+            d_out: Upstream gradient, shape [T, C].
+
+        Returns:
+            d_x [T, C]. Mutates self.proj and self.qkv parameter grads (+=);
+            allocates.
+
+        Raises:
+            Error: On a shape/config mismatch.
+        """
         if self.n_heads <= 0:
             raise Error(
                 "MultiHeadAttention.backward_train: n_heads must be positive,"

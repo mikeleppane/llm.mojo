@@ -1,13 +1,17 @@
-# Print a model and training configuration summary.
-#
-# A minimal demonstration that GPTConfig is Writable (print(cfg) just works) and
-# that the derived helpers and validate() are wired up. Run:
-#     pixi run mojo run -I src examples/config_summary.mojo
+"""Print a model and training configuration summary.
+
+Demonstrates that GPTConfig is Writable and that the derived helpers and
+validate() are wired up.
+
+Run:
+    pixi run mojo run -I src examples/config_summary.mojo
+"""
 
 from llm.config import GPTConfig, TrainingConfig
 
 
 def main() raises:
+    """Build, validate, and print a GPTConfig and a TrainingConfig."""
     var cfg = GPTConfig(
         vocab_size=4096,
         context_length=128,

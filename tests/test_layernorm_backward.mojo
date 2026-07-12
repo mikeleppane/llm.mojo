@@ -1,16 +1,4 @@
-# Tests for LayerNorm backward — the three-term dx and its projection property.
-#
-# LayerNorm's dx is the most-fumbled hand-derived backward: dropping the
-# mean-subtraction or the x̂-projection term still passes a smoke test but is
-# wrong. So beyond finite-difference checks on dx, dγ, dβ, this file adds the
-# analytic orthogonality test: because the forward removes each row's mean and
-# scale, dx must be orthogonal to the ones vector (exactly) and to the normalized
-# row x̂ (up to eps). Dropping either subtracted term breaks one orthogonality by
-# an O(1) amount — an analytic catch, independent of the finite-difference path.
-#
-# Finite-difference convention (D5, shared across this part's backward tests):
-#   L = sum(cotangent ⊙ y); central diff h = 1e-5; tolerance
-#   |analytic - numeric| <= 1e-7 + 1e-5 * |numeric|.
+"""Tests for LayerNorm backward: finite-difference checks on the three-term dx, dgamma, dbeta, plus an analytic orthogonality test (dx is orthogonal to the ones vector exactly and to the normalized row x-hat up to eps). Finite-difference convention: L = sum(cotangent * y); central diff h = 1e-5; mixed absolute/relative tolerance 1e-7 + 1e-5*|numeric|."""
 
 from std.testing import assert_almost_equal, assert_true, TestSuite
 
@@ -20,7 +8,8 @@ from llm.tensor.tensor2d import Tensor2D, from_rows
 
 
 def assert_grad_close(analytic: Float64, numeric: Float64) raises:
-    # D5 mixed tolerance |a - n| <= 1e-7 + 1e-5 * |n|.
+    """Assert |analytic - numeric| <= 1e-7 + 1e-5 * |numeric| (mixed absolute/relative tolerance).
+    """
     assert_true(
         abs(analytic - numeric) <= 1e-7 + 1e-5 * abs(numeric),
         String("grad mismatch: analytic=")
@@ -31,22 +20,22 @@ def assert_grad_close(analytic: Float64, numeric: Float64) raises:
 
 
 def make_layer() raises -> LayerNorm:
-    # Non-trivial weight and bias (C = 4) so a = d_out ⊙ γ has a nonzero mean —
-    # a weight of ones would make the projection terms degenerate.
+    """Build a LayerNorm with non-trivial weight and bias (C = 4) so a = d_out ⊙ γ has a nonzero mean; a weight of ones would make the projection terms degenerate.
+    """
     var weight = from_rows([[0.5, 1.0, 1.5, 2.0]])
     var bias = from_rows([[0.1, -0.1, 0.2, -0.2]])
     return LayerNorm(Parameter(weight^), Parameter(bias^))
 
 
 def sample_input() raises -> Tensor2D:
-    # [N=3, C=4], asymmetric, distinct per-row variances.
+    """A [N=3, C=4] input, asymmetric with distinct per-row variances."""
     return from_rows(
         [[1.0, 2.0, 3.0, 4.0], [2.0, -4.0, 6.0, -8.0], [-1.0, 0.0, 2.0, 5.0]]
     )
 
 
 def cotangent() raises -> Tensor2D:
-    # Fixed asymmetric d_out [N=3, C=4], each row with a nonzero mean.
+    """A fixed asymmetric d_out [N=3, C=4], each row with a nonzero mean."""
     return from_rows(
         [[0.7, -0.2, 1.3, -0.5], [0.1, 0.9, -1.1, 0.4], [-0.6, 0.3, 0.2, -0.8]]
     )
@@ -62,6 +51,8 @@ def projected(layer: LayerNorm, x: Tensor2D, cot: Tensor2D) raises -> Float64:
 
 
 def test_d_x_matches_finite_difference() raises:
+    """Backward's dx matches a central finite difference at every input element.
+    """
     var layer = make_layer()
     var x = sample_input()
     var cot = cotangent()
@@ -82,6 +73,8 @@ def test_d_x_matches_finite_difference() raises:
 
 
 def test_d_weight_matches_finite_difference() raises:
+    """Backward's dgamma matches a central finite difference at every weight element.
+    """
     var layer = make_layer()
     var x = sample_input()
     var cot = cotangent()
@@ -109,6 +102,8 @@ def test_d_weight_matches_finite_difference() raises:
 
 
 def test_d_bias_matches_finite_difference() raises:
+    """Backward's dbeta matches a central finite difference at every bias element.
+    """
     var layer = make_layer()
     var x = sample_input()
     var cot = cotangent()
@@ -136,13 +131,8 @@ def test_d_bias_matches_finite_difference() raises:
 
 
 def test_d_x_orthogonal_to_ones_and_xhat() raises:
-    # LayerNorm removes each row's mean and scale, so dx has no component along
-    # the ones vector (exactly — μ carries no gradient) or along x̂ (up to eps —
-    # r carries no gradient). Sum(dx) is the ones projection; sum(dx ⊙ x̂) is the
-    # x̂ projection. If the mean(a) term were dropped, sum(dx) would be ~r·C·mean(a)
-    # (O(1)); if the x̂ term were dropped, sum(dx⊙x̂) would be ~r·C·mean(a⊙x̂)
-    # (O(1)). Both are far above the tolerances below, so this catches a dropped
-    # term without any finite difference.
+    """Backward's dx is orthogonal to the ones vector (sum(dx) = 0 exactly) and to x̂ (sum(dx ⊙ x̂) = 0 up to eps); dropping either subtracted term breaks one orthogonality by an O(1) amount, caught here without any finite difference.
+    """
     var layer = make_layer()
     var x = sample_input()
     var cot = cotangent()
@@ -166,6 +156,8 @@ def test_d_x_orthogonal_to_ones_and_xhat() raises:
 
 
 def test_backward_accumulates_exactly() raises:
+    """Two backward passes double the weight and bias gradients exactly (grads accumulate).
+    """
     var layer = make_layer()
     var x = sample_input()
     var cot = cotangent()

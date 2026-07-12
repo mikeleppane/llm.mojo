@@ -1,21 +1,12 @@
-# Byte-level Byte-Pair Encoding (BPE) — the core algorithm.
-#
-# BPE starts from the 256 raw byte values as tokens and repeatedly merges the
-# most useful adjacent pair into a new token. Because it starts from bytes, it
-# can encode *any* input — there is no out-of-vocabulary character. This module
-# is deliberately GPT-2-shaped but framework-free: tokens are integer ids, the
-# vocab maps id -> byte sequence, and merges are looked up in two dictionaries.
-#
-# Representation: a token is an `Int` id; `vocab[id]` is its byte sequence; a
-# merge of ids (left, right) is keyed by a single packed `Int` (see `pair_key`)
-# into `merge_rank` (which merge wins) and `merge_result` (the id it produces).
-# Keeping the hot loop in integers — no unicode string juggling — is what makes
-# the algorithm readable.
-#
-# Performance note: `encode_bytes` rescans the sequence once per merge (O(n * m)
-# for n bytes and m applicable merges). Chunks are short in practice (GPT-2
-# pre-splits before calling this), and performance is Part XVIII's concern; this
-# file optimizes for clarity.
+"""Byte-level Byte-Pair Encoding (BPE) — the core algorithm.
+
+Starts from the 256 raw byte values as tokens and repeatedly merges the most
+useful adjacent pair into a new token, so it can encode any input with no
+out-of-vocabulary character. A token is an `Int` id, `vocab[id]` is its byte
+sequence, and a merge of ids (left, right) is keyed by a single packed `Int`
+(see `pair_key`) into `merge_rank` and `merge_result`. Keeping the hot loop in
+integers, with no unicode string juggling, is what makes the algorithm readable.
+"""
 
 # Ids are well under 2**31, so a pair (left, right) packs losslessly into one
 # Int: left occupies the high bits, right the low bits. A single Int key lets the
@@ -31,20 +22,29 @@ comptime N_BYTES = 256
 
 
 def pair_key(left: Int, right: Int) -> Int:
-    # Pack an adjacent (left, right) id pair into one Int key. Lossless for ids
-    # well under 2**31 (see PAIR_BASE) — ample for GPT-2's 50257 and any trained
-    # vocab here. Does not allocate; does not raise.
+    """Pack an adjacent (left, right) id pair into one Int key.
+
+    Args:
+        left: Left token id.
+        right: Right token id.
+
+    Returns:
+        A lossless packed key for ids well under 2**31 (ample for GPT-2's
+        50257). Does not allocate; does not raise.
+    """
     return left * PAIR_BASE + right
 
 
 struct BPETokenizer(Copyable, Movable):
+    """Byte-level BPE tokenizer: vocab, base-byte ids, and merge tables."""
+
     var vocab: List[List[UInt8]]  # token id -> its byte sequence
     var byte_to_id: List[Int]  # 256 entries: raw byte value -> base token id
     var merge_rank: Dict[Int, Int]  # pair_key -> rank (lower merges first)
     var merge_result: Dict[Int, Int]  # pair_key -> merged token id
 
     def __init__(out self):
-        # Base vocabulary: 256 single-byte tokens, id i == byte value i, no merges.
+        """Initialize the base vocab: 256 single-byte tokens, no merges."""
         self.vocab = []
         self.byte_to_id = []
         self.merge_rank = {}
@@ -57,11 +57,22 @@ struct BPETokenizer(Copyable, Movable):
         return len(self.vocab)
 
     def register_merge(mut self, left: Int, right: Int) raises -> Int:
-        # Append one merge at the next rank and create its token. The new id is
-        # the current vocab size; its bytes are the left token's bytes followed
-        # by the right token's. Returns the new id. Mutates self; allocates.
-        # Raises on a pair already merged: re-registering it would desync the
-        # rank sequence from merge_rank's length and break save().
+        """Append one merge at the next rank and create its token.
+
+        The new id is the current vocab size; its bytes are the left token's
+        bytes followed by the right token's.
+
+        Args:
+            left: Left token id of the pair.
+            right: Right token id of the pair.
+
+        Returns:
+            The new merged token id. Mutates self; allocates.
+
+        Raises:
+            Error: If the pair was already merged, which would desync the rank
+                sequence from merge_rank's length and break save().
+        """
         var key = pair_key(left, right)
         if key in self.merge_rank:
             raise Error("BPETokenizer.register_merge: pair already merged")
@@ -74,10 +85,18 @@ struct BPETokenizer(Copyable, Movable):
         return new_id
 
     def encode_bytes(self, chunk: List[UInt8]) -> List[Int]:
-        # THE merge loop. Start from one id per byte, then repeatedly find the
-        # present adjacent pair with the lowest merge rank and replace every
-        # occurrence of it with its merged id, until no pair is mergeable.
-        # Allocates a new list; does not mutate self; cannot raise.
+        """Run the BPE merge loop over one chunk of bytes.
+
+        Starts from one id per byte, then repeatedly finds the present adjacent
+        pair with the lowest merge rank and replaces every occurrence with its
+        merged id, until no pair is mergeable.
+
+        Args:
+            chunk: The raw bytes to encode.
+
+        Returns:
+            The token ids. Allocates; does not mutate self; cannot raise.
+        """
         var ids: List[Int] = []
         for i in range(len(chunk)):
             ids.append(self.byte_to_id[Int(chunk[i])])
@@ -117,9 +136,16 @@ struct BPETokenizer(Copyable, Movable):
         return ids^
 
     def encode(self, text: String) -> List[Int]:
-        # Encode a whole string: its UTF-8 bytes through the merge loop. The core
-        # BPE tokenizer does no pre-splitting (that is GPT-2's job, in gpt2.mojo).
-        # Cannot raise: every byte has a base id and encode_bytes is total.
+        """Encode a string via its UTF-8 bytes through the merge loop.
+
+        The core BPE tokenizer does no pre-splitting (that is GPT-2's job).
+
+        Args:
+            text: The string to encode.
+
+        Returns:
+            The token ids. Cannot raise: every byte has a base id.
+        """
         var bytes_view = text.as_bytes()
         var chunk: List[UInt8] = []
         for i in range(len(bytes_view)):
@@ -127,9 +153,20 @@ struct BPETokenizer(Copyable, Movable):
         return self.encode_bytes(chunk)
 
     def decode(self, ids: List[Int]) raises -> String:
-        # Concatenate each id's bytes, then decode UTF-8 with U+FFFD replacement
-        # for invalid sequences — ids may split a multi-byte character, so this
-        # must never trap. Allocates; raises only on an out-of-range id.
+        """Concatenate each id's bytes and decode UTF-8 lossily.
+
+        Uses U+FFFD replacement for invalid sequences, since ids may split a
+        multi-byte character and decoding must never trap.
+
+        Args:
+            ids: Token ids to decode.
+
+        Returns:
+            The decoded string. Allocates.
+
+        Raises:
+            Error: If an id is out of range.
+        """
         var bytes: List[UInt8] = []
         for i in range(len(ids)):
             var id = ids[i]
@@ -142,12 +179,21 @@ struct BPETokenizer(Copyable, Movable):
         return String(from_utf8_lossy=Span(bytes))
 
     def train(mut self, text: String, target_vocab_size: Int) raises:
-        # Didactic minbpe-style trainer over the whole byte sequence (no
-        # pre-splitting — that is the teaching variant; GPT-2 trained over
-        # pre-split words). Repeatedly count adjacent pairs, merge the most
-        # frequent, and repeat until the vocab reaches target_vocab_size.
-        # Tie-break is fixed for determinism: highest count wins, then lowest
-        # pair key. Mutates self; allocates; raises if the target is too small.
+        """Train merges over the whole byte sequence, minbpe-style.
+
+        Repeatedly counts adjacent pairs, merges the most frequent, and repeats
+        until the vocab reaches target_vocab_size. No pre-splitting (the
+        teaching variant; GPT-2 trained over pre-split words). Deterministic
+        tie-break: highest count wins, then lowest pair key. Mutates self;
+        allocates.
+
+        Args:
+            text: The training corpus.
+            target_vocab_size: Desired final vocab size (>= 256).
+
+        Raises:
+            Error: If target_vocab_size is below the 256 base byte tokens.
+        """
         if target_vocab_size < N_BYTES:
             raise Error(
                 "BPETokenizer.train: target_vocab_size must be >= "
@@ -205,10 +251,16 @@ struct BPETokenizer(Copyable, Movable):
             ids = merged_ids^
 
     def save(self, path: String) raises:
-        # Write BPETOK v1: magic line, vocab size, one line per token in id order
-        # (byte count then the byte values), then the merge count and one line per
-        # merge in rank order (left, right, merged). Integers only, so no
-        # newline/whitespace escaping is ever needed.
+        """Write the tokenizer as BPETOK v1.
+
+        Format: magic line, vocab size, one line per token in id order (byte
+        count then byte values), then the merge count and one line per merge in
+        rank order (left, right, merged). Integers only, so no escaping is
+        needed.
+
+        Args:
+            path: Destination file path (overwritten).
+        """
         var text = (
             String(BPETOK_MAGIC) + "\n" + String(self.vocab_size()) + "\n"
         )
@@ -237,8 +289,17 @@ struct BPETokenizer(Copyable, Movable):
 
     @staticmethod
     def load(path: String) raises -> BPETokenizer:
-        # Restore a tokenizer written by save. Raises on a bad magic line or a
-        # structurally inconsistent file.
+        """Restore a tokenizer written by save.
+
+        Args:
+            path: File to read.
+
+        Returns:
+            The restored tokenizer. Allocates.
+
+        Raises:
+            Error: On a bad magic line or a structurally inconsistent file.
+        """
         var content = open(path, "r").read()
         var lines = content.split("\n")
         if len(lines) < 2 or String(lines[0]) != BPETOK_MAGIC:

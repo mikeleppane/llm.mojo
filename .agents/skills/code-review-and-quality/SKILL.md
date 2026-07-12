@@ -85,7 +85,10 @@ not a script.
   descriptive (short symbols only next to a shape comment)?
 - Any clever trick that saves three lines but hides a concept? In teaching code,
   clarity beats cleverness — flag it.
-- Public API has a real docstring stating shapes / mutate / allocate / raise?
+- Every module, struct, and public function has a triple-quoted **Google-style**
+  docstring (`Args:` / `Returns:` / `Raises:`, short, folding in shapes / mutate /
+  allocate / raise)? Flag `#`-comment doc blocks and any plan/spec reference
+  (`Part XI`, `D5`, "roadmap") left in a docstring or comment.
 
 ### 4. Architecture
 

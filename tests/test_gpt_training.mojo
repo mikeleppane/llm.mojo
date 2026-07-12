@@ -1,19 +1,4 @@
-# Overfit-one-batch smoke — the cheapest end-to-end proof the assembled model
-# LEARNS before Part XIV builds the real trainer around it.
-#
-# A correct model + loop drives the loss on one fixed batch below the log V init
-# baseline. If it cannot, something in the assembly is broken — a missing tied-
-# head gradient path, a dropped residual skip, a Parameter the optimizer never
-# reaches — and every one of those has a targeted test earlier in the suite, so a
-# stall here points back to a specific wire, never to a hyperparameter.
-#
-# Two runs:
-#   - dropout = 0: fully deterministic, loss strictly below log V and DECREASING
-#     across checkpoints, and two runs from the same seed agree bit-for-bit.
-#   - dropout = 0.1, training = True: loss below the init baseline after the same
-#     steps (dropout noise forbids a per-step monotonicity claim).
-#
-# Tiny config (V=6, C=8, H=2, L=2, T=5) keeps forward_cached + backward cheap.
+"""Overfit-one-batch smoke: the cheapest end-to-end proof the assembled model learns, driving the loss on one fixed batch below the log V baseline (dropout 0 deterministic + decreasing; dropout 0.1 still ends below init)."""
 
 from std.math import log
 
@@ -26,7 +11,7 @@ from llm.utils.random import Rng
 
 
 def fixed_batch() raises -> List[Int]:
-    # One fixed input sequence (T=5) to overfit; ids in [0, V=6).
+    """One fixed input sequence (T=5) to overfit; ids in [0, V=6)."""
     var out = List[Int]()
     out.append(1)
     out.append(4)
@@ -37,7 +22,7 @@ def fixed_batch() raises -> List[Int]:
 
 
 def fixed_targets() raises -> List[Int]:
-    # The next-token targets for the fixed batch (also in [0, V)).
+    """The next-token targets for the fixed batch (also in [0, V))."""
     var out = List[Int]()
     out.append(4)
     out.append(2)
@@ -50,10 +35,8 @@ def fixed_targets() raises -> List[Int]:
 def train_run(
     dropout: Float64, training: Bool, seed: UInt64, steps: Int, lr: Float64
 ) raises -> List[Float64]:
-    # Overfit the fixed batch for `steps` SGD steps; return the loss BEFORE each
-    # step (so index 0 is the init loss). Deterministic given the seed. Uses the
-    # cached forward (training flag as given) so the same path that carries
-    # gradients carries dropout.
+    """Overfit the fixed batch for `steps` SGD steps; return the loss before each step (index 0 is the init loss). Deterministic given the seed; the cached forward carries both gradients and dropout.
+    """
     var cfg = GPTConfig(6, 8, 8, 2, 2, dropout)
     var rng = Rng(seed)
     var gpt = GPT.init_random(cfg, rng)
@@ -72,6 +55,8 @@ def train_run(
 
 
 def test_dropout_zero_overfits_and_decreases() raises:
+    """With dropout 0 the loss starts near log V, ends well below it, and falls across checkpoints.
+    """
     var steps = 120
     var losses = train_run(0.0, False, 7, steps, 0.5)
     var init = losses[0]
@@ -100,8 +85,8 @@ def test_dropout_zero_overfits_and_decreases() raises:
 
 
 def test_dropout_zero_is_deterministic() raises:
-    # dropout = 0 draws no rng in the forward, so two runs from the same seed give
-    # bit-identical losses.
+    """Dropout 0 draws no rng in the forward, so two runs from the same seed give bit-identical losses.
+    """
     var a = train_run(0.0, False, 11, 40, 0.5)
     var b = train_run(0.0, False, 11, 40, 0.5)
     for i in range(len(a)):
@@ -111,8 +96,8 @@ def test_dropout_zero_is_deterministic() raises:
 
 
 def test_dropout_active_still_learns() raises:
-    # dropout = 0.1, training = True: loss below the init baseline after the same
-    # steps. No per-step monotonicity claim — dropout noise forbids it.
+    """Dropout 0.1, training on: loss ends below the init baseline (no per-step monotonicity claim under dropout noise).
+    """
     var steps = 120
     var losses = train_run(0.1, True, 21, steps, 0.5)
     var log_v = log(6.0)

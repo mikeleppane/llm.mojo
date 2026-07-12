@@ -1,3 +1,5 @@
+"""Neural-network building blocks: parameters, layers, activations, optimizers."""
+
 from .parameter import Parameter
 from .linear import Linear, LinearCache, LinearForward
 from .embedding import Embedding, EmbeddingCache, EmbeddingForward

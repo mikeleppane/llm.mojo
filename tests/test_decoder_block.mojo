@@ -1,17 +1,11 @@
-# Tests for DecoderBlock — the pre-LN block with masked self-attention, cross-
-# attention over memory, and an MLP (three residuals).
-#
-# The forward golden (Case DEC) is wiring-sensitive (pre-LN, causal self-mask,
-# no-mask cross). Two behavioral tests pin the wiring the golden cannot: causal
-# masking means perturbing the decoder input at position j leaves rows < j
-# unchanged, and perturbing memory changes the output (the decoder actually reads
-# the encoder). The finite-difference checks cover d_x, d_memory, and all twenty
-# parameter grads under the causal + cross masks — d_memory flows ONLY through
-# cross-attention, so a mis-ordered fused-kv gradient surfaces here.
-#
-# Finite-difference convention (Part XI, inline): projected scalar loss
-# L = sum(cotangent (.) forward), central diff h = 1e-5, mixed tolerance
-# |analytic - numeric| <= 1e-7 + 1e-5 * |numeric|.
+"""Tests for DecoderBlock: the pre-LN block with masked self-attention, cross-attention over memory, and an MLP (three residuals).
+
+Covers the forward golden (Case DEC), two behavioral wiring checks (causal
+masking, memory is read), and finite-difference checks for d_x, d_memory, and
+all twenty parameter grads. Finite-difference convention: projected scalar loss
+L = sum(cotangent * forward), central diff h = 1e-5, mixed absolute/relative
+tolerance |analytic - numeric| <= 1e-7 + 1e-5 * |numeric|.
+"""
 
 from std.testing import assert_almost_equal, assert_true, TestSuite
 
@@ -554,9 +548,8 @@ def dec_output() raises -> Tensor2D:
 
 
 def dec_weights() raises -> List[Tensor2D]:
-    # The 20 parameter tensors, fixed order: ln1(w,b), self-attn(qkv w,b;
-    # proj w,b), ln2(w,b), cross-attn(q w,b; kv w,b; proj w,b), ln3(w,b),
-    # mlp(up w,b; down w,b).
+    """The 20 parameter tensors in fixed order: ln1(w,b), self-attn(qkv w,b; proj w,b), ln2(w,b), cross-attn(q w,b; kv w,b; proj w,b), ln3(w,b), mlp(up w,b; down w,b).
+    """
     var out = List[Tensor2D]()
     out.append(dec_ln1_w())
     out.append(dec_ln1_b())
@@ -623,8 +616,8 @@ def projected(
 
 
 def test_forward_oracle() raises:
-    # Golden Case DEC: pre-LN decoder block, T_tgt=3, T_src=4, C=4, H=2, causal
-    # self-mask, no-mask cross.
+    """Golden Case DEC: pre-LN decoder block, T_tgt=3, T_src=4, C=4, H=2, causal self-mask, no-mask cross.
+    """
     var block = build_dec_block(dec_weights())
     var x = dec_x()
     var mem = dec_mem()
@@ -637,10 +630,9 @@ def test_forward_oracle() raises:
 
 
 def test_causality_earlier_rows_unchanged() raises:
-    # Perturbing the decoder input at position j leaves output rows < j
-    # unchanged: causal self-attention means row i depends only on x[0..i], and
-    # cross-attention's query at row i depends only on that same prefix. Perturb
-    # x at position 1; row 0 must be identical.
+    """Perturbing the decoder input at position j leaves output rows < j unchanged (causal self-attention plus prefix-only cross queries).
+    """
+    # Perturb x at position 1; row 0 must be identical.
     var block = build_dec_block(dec_weights())
     var x = dec_x()
     var mem = dec_mem()
@@ -659,9 +651,8 @@ def test_causality_earlier_rows_unchanged() raises:
 
 
 def test_memory_is_read() raises:
-    # Perturbing memory changes the output — the decoder actually reads the
-    # encoder through cross-attention (a decoder that ignored memory would be
-    # invariant to this).
+    """Perturbing memory changes the output: the decoder actually reads the encoder through cross-attention.
+    """
     var block = build_dec_block(dec_weights())
     var x = dec_x()
     var mem = dec_mem()
@@ -678,6 +669,8 @@ def test_memory_is_read() raises:
 
 
 def test_d_x_matches_finite_difference() raises:
+    """Gradient d_x matches a central finite difference of the projected loss.
+    """
     var block = build_dec_block(dec_weights())
     var x = dec_x()
     var mem = dec_mem()
@@ -699,6 +692,8 @@ def test_d_x_matches_finite_difference() raises:
 
 
 def test_d_memory_matches_finite_difference() raises:
+    """Gradient d_memory (flowing only through cross-attention) matches a central finite difference.
+    """
     var block = build_dec_block(dec_weights())
     var x = dec_x()
     var mem = dec_mem()
@@ -737,6 +732,7 @@ def finite_diff_param(
 
 
 def test_parameter_grads_match_finite_difference() raises:
+    """All twenty parameter gradients match a central finite difference."""
     var w = dec_weights()
     var block = build_dec_block(w)
     var x = dec_x()

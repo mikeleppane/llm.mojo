@@ -1,14 +1,4 @@
-# Tests for the real training loop: train_gpt (AdamW + warmup/cosine schedule +
-# global-norm clipping over a BatchLoader) and estimate_loss.
-#
-# The capstone is overfit-one-batch through the REAL trainer: a correct
-# model + loop crushes the loss on one fixed batch far below the log V uniform
-# baseline. Dropout is 0 so the run is fully determined by the seed, and a
-# second run from the same seed reproduces the loss history bit-for-bit. A short
-# dropout = 0.1 run must still end below its starting loss (no per-step
-# monotonicity claim under dropout noise). Plus: estimate_loss matches a
-# hand-averaged dropout-free loss, TrainReport history lengths, and the AdamW
-# preset (beta2 = 0.95, the GPT-family value) is pinned.
+"""Tests for the real training loop: train_gpt (AdamW + warmup/cosine schedule + global-norm clipping over a BatchLoader) and estimate_loss, capped by overfit-one-batch through the real trainer."""
 
 from std.math import log
 
@@ -35,8 +25,8 @@ comptime BATCH = 2
 
 
 def _dataset() raises -> TokenDataset:
-    # A tiny fixed corpus; two non-overlapping windows of length SEQ_LEN fill one
-    # batch of BATCH sequences (size 9 -> window starts 0 and 4).
+    """A tiny fixed corpus; two non-overlapping windows of length SEQ_LEN fill one batch of BATCH sequences (window starts 0 and 4).
+    """
     var ids = List[Int]()
     var pattern = List[Int]()
     pattern.append(1)
@@ -67,7 +57,7 @@ def _tiny_gpt(dropout: Float64, seed: UInt64) raises -> GPT:
 def _run(
     dropout: Float64, seed: UInt64, max_steps: Int
 ) raises -> List[Float64]:
-    # Run train_gpt and return the per-step training loss history.
+    """Run train_gpt and return the per-step training loss history."""
     var gpt = _tiny_gpt(dropout, seed)
     var train_loader = _loader()
     var val_loader = _loader()
@@ -82,7 +72,7 @@ def _run(
 
 
 def test_overfit_one_batch_crushes_loss() raises:
-    # dropout 0: the trainer drives the fixed batch's loss far below log V.
+    """Dropout 0: the trainer drives the fixed batch's loss far below log V."""
     var losses = _run(0.0, 7, 80)
     var log_v = log(Float64(VOCAB))  # ~2.079
     var init = losses[0]
@@ -97,8 +87,8 @@ def test_overfit_one_batch_crushes_loss() raises:
 
 
 def test_overfit_is_deterministic() raises:
-    # dropout 0 draws no rng, and the loader reshuffle is seeded, so two runs from
-    # the same seed produce bit-identical loss histories.
+    """Dropout 0 draws no rng and the loader reshuffle is seeded, so two runs from the same seed produce bit-identical loss histories.
+    """
     var a = _run(0.0, 11, 40)
     var b = _run(0.0, 11, 40)
     assert_true(len(a) == len(b), "history length drift")
@@ -107,8 +97,8 @@ def test_overfit_is_deterministic() raises:
 
 
 def test_dropout_run_ends_below_init() raises:
-    # dropout 0.1: no per-step monotonicity claim, but the run must still end well
-    # below its starting loss.
+    """Dropout 0.1: no per-step monotonicity claim, but the run must still end well below its starting loss.
+    """
     var losses = _run(0.1, 21, 80)
     var init = losses[0]
     var final = losses[len(losses) - 1]
@@ -122,8 +112,8 @@ def test_dropout_run_ends_below_init() raises:
 
 
 def test_estimate_loss_matches_hand_average() raises:
-    # estimate_loss uses the dropout-free forward, averaged over the batch. Build
-    # it by hand from gpt.forward over the same sequences and compare.
+    """Compare estimate_loss (dropout-free forward, averaged over the batch) to a hand-built average of gpt.forward over the same sequences.
+    """
     var gpt = _tiny_gpt(0.0, 3)
     var loader = _loader()
     var got = estimate_loss(gpt, loader, 1)
@@ -146,7 +136,7 @@ def test_estimate_loss_matches_hand_average() raises:
 
 
 def test_estimate_loss_preserves_cursor() raises:
-    # estimate_loss must not disturb a shared loader's position.
+    """Verify estimate_loss does not disturb a shared loader's position."""
     var gpt = _tiny_gpt(0.0, 3)
     var loader = _loader()
     var before = loader.cursor
@@ -155,6 +145,8 @@ def test_estimate_loss_preserves_cursor() raises:
 
 
 def test_train_report_history_lengths() raises:
+    """Per-step histories have one entry per step and evals fire at the expected steps.
+    """
     var gpt = _tiny_gpt(0.0, 5)
     var train_loader = _loader()
     var val_loader = _loader()
@@ -176,11 +168,8 @@ def test_train_report_history_lengths() raises:
 
 
 def test_segmented_resume_matches_straight_run() raises:
-    # Training in two segments through train_gpt — [0, k) then [k, n) with the
-    # optimizer moments carried across via init_m/init_v and start_step — must
-    # reproduce a single [0, n) run bit-for-bit (dropout 0, fixed batch). This
-    # exercises train_gpt's own resume path: the step-counter/schedule offset, the
-    # threaded m/v, and the loader-position reconstruction.
+    """Training in two segments [0, k) then [k, n) with the optimizer moments carried across via init_m/init_v and start_step reproduces a single [0, n) run bit-for-bit, exercising the schedule offset, threaded m/v, and loader-position reconstruction.
+    """
     var n = 12
     var k = 5
 
@@ -232,7 +221,7 @@ def test_segmented_resume_matches_straight_run() raises:
 
 
 def test_adamw_config_defaults_pinned() raises:
-    # The GPT-training preset — beta2 is 0.95, NOT Adam's 0.999 habit.
+    """Pin the GPT-training preset: beta2 is 0.95, not Adam's 0.999 habit."""
     var oc = AdamWConfig.gpt2_defaults()
     assert_true(oc.beta1 == 0.9, "beta1 default")
     assert_true(oc.beta2 == 0.95, "beta2 must be 0.95 (GPT-family), not 0.999")
@@ -242,6 +231,8 @@ def test_adamw_config_defaults_pinned() raises:
 
 
 def test_adamw_config_validate() raises:
+    """Valid config passes validate; out-of-range beta2, eps, and grad_clip each raise.
+    """
     AdamWConfig.gpt2_defaults().validate()
     with assert_raises(contains="beta2 must be in"):
         AdamWConfig(0.9, 1.0, 1e-8, 0.1, 1.0).validate()

@@ -1,21 +1,20 @@
-# Make the trained Shakespeare checkpoint SPEAK — the payoff of the generation
-# chapter, and the first time this project's model produces text end to end.
-#
-# It loads the checkpoint that examples/train_gpt_shakespeare.mojo saved, rebuilds
-# the same character tokenizer deterministically from the corpus, and prints the
-# continuation of a single one-newline prompt ("start of a line of dialogue")
-# under FOUR decoding policies — greedy, temperature 0.8, top-k 40, top-p 0.9 —
-# so the "safe vs surprising" trade-off is visible in one screen. Seeded, so the
-# text is reproducible.
-#
-# Run (needs the Part XIV checkpoint on disk):
-#     pixi run mojo run -I src examples/train_gpt_shakespeare.mojo   # writes it
-#     pixi run mojo run -I src examples/generate_shakespeare.mojo    # this file
-#
-# The model shape constants below are DUPLICATED from train_gpt_shakespeare.mojo
-# on purpose — examples don't import one another, and the checkpoint header's
-# shape validation turns any drift between the two into a named load error rather
-# than silent garbage. If you retune the trainer, retune here too.
+"""Make the trained Shakespeare checkpoint speak: generate text end to end.
+
+Loads the checkpoint that examples/train_gpt_shakespeare.mojo saved, rebuilds the
+same character tokenizer deterministically from the corpus, and prints the
+continuation of a single one-newline prompt under four decoding policies (greedy,
+temperature 0.8, top-k 40, top-p 0.9) so the safe-vs-surprising trade-off is
+visible in one screen. Seeded, so the text is reproducible.
+
+Run (needs the checkpoint on disk):
+    pixi run mojo run -I src examples/train_gpt_shakespeare.mojo   # writes it
+    pixi run mojo run -I src examples/generate_shakespeare.mojo    # this file
+
+The model shape constants below are duplicated from train_gpt_shakespeare.mojo on
+purpose: examples don't import one another, and the checkpoint header's shape
+validation turns any drift between the two into a named load error rather than
+silent garbage. If you retune the trainer, retune here too.
+"""
 
 from llm.config import GPTConfig
 from llm.data.corpus import load_text
@@ -51,9 +50,18 @@ def _speak(
     prompt: List[Int],
     cfg: SamplerConfig,
 ) raises:
-    # Generate NEW_TOKENS from `prompt` under `cfg` and print the decoded text
-    # (prompt + continuation). Each policy gets its OWN fresh generator seeded the
-    # same way, so the four samples are directly comparable and reproducible.
+    """Generate NEW_TOKENS from `prompt` under `cfg` and print the decoded text.
+
+    Each policy gets its own fresh generator seeded the same way, so the samples
+    are directly comparable and reproducible.
+
+    Args:
+        label: Heading printed above the sample.
+        gpt: The loaded model.
+        tokenizer: Char tokenizer used to decode the output.
+        prompt: Prompt token ids.
+        cfg: Sampler policy (temperature, top-k, top-p).
+    """
     var rng = Rng(SEED)
     var generated = generate(gpt, prompt, NEW_TOKENS, cfg, List[Int](), rng)
     var full = prompt.copy()
@@ -64,6 +72,8 @@ def _speak(
 
 
 def main() raises:
+    """Load the checkpoint and print continuations under four decoding policies.
+    """
     # --- Rebuild the tokenizer and the model shape ------------------------
     var text = load_text(CORPUS_PATH)
     var tokenizer = CharTokenizer.from_text(

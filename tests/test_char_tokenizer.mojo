@@ -1,9 +1,9 @@
-# Tests for the codepoint-level CharTokenizer.
-#
-# The char tokenizer is the simplest tokenizer in the pyramid: its vocab is the
-# sorted set of unique Unicode codepoints in a corpus. These tests lock the
-# invariants a reader relies on — deterministic ids, exact round trips (including
-# non-ASCII and non-BMP codepoints), clear errors, and an exact save/load cycle.
+"""Tests for the codepoint-level CharTokenizer.
+
+Its vocab is the sorted set of unique Unicode codepoints in a corpus. These tests
+lock deterministic ids, exact round trips (including non-ASCII and non-BMP
+codepoints), clear errors, and an exact save/load cycle.
+"""
 
 from std.testing import assert_equal, assert_true, assert_raises, TestSuite
 from std.tempfile import gettempdir
@@ -19,6 +19,7 @@ def _tmp_path(name: String) raises -> String:
 
 
 def test_round_trip_ascii() raises:
+    """ASCII text round-trips exactly through encode/decode."""
     var text = String("Hello, World! 123")
     var tok = CharTokenizer.from_text(text)
     var ids = tok.encode(text)
@@ -26,7 +27,8 @@ def test_round_trip_ascii() raises:
 
 
 def test_round_trip_unicode() raises:
-    # ä (2-byte), € (3-byte), 🎉 (4-byte, non-BMP) all round-trip exactly.
+    """ä (2-byte), € (3-byte), and 🎉 (4-byte, non-BMP) all round-trip exactly.
+    """
     var text = String("näïve € 🎉 café")
     var tok = CharTokenizer.from_text(text)
     var ids = tok.encode(text)
@@ -34,8 +36,8 @@ def test_round_trip_unicode() raises:
 
 
 def test_deterministic_ids() raises:
-    # Same corpus built twice -> identical vocab and identical encodings; the
-    # vocab is ordered by codepoint value, so ids never depend on a seed.
+    """The vocab is ordered by codepoint value, so ids never depend on a seed: the
+    same corpus built twice gives identical encodings."""
     var text = String("cba cba")
     var tok_a = CharTokenizer.from_text(text)
     var tok_b = CharTokenizer.from_text(text)
@@ -54,24 +56,27 @@ def test_deterministic_ids() raises:
 
 
 def test_vocab_size() raises:
-    # "aabbc" has 3 unique codepoints (a, b, c).
+    """Vocab size is the count of unique codepoints ("aabbc" -> 3)."""
     var tok = CharTokenizer.from_text(String("aabbc"))
     assert_equal(tok.vocab_size(), 3)
 
 
 def test_unknown_char_raises() raises:
+    """Encoding a character absent from the corpus raises."""
     var tok = CharTokenizer.from_text(String("abc"))
     with assert_raises():
         _ = tok.encode(String("z"))  # 'z' was never in the corpus
 
 
 def test_bad_id_raises() raises:
+    """Decoding an out-of-range id raises."""
     var tok = CharTokenizer.from_text(String("abc"))  # vocab_size == 3
     with assert_raises():
         _ = tok.decode([3])  # id 3 is out of range (valid ids are 0..2)
 
 
 def test_save_load_round_trip() raises:
+    """A saved tokenizer reloads with identical vocab size and encodings."""
     var text = String("the quick brown fox — äöü")
     var tok = CharTokenizer.from_text(text)
     var path = _tmp_path("char_tok_roundtrip.chartok")
@@ -88,6 +93,7 @@ def test_save_load_round_trip() raises:
 
 
 def test_load_bad_magic_raises() raises:
+    """Loading a file with a wrong magic header raises."""
     var path = _tmp_path("char_tok_badmagic.chartok")
     with open(path, "w") as f:
         f.write(String("NOTATOKENIZER v1\n0\n"))

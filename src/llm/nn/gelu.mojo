@@ -1,14 +1,11 @@
-# GELU activation — the tanh approximation.
-#
-#     gelu(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
-#
-# This is deliberately the *tanh approximation*, not the erf-exact GELU. GPT-2's
-# released weights were trained against this exact form, so reproducing its logits
-# demands it — the erf variant differs in the 4th decimal and would drift parity.
-#
-# GELU is stateless and parameter-free, so it lives as free functions, not a
-# struct: `gelu` for one scalar, `gelu_rows` mapping it over a Tensor2D. Neither
-# raises — the tanh form is finite for every finite input.
+"""GELU activation — the tanh approximation.
+
+    gelu(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+
+Deliberately the tanh approximation, not the erf-exact GELU: GPT-2's released
+weights were trained against this form, and the erf variant differs in the 4th
+decimal. Stateless free functions, not a struct.
+"""
 
 from std.math import sqrt, tanh, pi
 
@@ -27,15 +24,27 @@ comptime GELU_CUBIC = 0.044715
 
 
 def gelu(x: Float64) -> Float64:
-    # One scalar through the tanh-approximation GELU. Pure; allocates nothing;
-    # cannot raise (finite for every finite x).
+    """One scalar through the tanh-approximation GELU.
+
+    Args:
+        x: Input scalar.
+
+    Returns:
+        The value gelu(x). Pure; allocates nothing.
+    """
     var inner = SQRT_2_OVER_PI * (x + GELU_CUBIC * x * x * x)
     return 0.5 * x * (1.0 + tanh(inner))
 
 
 def gelu_rows(x: Tensor2D) -> Tensor2D:
-    # Elementwise GELU over an [N, C] tensor -> [N, C]. Reads x; allocates the
-    # result; cannot raise. Same math as `gelu` applied to every element.
+    """Apply GELU elementwise over a tensor.
+
+    Args:
+        x: Input, shape [N, C].
+
+    Returns:
+        GELU applied to every element, shape [N, C]. Allocates; reads x only.
+    """
     var out = zeros_2d(x.rows, x.cols)
     for r in range(x.rows):
         for c in range(x.cols):
@@ -44,16 +53,20 @@ def gelu_rows(x: Tensor2D) -> Tensor2D:
 
 
 def gelu_derivative(x: Float64) -> Float64:
-    # d/dx of the tanh-approximation GELU. Write the forward as
-    #     gelu(x) = 0.5 x (1 + tanh(u)),   u = k (x + c x^3),
-    # with k = SQRT_2_OVER_PI and c = GELU_CUBIC. The product rule gives
-    #     gelu'(x) = 0.5 (1 + tanh(u)) + 0.5 x * sech^2(u) * u'
-    # and, using sech^2(u) = 1 - tanh^2(u) and u' = k (1 + 3 c x^2),
-    #     gelu'(x) = 0.5 (1 + tanh(u)) + 0.5 x (1 - tanh^2(u)) k (1 + 3 c x^2).
-    # Pure; allocates nothing; cannot raise (tanh is finite for every finite x).
-    # The tanh form is smooth everywhere — no ReLU-style kink — so its derivative
-    # has no discontinuity for a finite difference to trip over. Asymptotes:
-    # gelu'(x) -> 1 as x -> +inf and -> 0 as x -> -inf.
+    """Derivative d/dx of the tanh-approximation GELU.
+
+    With u = k(x + c*x^3), k = SQRT_2_OVER_PI, c = GELU_CUBIC, the product rule
+    and sech^2(u) = 1 - tanh^2(u), u' = k(1 + 3c*x^2) give
+
+        gelu'(x) = 0.5(1 + tanh(u)) + 0.5*x*(1 - tanh^2(u))*k*(1 + 3c*x^2).
+
+    Args:
+        x: Input scalar.
+
+    Returns:
+        The value gelu'(x). Pure; allocates nothing. Smooth everywhere (no
+        ReLU-style kink).
+    """
     var inner = SQRT_2_OVER_PI * (x + GELU_CUBIC * x * x * x)
     var t = tanh(inner)
     var d_inner = SQRT_2_OVER_PI * (1.0 + 3.0 * GELU_CUBIC * x * x)
@@ -61,12 +74,21 @@ def gelu_derivative(x: Float64) -> Float64:
 
 
 def gelu_rows_backward(x: Tensor2D, d_out: Tensor2D) raises -> Tensor2D:
-    # VJP of gelu_rows. GELU is elementwise, so its Jacobian is diagonal and the
-    # backward is a plain elementwise product: dL/dx[i, j] = d_out[i, j] *
-    # gelu_derivative(x[i, j]). The cache is x itself — the input — because the
-    # cheap tanh terms are recomputed here rather than stored. Shapes [N, C] and
-    # [N, C] -> [N, C]. Reads its args; allocates the result; raises on a shape
-    # mismatch (x and d_out must line up entry for entry).
+    """VJP of gelu_rows: elementwise `d_out * gelu_derivative(x)`.
+
+    GELU is elementwise, so its Jacobian is diagonal. The cache is x itself; the
+    cheap tanh terms are recomputed here rather than stored.
+
+    Args:
+        x: Forward input, shape [N, C].
+        d_out: Upstream gradient, shape [N, C].
+
+    Returns:
+        Gradient dL/dx, shape [N, C]. Allocates; reads its args.
+
+    Raises:
+        Error: If x and d_out shapes do not match.
+    """
     if x.rows != d_out.rows or x.cols != d_out.cols:
         raise Error("gelu_rows_backward shape mismatch")
     var out = zeros_2d(x.rows, x.cols)

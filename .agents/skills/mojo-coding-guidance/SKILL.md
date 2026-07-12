@@ -55,34 +55,72 @@ B = batch size        T = sequence length     C = model dimension (d_model)
 H = number of heads   D = head dimension       V = vocabulary size
 ```
 
-File header on every math-heavy file:
+Short math symbols (`q`, `k`, `scores`) are fine **only** next to a shape
+comment. Everywhere else use descriptive names.
+
+Shapes live in the docstrings described next (in `Args:`/`Returns:`) and in
+`# [B, T, C]`-style comments inside dense loops.
+
+---
+
+## Docstrings — Google style, triple-quoted, mandatory
+
+**Every module, struct, and public function/method carries a real triple-quoted
+docstring in Google style.** Not `#`-comment doc blocks — those are gone. The doc
+tooling extracts docstrings, and the Mojo formatter/linter validates them, so
+this is the house style, not a preference. Keep them **short: what it does and
+why, nothing more.** Fold the four facts a caller needs — **shapes, whether it
+mutates, whether it allocates, whether it can raise** — into the sections below.
+
+Rules:
+
+- **Module docstring** is the first statement in the file, **before the imports.**
+  One-line summary; add at most one or two sentences of *why* if non-obvious.
+- **Struct docstring** is the first statement in the struct body — usually one line.
+- **Function/method docstring** is the first statement in the body, with
+  `Args:` / `Returns:` / `Raises:` sections. **Omit any section that does not
+  apply** (no params → no `Args:`; returns nothing → no `Returns:`; cannot raise
+  → no `Raises:`). Put each argument's shape in brackets; note **allocation and
+  mutation** tersely in `Returns:`; document raising via `Raises:` (`Error: <when>`).
+- Summary line starts with a capital (the linter enforces this); wrap a leading
+  code identifier in backticks if it would otherwise be lowercase.
+- **No plan/spec references** anywhere in docstrings or comments — no `Part XI`,
+  `D5`, "roadmap criterion", `§5`, `notes/part-*.md`. State the reason directly
+  (`mixed tolerance 1e-7 + 1e-5*|n|`, not "the D5 tolerance"). External prior art
+  (`nanoGPT`, `minbpe`, GPT-2, a paper) is fine to cite.
+
+Module docstring (first thing in the file):
 
 ```mojo
-# Scaled dot-product and multi-head attention.
-# Shapes:
-#   x:      [B, T, C]
-#   q,k,v:  [B, H, T, D]
-#   scores: [B, H, T, T]
+"""Scaled dot-product and multi-head attention.
+
+Shapes: x [B, T, C]; q,k,v [B, H, T, D]; scores [B, H, T, T].
+"""
+
+from llm.tensor.tensor2d import Tensor2D
 ```
 
-Function contract on every public tensor function — shapes in, shapes out, and
-the four facts a caller needs:
+Public function — the canonical shape:
 
 ```mojo
-# Row-wise numerically stable softmax.
-# Input:  scores [rows, cols]
-# Output: probs  [rows, cols]  (each row sums to ~1)
-# Allocates a new tensor; does not mutate the input; does not raise.
-def softmax_rows(scores: Tensor2D) -> Tensor2D:
+def softmax_rows(scores: Tensor2D) raises -> Tensor2D:
+    """Row-wise numerically stable softmax (subtract row max before exp).
+
+    Args:
+        scores: Input logits, shape [rows, cols].
+
+    Returns:
+        Probabilities, shape [rows, cols], each row summing to ~1. Allocates a
+        new tensor; does not mutate the input.
+
+    Raises:
+        Error: If scores has zero columns.
+    """
     ...
 ```
 
-The four facts: **shapes**, whether it **mutates**, whether it **allocates**,
-whether it can **raise**. Prefer a real docstring on public APIs (the doc tooling
-extracts it) and a shape comment inside dense loops.
-
-Short math symbols (`q`, `k`, `scores`) are fine **only** next to a shape
-comment. Everywhere else use descriptive names.
+Keep `# [B, T, C]`-style shape comments inside dense loops — those stay as
+comments; only the module/struct/function documentation moves into docstrings.
 
 ---
 

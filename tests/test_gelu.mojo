@@ -1,10 +1,9 @@
-# Tests for GELU — the tanh approximation GPT-2 was trained with.
-#
-# The frozen goldens pin the *tanh* form specifically. The erf-exact GELU differs
-# in the 4th decimal (at x = 1 it gives 0.8413447 vs the tanh form's 0.8411920),
-# so the 1e-9 tolerance rejects the wrong variant — which matters because GPT-2's
-# released weights were trained against the tanh form and logit parity would drift
-# on erf. gelu_rows must agree with scalar gelu elementwise.
+"""Tests for GELU — the tanh approximation GPT-2 was trained with.
+
+The frozen goldens pin the tanh form; the tight tolerance rejects the erf-exact
+variant, which would drift GPT-2's logit parity. gelu_rows must agree with scalar
+gelu elementwise.
+"""
 
 from std.testing import assert_almost_equal, assert_true, TestSuite
 
@@ -13,7 +12,8 @@ from llm.tensor.tensor2d import from_rows
 
 
 def test_gelu_scalar_goldens() raises:
-    # Goldens from tests/oracles/nn_reference.py ("GELU (tanh approx)").
+    """Scalar gelu matches the tanh-approx goldens from tests/oracles/nn_reference.py.
+    """
     assert_almost_equal(gelu(-3.0), -0.0036373920817729943, atol=1e-12)
     assert_almost_equal(gelu(-1.0), -0.1588080093917233, atol=1e-12)
     assert_almost_equal(gelu(-0.5), -0.15428599017485606, atol=1e-12)
@@ -24,22 +24,25 @@ def test_gelu_scalar_goldens() raises:
 
 
 def test_gelu_rejects_erf_variant() raises:
-    # The erf-exact GELU at x = 1 is 0.8413447460685429. Our tanh value must be
-    # measurably different, or the two forms are being confused.
+    """The tanh gelu(1.0) is measurably far from the erf-exact GELU, not confused with it.
+    """
+    # The erf-exact GELU at x = 1 is 0.8413447460685429; our tanh value must differ.
     assert_true(abs(gelu(1.0) - 0.8413447460685429) > 1e-4)
 
 
 def test_gelu_zero() raises:
+    """GELU of zero is exactly 0."""
     assert_almost_equal(gelu(0.0), 0.0, atol=1e-15)
 
 
 def test_gelu_asymptotes() raises:
-    # Large positive x -> ~x (the gate saturates to 1); large negative x -> ~0.
+    """Large positive x -> ~x (gate saturates to 1); large negative x -> ~0."""
     assert_almost_equal(gelu(10.0), 10.0, atol=1e-6)
     assert_almost_equal(gelu(-10.0), 0.0, atol=1e-6)
 
 
 def test_gelu_rows_matches_scalar_elementwise() raises:
+    """The gelu_rows kernel agrees with scalar gelu at every element."""
     var x = from_rows([[-3.0, -0.5, 0.0], [0.5, 1.0, 3.0]])
     var y = gelu_rows(x)
     for r in range(x.rows):

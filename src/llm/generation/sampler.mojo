@@ -1,30 +1,38 @@
-# Sampling a token from a probability distribution.
-#
-# The one primitive generation needs before anything fancier: draw an index from
-# a categorical distribution. It walks the cumulative distribution (inverse-CDF
-# sampling) using a single uniform draw, so the same seeded Rng that shuffles
-# batches also makes generation reproducible. Top-k / top-p and the real
-# generate loop build on this later.
+"""Sampling a token from a probability distribution.
+
+The primitive generation needs before anything fancier: draw an index from a
+categorical distribution by inverse-CDF sampling with a single uniform draw, so
+the same seeded Rng that shuffles batches also makes generation reproducible.
+Top-k / top-p filters and the generate loop build on this.
+"""
 
 from llm.tensor.ops import argmax, softmax_row_temperature
 from llm.utils.random import Rng
 
 
 def sample_categorical(probs: List[Float64], mut rng: Rng) raises -> Int:
-    # Draw an index i with probability probs[i] by inverse-CDF sampling: take a
-    # threshold in [0, total) and return the first i where the running cumulative
-    # sum exceeds it. Raises on an empty distribution, a negative entry, or a
-    # total that is not ~1 (tolerance 1e-6), catching un-normalized input early.
-    # Mutates rng (consumes one draw).
-    #
-    # The threshold is rng.uniform() * total, NOT rng.uniform(). Scaling by the
-    # actual total matters because the sum is only required to be within 1e-6 of
-    # 1: an un-scaled u could land in the gap [total, 1) and fall through the loop
-    # to the last index — which might be a zero-probability entry. Scaling keeps
-    # u < total strictly (uniform() < 1), so every draw resolves inside the real
-    # cumulative range and a zero-probability entry (which adds nothing to the
-    # sum) can never be selected. The final `return` is then only a defensive
-    # backstop for floating-point rounding at the very top.
+    """Draw an index i with probability probs[i] by inverse-CDF sampling.
+
+    Take a threshold in [0, total) and return the first i where the running
+    cumulative sum exceeds it. The threshold is rng.uniform() * total, not
+    rng.uniform(): because the sum is only required to be within 1e-6 of 1, an
+    un-scaled draw could land in the gap [total, 1) and fall through to the last
+    index (possibly a zero-probability entry). Scaling keeps the draw strictly
+    below total, so every draw resolves inside the real cumulative range and a
+    zero-probability entry can never be selected. The final return is only a
+    defensive backstop for floating-point rounding.
+
+    Args:
+        probs: A categorical distribution over n outcomes, summing to ~1.
+        rng: The random stream; consumes exactly one draw.
+
+    Returns:
+        The sampled index in [0, n).
+
+    Raises:
+        Error: On an empty distribution, a negative entry, or a total that is not
+            within 1e-6 of 1.
+    """
     var n = len(probs)
     if n == 0:
         raise Error("sample_categorical: empty distribution")
@@ -69,13 +77,20 @@ def sample_categorical(probs: List[Float64], mut rng: Rng) raises -> Int:
 
 
 def _order_by_prob_desc(probs: List[Float64]) -> List[Int]:
-    # Return the indices 0..n-1 ordered by probability DESCENDING, ties broken by
-    # ascending index (lower index first). This single ordering serves both
-    # filters and encodes the one tie rule the whole part shares with argmax
-    # (first-wins). Bottom-up merge sort: O(n log n) and stable, which both
-    # matter at n = 50257 (the BPE vocab in the next part) where an O(n^2) scan
-    # would be a real defect even though the n = 11 tests never feel it.
-    # Allocates two index buffers; does not mutate probs; draws no rng.
+    """Order the indices 0..n-1 by probability descending, ties to lower index.
+
+    This single ordering serves both filters and encodes the same first-wins tie
+    rule as argmax. Bottom-up merge sort: O(n log n) and stable, which both
+    matter at a full BPE vocab (n = 50257) where an O(n^2) scan would be a real
+    defect even though the small tests never feel it.
+
+    Args:
+        probs: The distribution to order.
+
+    Returns:
+        The indices sorted by descending probability, ties by ascending index.
+        Allocates two index buffers; does not mutate probs.
+    """
     var n = len(probs)
     var a = List[Int]()
     for i in range(n):
@@ -137,11 +152,19 @@ def _order_by_prob_desc(probs: List[Float64]) -> List[Int]:
 
 
 def _renormalize(probs: List[Float64]) raises -> List[Float64]:
-    # Divide a non-negative vector by its sum so it sums to 1. Raises if the sum
-    # is not positive (every kept mass zeroed out) — a filter that keeps at least
-    # one token from a softmax distribution can never hit this, so it is a genuine
-    # "the input was not a valid distribution" signal, not a normal path.
-    # Allocates the result; does not mutate the input.
+    """Divide a non-negative vector by its sum so it sums to 1.
+
+    Args:
+        probs: A non-negative vector with positive sum.
+
+    Returns:
+        The renormalized vector. Allocates it; does not mutate the input.
+
+    Raises:
+        Error: If the sum is not positive (every kept mass zeroed out). A filter
+            that keeps at least one token from a softmax distribution can never
+            hit this, so it signals input that was not a valid distribution.
+    """
     var total = 0.0
     for i in range(len(probs)):
         total += probs[i]
@@ -158,15 +181,25 @@ def _renormalize(probs: List[Float64]) raises -> List[Float64]:
 
 
 def filter_top_k(probs: List[Float64], k: Int) raises -> List[Float64]:
-    # Keep the k highest-probability entries, zero the rest, renormalize to sum 1.
-    # Shapes: probs [V] -> [V]. Does not mutate probs; allocates the result; draws
-    # NO rng. Raises on k < 0 or an empty input.
-    #
-    # Sentinels and edges: k == 0 is DISABLED (identity — the documented "off"
-    # value used by SamplerConfig); k >= V is also the identity (nothing to drop);
-    # k == 1 yields a one-hot at the argmax (greedy-by-filter). A tie at the k-th
-    # boundary keeps the LOWER index (the shared first-wins rule), because
-    # _order_by_prob_desc breaks equal probabilities toward the smaller index.
+    """Keep the k highest-probability entries, zero the rest, renormalize to 1.
+
+    Sentinels and edges: k == 0 is disabled (identity, the "off" value used by
+    SamplerConfig); k >= V is also the identity (nothing to drop); k == 1 yields
+    a one-hot at the argmax. A tie at the k-th boundary keeps the lower index (the
+    shared first-wins rule), because _order_by_prob_desc breaks equal
+    probabilities toward the smaller index.
+
+    Args:
+        probs: Input distribution, shape [V].
+        k: How many top entries to keep; must be non-negative.
+
+    Returns:
+        The filtered distribution, shape [V]. Does not mutate probs; allocates
+        the result; draws no rng.
+
+    Raises:
+        Error: On k < 0 or an empty input.
+    """
     var n = len(probs)
     if n == 0:
         raise Error("filter_top_k: empty distribution")
@@ -186,17 +219,27 @@ def filter_top_k(probs: List[Float64], k: Int) raises -> List[Float64]:
 
 
 def filter_top_p(probs: List[Float64], p: Float64) raises -> List[Float64]:
-    # Nucleus filter: sort by probability descending (ties: lower index first),
-    # keep the smallest prefix whose cumulative probability is >= p, zero the
-    # rest, renormalize. Always keeps at least one token, so a tiny p collapses to
-    # the argmax one-hot rather than an empty distribution.
-    # Shapes: probs [V] -> [V]. Does not mutate probs; allocates the result; draws
-    # NO rng. Raises on p <= 0, p > 1, or an empty input.
-    #
-    # p >= 1.0 is the DISABLED identity and is returned BEFORE any cumulative sum:
-    # deciding "disabled" via `cumsum >= 1.0` would let a distribution whose mass
-    # rounds to 0.999... silently drop its tail. The explicit short-circuit is the
-    # honest gate.
+    """Nucleus filter: keep the smallest high-probability prefix reaching p.
+
+    Sort by probability descending (ties: lower index first), keep the smallest
+    prefix whose cumulative probability is >= p, zero the rest, renormalize.
+    Always keeps at least one token, so a tiny p collapses to the argmax one-hot
+    rather than an empty distribution. p >= 1.0 is the disabled identity and is
+    returned before any cumulative sum, because deciding "disabled" via cumsum
+    >= 1.0 would let a distribution whose mass rounds to 0.999... silently drop
+    its tail.
+
+    Args:
+        probs: Input distribution, shape [V].
+        p: Nucleus threshold in (0, 1]; 1.0 is disabled.
+
+    Returns:
+        The filtered distribution, shape [V]. Does not mutate probs; allocates
+        the result; draws no rng.
+
+    Raises:
+        Error: On p <= 0, p > 1, or an empty input.
+    """
     var n = len(probs)
     if n == 0:
         raise Error("filter_top_p: empty distribution")
@@ -224,27 +267,44 @@ def filter_top_p(probs: List[Float64], p: Float64) raises -> List[Float64]:
 
 @fieldwise_init
 struct SamplerConfig(Copyable, Movable):
-    # One policy struct composing the four standard decoding knobs. Greedy is not
-    # a separate mode but a POINT in this space: temperature 0.0 means argmax.
+    """One policy struct composing the standard decoding knobs.
+
+    Greedy is not a separate mode but a point in this space: temperature 0.0
+    means argmax.
+    """
+
     var temperature: Float64  # 0.0 = greedy (argmax, no rng draw); else softmax T
     var top_k: Int  # 0 = disabled; else keep the k highest-probability tokens
     var top_p: Float64  # 1.0 = disabled; else nucleus threshold in (0, 1)
 
     @staticmethod
     def greedy() -> SamplerConfig:
-        # Deterministic argmax decoding: (temperature 0, no filters).
+        """Build a deterministic argmax policy (temperature 0, no filters).
+
+        Returns:
+            A greedy SamplerConfig.
+        """
         return SamplerConfig(0.0, 0, 1.0)
 
     @staticmethod
     def standard() -> SamplerConfig:
-        # Plain temperature-1 sampling, no truncation: (1.0, disabled, disabled).
+        """Build a plain temperature-1 policy with no truncation.
+
+        Returns:
+            A SamplerConfig with temperature 1.0 and both filters disabled.
+        """
         return SamplerConfig(1.0, 0, 1.0)
 
     def validate(self) raises:
-        # Reject an out-of-range field, naming it. temperature 0 is VALID (the
-        # greedy sentinel); only a negative temperature is rejected. top_k must be
-        # non-negative (0 disabled); top_p must be in (0, 1] (1.0 disabled). Reads
-        # self; allocates nothing; draws no rng.
+        """Validate the policy fields.
+
+        temperature 0 is valid (the greedy sentinel); only a negative temperature
+        is rejected. top_k must be non-negative (0 disabled); top_p must be in
+        (0, 1] (1.0 disabled). Allocates nothing; draws no rng.
+
+        Raises:
+            Error: On an out-of-range field, naming it.
+        """
         if self.temperature < 0.0:
             raise Error(
                 "SamplerConfig: temperature must be >= 0 (0 = greedy), got "
@@ -265,24 +325,30 @@ struct SamplerConfig(Copyable, Movable):
 def sample_next(
     logits: Span[Float64, _], cfg: SamplerConfig, mut rng: Rng
 ) raises -> Int:
-    # Turn one logit row [V] into the next token id under the policy `cfg`. This is
-    # the SINGLE decoding entry point. `logits` is a borrowed `Span` view — the
-    # caller passes a Tensor2D row directly (no copy). Reads logits; allocates the
-    # intermediate distributions; raises on an invalid config or (in the sampled
-    # path) a degenerate distribution.
-    #
-    # rng-draw count — the invariant the tests pin:
-    #   * greedy (temperature == 0.0): ZERO draws. It is pure argmax, so switching
-    #     a run to greedy never perturbs any other seeded draw stream (the same
-    #     "disabling randomness consumes no draws" invariant dropout established).
-    #   * sampled (temperature > 0): EXACTLY ONE draw, consumed by
-    #     sample_categorical at the end of the pipeline.
-    #
-    # Pipeline (sampled path), each stage renormalizing:
-    #   softmax_row_temperature(logits, T)
-    #     -> filter_top_k (if k > 0) -> filter_top_p (if p < 1) -> sample_categorical
-    # softmax_row_temperature raises on T <= 0, so temperature 0.0 is an
-    # unambiguous greedy sentinel with no valid sampled interpretation.
+    """Turn one logit row [V] into the next token id under the policy `cfg`.
+
+    This is the single decoding entry point. rng-draw count is an invariant the
+    tests pin: greedy (temperature == 0.0) draws zero, so switching a run to
+    greedy never perturbs another seeded stream; sampled (temperature > 0) draws
+    exactly one, consumed by sample_categorical at the end of the pipeline.
+
+    Sampled pipeline, each stage renormalizing: softmax_row_temperature(logits, T)
+    -> filter_top_k (if k > 0) -> filter_top_p (if p < 1) -> sample_categorical.
+    softmax_row_temperature raises on T <= 0, so temperature 0.0 is an
+    unambiguous greedy sentinel with no valid sampled interpretation.
+
+    Args:
+        logits: One logit row, shape [V], as a borrowed Span view (no copy).
+        cfg: The decoding policy.
+        rng: The random stream; drawn once on the sampled path, never on greedy.
+
+    Returns:
+        The next token id in [0, V).
+
+    Raises:
+        Error: On an invalid config or, on the sampled path, a degenerate
+            distribution.
+    """
     cfg.validate()
     if cfg.temperature == 0.0:
         return argmax(logits)  # greedy: no rng draw

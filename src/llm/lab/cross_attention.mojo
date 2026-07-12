@@ -1,26 +1,17 @@
-# Cross-multi-head attention — the encoder-decoder lab's one genuinely new layer.
-#
-# Cross-attention has TWO inputs: queries come from the decoder stream `x`, keys
-# and values from the encoder `memory`. That is the whole reason it cannot fuse
-# its projections the way GPT-2's self-attention does. Self-attention derives Q,
-# K, V from one sequence, so one Linear(C -> 3C) (`c_attn`) fuses all three.
-# Here Q is a function of `x` and K, V are functions of `memory` — different
-# inputs, different lengths — so only K and V can share a matmul:
-#
-#     q:    Linear(C -> C)    on x       (queries)
-#     kv:   Linear(C -> 2C)   on memory  (keys and values, FUSED)
-#     proj: Linear(C -> C)    on the concatenated head outputs
-#
-# The fusion boundary IS the teaching point: it is drawn exactly where the two
-# inputs meet. Parameter cost is (C²+C) + (2C²+2C) + (C²+C) = 4C²+4C — the same
-# total as self-MHA, only split across three Linears instead of two.
-#
-# No new attention math lives here. The per-head core is the SAME
-# scaled_dot_product_attention Part X built with separate q vs k/v arguments
-# precisely so this layer could consume it (it already accepts T_q != T_k), and
-# its backward is reused unchanged. New here is only the plumbing plus the two
-# input gradients: backward returns d_x (through the q projection) AND d_memory
-# (through the fused kv projection).
+"""Cross-multi-head attention: queries from the decoder, keys/values from memory.
+
+Because Q derives from the decoder stream and K, V from the encoder memory
+(different inputs, different lengths), the projections cannot fully fuse the way
+GPT-2 self-attention does. Only K and V share a matmul:
+
+    q:    Linear(C -> C)    on x       (queries)
+    kv:   Linear(C -> 2C)   on memory  (keys and values, fused)
+    proj: Linear(C -> C)    on the concatenated head outputs
+
+The per-head core reuses scaled_dot_product_attention unchanged (it already
+accepts T_q != T_k); backward returns two input gradients, d_x through the q
+projection and d_memory through the fused kv projection.
+"""
 
 from llm.nn.linear import Linear, LinearCache
 from llm.tensor.ops import concat_cols, slice_cols
@@ -37,11 +28,14 @@ from llm.utils.random import Rng
 
 @fieldwise_init
 struct CrossMHACache(Copyable, Movable):
-    # What CrossMultiHeadAttention.backward needs, mirroring the forward
-    # plumbing: the q Linear's cache (its input x), the kv Linear's cache (its
-    # input memory), one AttentionCache per head, and the output proj Linear's
-    # cache (its input, the concatenated head outputs). Valid only for the
-    # forward call that produced it.
+    """Everything CrossMultiHeadAttention.backward needs from a forward pass.
+
+    Mirrors the forward plumbing: the q Linear cache (input x), the kv Linear
+    cache (input memory), one AttentionCache per head, and the proj Linear cache
+    (its input, the concatenated head outputs). Valid only for the forward call
+    that produced it.
+    """
+
     var q_cache: LinearCache  # holds x                     [T_q, C]
     var kv_cache: LinearCache  # holds memory               [T_k, C]
     var head_caches: List[AttentionCache]  # per head: q,k,v,weights
@@ -50,24 +44,36 @@ struct CrossMHACache(Copyable, Movable):
 
 @fieldwise_init
 struct CrossMHAForward(Copyable, Movable):
-    # forward_cached's output plus the cache its backward consumes.
+    """Output of forward_cached plus the cache its backward consumes."""
+
     var output: Tensor2D  # [T_q, C]
     var cache: CrossMHACache
 
     def split(deinit self, mut cache_slot: CrossMHACache) -> Tensor2D:
-        # Consume this forward: the cache moves into the caller's slot and the
-        # output is returned. Lets a decoder block move the (large) cross-attention
-        # cache into its own cache instead of deep-copying it out of a live struct.
+        """Consume this forward, moving the cache into a slot and returning output.
+
+        Lets a decoder block take the large cross-attention cache without
+        deep-copying it out of a live struct.
+
+        Args:
+            cache_slot: Destination the cache moves into.
+
+        Returns:
+            The output tensor, shape [T_q, C].
+        """
         cache_slot = self.cache^
         return self.output^
 
 
 @fieldwise_init
 struct CrossMHAGrads(Copyable, Movable):
-    # The two input gradients cross-attention produces, one per differentiable
-    # input. d_x flows back through the q projection into the decoder stream;
-    # d_memory flows back through the fused kv projection into the encoder
-    # output. (The mask is constant additive data — no gradient.)
+    """The two input gradients cross-attention produces.
+
+    d_x flows back through the q projection into the decoder stream; d_memory
+    flows back through the fused kv projection into the encoder output. The mask
+    is constant additive data with no gradient.
+    """
+
     var d_x: Tensor2D  # [T_q, C]  through the q projection
     var d_memory: Tensor2D  # [T_k, C]  through the kv projection
 
@@ -83,13 +89,23 @@ struct CrossMultiHeadAttention(Copyable, Movable):
     def init_random(
         mut rng: Rng, d_model: Int, n_heads: Int
     ) raises -> CrossMultiHeadAttention:
-        # A cross-MHA with all three Linears drawn from GPT-2's normal(0, 0.02)
-        # scheme and zero biases. Draw order is q, then kv, then proj (matching
-        # the field order), so a given generator state reproduces the same
-        # layer. Mutates rng (advances its state); allocates the three layers;
-        # deterministic given the generator's state. Raises unless n_heads > 0
-        # and d_model is a positive multiple of n_heads — otherwise the head
-        # width D = C / H is undefined or degenerate.
+        """Build a seeded cross-MHA from GPT-2's normal(0, 0.02) init.
+
+        Draw order is q, then kv, then proj (field order), so a given generator
+        state reproduces the same layer.
+
+        Args:
+            rng: Random generator; its state is advanced.
+            d_model: Model width C; must be a positive multiple of n_heads.
+            n_heads: Number of heads; must be positive.
+
+        Returns:
+            A new layer. Allocates the three Linears.
+
+        Raises:
+            Error: If n_heads <= 0 or d_model is not a positive multiple of
+                n_heads, leaving the head width C / H undefined or degenerate.
+        """
         if n_heads <= 0:
             raise Error(
                 "CrossMultiHeadAttention.init_random: n_heads must be positive,"
@@ -116,9 +132,14 @@ struct CrossMultiHeadAttention(Copyable, Movable):
         return CrossMultiHeadAttention(q^, kv^, proj^, n_heads)
 
     def _check_config(self, c: Int) raises:
-        # @fieldwise_init lets a caller build this struct directly, bypassing
-        # init_random's guard, so re-check n_heads here rather than trap on a
-        # modulo-by-zero below.
+        """Re-check head config, since @fieldwise_init bypasses init_random's guard.
+
+        Args:
+            c: Model width C to validate against n_heads.
+
+        Raises:
+            Error: If n_heads <= 0 or C is not divisible by n_heads.
+        """
         if self.n_heads <= 0:
             raise Error(
                 "CrossMultiHeadAttention: n_heads must be positive, got "
@@ -136,12 +157,22 @@ struct CrossMultiHeadAttention(Copyable, Movable):
     def forward(
         self, x: Tensor2D, memory: Tensor2D, mask: Tensor2D
     ) raises -> Tensor2D:
-        # Cross-attention: x [T_q, C], memory [T_k, C], mask [T_q, T_k] ->
-        # [T_q, C]. Q derives from x, K and V from memory. Reads self only;
-        # allocates the projections, per-head slices, and result; raises on a
-        # feature-count mismatch (via the Linears), an indivisible width, or a
-        # mask shape mismatch (via the core). The caller's mask is applied
-        # unchanged to every head.
+        """Compute cross-attention: Q from x, K and V from memory.
+
+        The caller's mask is applied unchanged to every head.
+
+        Args:
+            x: Decoder queries, shape [T_q, C].
+            memory: Encoder keys/values source, shape [T_k, C].
+            mask: Additive attention mask, shape [T_q, T_k].
+
+        Returns:
+            Attention output, shape [T_q, C]. Reads self only; allocates.
+
+        Raises:
+            Error: On a feature-count mismatch, an indivisible width, or a mask
+                shape mismatch.
+        """
         var c = self.q.weight.value.cols  # in_features of q = C
         self._check_config(c)
         var d_head = c // self.n_heads  # per-head width D = C / H
@@ -169,13 +200,22 @@ struct CrossMultiHeadAttention(Copyable, Movable):
     def forward_cached(
         self, var x: Tensor2D, var memory: Tensor2D, mask: Tensor2D
     ) raises -> CrossMHAForward:
-        # Same computation as forward, additionally capturing the cache backward
-        # needs (the q and kv Linear caches, one AttentionCache per head, and the
-        # proj cache). Takes x and memory by value and moves them into the q and kv
-        # caches; each stage's forward is split into (output, cache) so both pieces
-        # move on with no [T, *] copy. Reads self; allocates the projections,
-        # per-head slices, caches, and result; raises on the same mismatches
-        # forward does. The cache is valid only for this call.
+        """Compute cross-attention and capture the cache backward needs.
+
+        Takes x and memory by value and moves them into the q and kv caches; each
+        stage's forward is split into (output, cache) to avoid a [T, *] copy.
+
+        Args:
+            x: Decoder queries, shape [T_q, C]; moved into the q cache.
+            memory: Encoder keys/values, shape [T_k, C]; moved into the kv cache.
+            mask: Additive attention mask, shape [T_q, T_k].
+
+        Returns:
+            Output [T_q, C] plus a cache valid only for this call. Allocates.
+
+        Raises:
+            Error: On the same mismatches forward raises.
+        """
         var c = self.q.weight.value.cols
         self._check_config(c)
         var d_head = c // self.n_heads
@@ -221,24 +261,24 @@ struct CrossMultiHeadAttention(Copyable, Movable):
     def backward(
         mut self, cache: CrossMHACache, d_out: Tensor2D
     ) raises -> CrossMHAGrads:
-        # Reverse the forward plumbing exactly, right to left, splitting the one
-        # upstream gradient into the two input gradients d_x and d_memory:
-        #   1. d_concat = proj.backward(proj_cache, d_out)      [T_q, C]
-        #   2. split d_concat into H contiguous [T_q, D] head slices; per head
-        #      run the core backward to get d_q_h [T_q, D], d_k_h/d_v_h [T_k, D].
-        #   3. concat the per-head d_q's back to d_q_all        [T_q, C]
-        #      concat the per-head d_k's, d_v's to d_k_all, d_v_all [T_k, C].
-        #   4. d_kv = [d_k_all | d_v_all]                       [T_k, 2C] — the
-        #      SAME K|V column order the forward's kv projection produced. (The
-        #      forward slices k from columns [0, C) and v from [C, 2C); the
-        #      gradient must be reassembled in that order or d_memory and the kv
-        #      parameter grads are silently wrong.)
-        #   5. d_x      = q.backward(q_cache, d_q_all)          [T_q, C]
-        #      d_memory = kv.backward(kv_cache, d_kv)           [T_k, C]
-        # slice_cols and concat_cols are exact inverses, so the column
-        # bookkeeping round-trips. Mutates self.proj, self.q, self.kv parameter
-        # grads (+=); allocates and returns the two input gradients; raises on a
-        # shape/config mismatch.
+        """Reverse the forward plumbing, splitting d_out into d_x and d_memory.
+
+        Backprop runs proj, then per-head core, then reassembles the fused-kv
+        gradient as [d_k | d_v] in the same K|V column order the forward
+        projection produced (or d_memory and the kv grads are silently wrong),
+        then the q and kv projections. Mutates self.proj, self.q, self.kv
+        parameter grads (+=).
+
+        Args:
+            cache: The cache from the matching forward_cached call.
+            d_out: Upstream gradient, shape [T_q, C].
+
+        Returns:
+            d_x [T_q, C] and d_memory [T_k, C]. Allocates.
+
+        Raises:
+            Error: On a shape/config mismatch or a head-count mismatch.
+        """
         var c = self.q.weight.value.cols
         self._check_config(c)
         if len(cache.head_caches) != self.n_heads:
@@ -281,8 +321,8 @@ struct CrossMultiHeadAttention(Copyable, Movable):
         return CrossMHAGrads(d_x^, d_memory^)
 
     def zero_grad(mut self):
-        # Reset every parameter gradient (q, kv, proj — weight and bias each) to
-        # zero. Mutates in place; allocates nothing; cannot raise.
+        """Reset every parameter gradient (q, kv, proj weight and bias) to zero.
+        """
         self.q.weight.zero_grad()
         self.q.bias.zero_grad()
         self.kv.weight.zero_grad()
@@ -291,9 +331,14 @@ struct CrossMultiHeadAttention(Copyable, Movable):
         self.proj.bias.zero_grad()
 
     def apply_sgd(mut self, lr: Float64) raises:
-        # One plain-SGD step (param -= lr * grad) on every parameter tensor.
-        # Mutates the parameter values; raises on a shape mismatch (via
-        # sgd_step, which cannot occur for well-formed layers).
+        """Apply one plain-SGD step (param -= lr * grad) to every parameter.
+
+        Args:
+            lr: Learning rate.
+
+        Raises:
+            Error: On a shape mismatch (never for a well-formed layer).
+        """
         sgd_step(self.q.weight.value, self.q.weight.grad, lr)
         sgd_step(self.q.bias.value, self.q.bias.grad, lr)
         sgd_step(self.kv.weight.value, self.kv.weight.grad, lr)

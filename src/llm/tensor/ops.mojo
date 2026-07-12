@@ -1,17 +1,12 @@
-# Tensor and vector operations built on Tensor2D. Read-only vector inputs are
-# taken as borrowed `Span[Float64, _]` views — a Tensor2D row (via `.row()`) or a
-# List both coerce in, so a per-row copy is never needed on the hot path; owned
-# results are still returned as fresh `List[Float64]`.
-#
-# Everything a small LLM leans on before attention: elementwise add/scale, a
-# physical transpose, matmul in two loop orders (ijk clear, ikj cache-friendly)
-# plus the matvec special case, numerically stable softmax (row, rows, and
-# temperature variants), cross-entropy via logsumexp with its p-y gradient, and
-# argmax for greedy decoding.
-#
-# Numerical discipline throughout: softmax and logsumexp subtract the row max
-# before exponentiating so large logits never overflow, and floats are compared
-# with tolerances (never ==) by the tests that exercise these.
+"""Tensor and vector operations built on Tensor2D.
+
+Read-only vector inputs are borrowed `Span[Float64, _]` views — a Tensor2D row
+(via `.row()`) or a List both coerce in, so no per-row copy on the hot path;
+owned results are fresh `List[Float64]`. Covers elementwise add/scale, transpose,
+matmul in two loop orders plus matvec, numerically stable softmax and
+cross-entropy, and argmax. Softmax and logsumexp subtract the row max before
+exponentiating so large logits never overflow.
+"""
 
 from std.algorithm import parallelize
 from std.collections import List
@@ -34,8 +29,11 @@ comptime _MTB_THREAD_MIN_WORK = 1_000_000
 
 
 def add(a: Tensor2D, b: Tensor2D) raises -> Tensor2D:
-    # Elementwise a + b. Raises on a shape mismatch (a caller error worth
-    # surfacing). Allocates the result.
+    """Elementwise a + b. Allocates the result.
+
+    Raises:
+        Error: On a shape mismatch.
+    """
     if a.rows != b.rows or a.cols != b.cols:
         raise Error("add shape mismatch")
     var out = zeros_2d(a.rows, a.cols)
@@ -46,7 +44,7 @@ def add(a: Tensor2D, b: Tensor2D) raises -> Tensor2D:
 
 
 def scale(a: Tensor2D, s: Float64) -> Tensor2D:
-    # Elementwise a * s. Cannot fail, so non-raising. Allocates the result.
+    """Elementwise a * s. Allocates the result."""
     var out = zeros_2d(a.rows, a.cols)
     for i in range(a.rows):
         for j in range(a.cols):
@@ -55,9 +53,7 @@ def scale(a: Tensor2D, s: Float64) -> Tensor2D:
 
 
 def transpose(a: Tensor2D) -> Tensor2D:
-    # Physical transpose: a new contiguous [cols, rows] tensor. The stride-swap
-    # alternative (a view) waits for the performance chapters where the tradeoff
-    # can be measured. Allocates the result.
+    """Physical transpose: a new contiguous [cols, rows] tensor. Allocates."""
     var out = zeros_2d(a.cols, a.rows)
     for i in range(a.rows):
         for j in range(a.cols):
@@ -69,11 +65,14 @@ def transpose(a: Tensor2D) -> Tensor2D:
 
 
 def slice_cols(a: Tensor2D, start: Int, end: Int) raises -> Tensor2D:
-    # Extract the contiguous column band [start, end) from every row:
-    # [R, C] -> [R, end - start]. This is the head-split primitive — one
-    # projection [T, 3C] carved into contiguous [T, D] slices. Raises unless
-    # 0 <= start < end <= C (an empty or reversed range is a caller bug, not a
-    # silent zero-width result). Allocates the result.
+    """Extract the contiguous column band [start, end) from every row.
+
+    [R, C] -> [R, end - start]. The head-split primitive: one projection [T, 3C]
+    carved into contiguous [T, D] slices. Allocates the result.
+
+    Raises:
+        Error: Unless 0 <= start < end <= cols.
+    """
     if not (0 <= start and start < end and end <= a.cols):
         raise Error(
             "slice_cols: need 0 <= start < end <= cols, got start="
@@ -86,7 +85,7 @@ def slice_cols(a: Tensor2D, start: Int, end: Int) raises -> Tensor2D:
     var width = end - start
     var out = zeros_2d(a.rows, width)
     # The [start, end) band of each row is contiguous in a's flat storage, so
-    # copy it in one shot instead of element by element (same bytes, Class A).
+    # copy it in one shot instead of element by element.
     var pa = a.data.unsafe_ptr()
     var po = out.data.unsafe_ptr()
     for r in range(a.rows):
@@ -95,12 +94,15 @@ def slice_cols(a: Tensor2D, start: Int, end: Int) raises -> Tensor2D:
 
 
 def slice_rows(a: Tensor2D, start: Int, end: Int) raises -> Tensor2D:
-    # Extract the contiguous row band [start, end) with every column:
-    # [R, C] -> [end - start, C]. The row mirror of slice_cols — the KV-cache
-    # decode path uses it to view the filled prefix `[0, length)` of a
-    # capacity-sized buffer as a `[t, C]` tensor. Raises unless
-    # 0 <= start < end <= R (an empty or reversed range is a caller bug, not a
-    # silent zero-height result). Allocates the result.
+    """Extract the contiguous row band [start, end) with every column.
+
+    [R, C] -> [end - start, C]. The row mirror of slice_cols; the KV-cache decode
+    path uses it to view the filled prefix [0, length) of a capacity-sized buffer
+    as a [t, C] tensor. Allocates the result.
+
+    Raises:
+        Error: Unless 0 <= start < end <= rows.
+    """
     if not (0 <= start and start < end and end <= a.rows):
         raise Error(
             "slice_rows: need 0 <= start < end <= rows, got start="
@@ -113,8 +115,7 @@ def slice_rows(a: Tensor2D, start: Int, end: Int) raises -> Tensor2D:
     var height = end - start
     var out = zeros_2d(height, a.cols)
     # Each output row is a whole contiguous row of a — copy the full [start, end)
-    # band of rows in one memcpy per row (same bytes, Class A). This is the KV
-    # decode path's per-token cache view, whose cost grows with context length.
+    # band of rows in one memcpy per row.
     var w = a.cols
     var pa = a.data.unsafe_ptr()
     var po = out.data.unsafe_ptr()
@@ -124,11 +125,14 @@ def slice_rows(a: Tensor2D, start: Int, end: Int) raises -> Tensor2D:
 
 
 def concat_cols(parts: List[Tensor2D]) raises -> Tensor2D:
-    # Join tensors side by side along columns, in list order:
-    # k tensors [R, C_i] -> [R, sum(C_i)]. The head-merge primitive — H head
-    # outputs [T, D] concatenated back to [T, C]. Raises on an empty list (no
-    # row count to adopt) or any row-count mismatch (a ragged concat is a caller
-    # bug). Allocates the result.
+    """Join tensors side by side along columns, in list order.
+
+    k tensors [R, C_i] -> [R, sum(C_i)]. The head-merge primitive: H head outputs
+    [T, D] concatenated back to [T, C]. Allocates the result.
+
+    Raises:
+        Error: On an empty list (no row count to adopt) or a row-count mismatch.
+    """
     if len(parts) == 0:
         raise Error("concat_cols: parts is empty")
     var rows = parts[0].rows
@@ -150,7 +154,7 @@ def concat_cols(parts: List[Tensor2D]) raises -> Tensor2D:
     for i in range(len(parts)):
         var part_cols = parts[i].cols
         # Each part's row is contiguous; drop it into its column band with one
-        # memcpy per row (same bytes, Class A).
+        # memcpy per row.
         var pp = parts[i].data.unsafe_ptr()
         for r in range(rows):
             memcpy(
@@ -166,20 +170,15 @@ def concat_cols(parts: List[Tensor2D]) raises -> Tensor2D:
 
 
 def _simd_dot(a: Span[Float64, _], b: Span[Float64, _]) -> Float64:
-    # Dot product of two contiguous EQUAL-LENGTH f64 spans, vectorized. This is
-    # the one reduction kernel matvec and matmul_transpose_b both consolidate on:
-    # both dot a contiguous row against a contiguous vector.
-    #
-    # Class B, deliberately. The scalar `for k: acc += a[k]*b[k]` sums strictly
-    # left to right; this keeps `4 * W` independent SIMD accumulators, so the
-    # additions are regrouped. Float addition is not associative, so the result
-    # differs from the scalar order by ~k*eps relative (~7e-13 at k=3072) — the
-    # price of breaking the scalar loop's serial add-chain latency for the ~25x
-    # single-thread win the decode path lives on. The regrouping is FIXED by the
-    # length alone (same lanes, same tree, every call), so a given operand pair
-    # yields identical bits no matter who calls it — which is what lets the batch
-    # and cached-step paths, both routed here, stay bit-identical to each other.
-    # The scalar `matmul` stays in this file as the readable/oracle spelling.
+    """Vectorized dot product of two contiguous equal-length f64 spans.
+
+    The one reduction kernel matvec and matmul_transpose_b share. It keeps 4 * W
+    independent SIMD accumulators, so the additions are regrouped relative to a
+    strict left-to-right scalar sum; since float addition is not associative, the
+    result differs by ~k*eps relative (~7e-13 at k=3072) — the price of the ~25x
+    single-thread speedup. The regrouping is fixed by the length alone, so a given
+    operand pair yields identical bits no matter who calls it.
+    """
     comptime W = simd_width_of[DType.float64]()
     var n = len(a)
     var pa = a.unsafe_ptr()
@@ -214,8 +213,14 @@ def _simd_dot(a: Span[Float64, _], b: Span[Float64, _]) -> Float64:
 
 
 def matmul(a: Tensor2D, b: Tensor2D) raises -> Tensor2D:
-    # Clear ijk-order matmul [M, K] @ [K, N] -> [M, N]. The inner loop walks
-    # b[k, j] down a column (strided). Raises on a shape mismatch.
+    """Clear ijk-order matmul [M, K] @ [K, N] -> [M, N].
+
+    The inner loop walks b[k, j] down a column (strided). The readable/oracle
+    spelling; the cache-friendly kernel is the `@` operator. Allocates.
+
+    Raises:
+        Error: On a shape mismatch.
+    """
     if a.cols != b.rows:
         raise Error("matmul shape mismatch")
     var out = zeros_2d(a.rows, b.cols)
@@ -229,24 +234,27 @@ def matmul(a: Tensor2D, b: Tensor2D) raises -> Tensor2D:
 
 
 def matmul_ikj(a: Tensor2D, b: Tensor2D) raises -> Tensor2D:
-    # Same math as matmul, ikj loop order: the inner loop walks b[k, *] and
-    # out[i, *] contiguously along rows, which is cache-friendly and often
-    # several times faster on non-trivial sizes. Raises on a shape mismatch.
-    #
-    # The kernel itself now lives on the tensor as the `@` operator, so this is a
-    # thin delegate — kept as a named entry point for the tests and benchmarks
-    # that call matmul_ikj directly and to sit beside the ijk matmul as its
-    # contrast. ops.mojo imports tensor2d.mojo, so the kernel can only live in one
-    # place; putting it on the tensor keeps `a @ b` self-contained and avoids an
-    # import cycle back into ops.
+    """Cache-friendly ikj-order matmul, same math as matmul but often faster.
+
+    A thin delegate to the `@` operator (where the kernel lives to avoid an
+    import cycle), kept as a named entry point for tests and benchmarks.
+
+    Raises:
+        Error: On a shape mismatch.
+    """
     return a @ b
 
 
 def matvec(a: Tensor2D, x: Span[Float64, _]) raises -> List[Float64]:
-    # Matrix-vector product [M, K] @ [K] -> [M]. The special case that dominates
-    # single-token decoding: each output is one row of a dotted with x. Runs the
-    # Class B SIMD dot per row (so ~k*eps reassociation vs a scalar loop — see
-    # _simd_dot). Raises on a shape mismatch; allocates the result.
+    """Matrix-vector product [M, K] @ [K] -> [M].
+
+    The case that dominates single-token decoding: each output is one row of a
+    dotted with x via the SIMD dot (so ~k*eps reassociation vs a scalar loop, see
+    _simd_dot). Allocates the result.
+
+    Raises:
+        Error: On a shape mismatch.
+    """
     if a.cols != len(x):
         raise Error("matvec shape mismatch")
     var out = List[Float64](capacity=a.rows)  # one row entry per output
@@ -256,19 +264,19 @@ def matvec(a: Tensor2D, x: Span[Float64, _]) raises -> List[Float64]:
 
 
 def matmul_transpose_b(a: Tensor2D, b: Tensor2D) raises -> Tensor2D:
-    # c = a @ b^T WITHOUT materializing b^T: [M, K] @ [N, K]^T -> [M, N] with
-    #     c[i, j] = dot(a[i, :], b[j, :]).
-    # Both a and b share the contraction width K as their COLUMN count (b is
-    # stored un-transposed), so the guard is a.cols == b.cols, not a.cols ==
-    # b.rows. Each output cell is a Class B SIMD dot (see _simd_dot): it computes
-    # the same c[i, j] = sum_k a[i, k] * b[j, k] as matmul(a, transpose(b)), but
-    # regroups the k-sum across SIMD accumulators, so it agrees with that scalar
-    # spelling within ~k*eps (a test pins 1e-12 relative), not bit-for-bit. It
-    # never allocates the [K, N] transpose. The tied LM head uses it to score one
-    # decode row against the [V, C] embedding table without a ~309 MB per-token
-    # transpose copy; because the reduction tree is fixed by K, the batch and
-    # cached-step heads (both routed here) still produce identical bits for a
-    # shared row. Raises on a contraction-width mismatch; allocates the result.
+    """Compute c = a @ b^T without materializing b^T.
+
+    [M, K] @ [N, K]^T -> [M, N] with c[i, j] = dot(a[i, :], b[j, :]). Both share
+    the contraction width K as their column count (b is stored un-transposed), so
+    the guard is a.cols == b.cols. Each cell is a SIMD dot that regroups the
+    k-sum, agreeing with matmul(a, transpose(b)) within ~k*eps (a test pins 1e-12
+    relative), not bit-for-bit. The tied LM head uses it to score one decode row
+    against the [V, C] embedding table without a ~309 MB per-token transpose copy.
+    Allocates the result.
+
+    Raises:
+        Error: On a contraction-width mismatch (a.cols != b.cols).
+    """
     if a.cols != b.cols:
         raise Error(
             "matmul_transpose_b shape mismatch: a.cols="
@@ -290,9 +298,9 @@ def matmul_transpose_b(a: Tensor2D, b: Tensor2D) raises -> Tensor2D:
     # blocks, one worker per block. Every out[i, j] is written by exactly one
     # worker, computed by the same _simd_dot as the serial path — no shared
     # accumulators, no atomics, a static partition — so the result is
-    # bit-identical to single-threaded and stable run to run (Class A). The
-    # output is written through a raw pointer to disjoint cells; a and b are
-    # shared immutably.
+    # bit-identical to single-threaded and stable run to run. The output is
+    # written through a raw pointer to disjoint cells; a and b are shared
+    # immutably.
     var pout = out.data.unsafe_ptr()
     var nblocks = 32 if n >= 32 else n
     var block = (n + nblocks - 1) // nblocks
@@ -313,21 +321,21 @@ def matmul_transpose_b(a: Tensor2D, b: Tensor2D) raises -> Tensor2D:
 
 
 def matmul_transpose_a(a: Tensor2D, b: Tensor2D) raises -> Tensor2D:
-    # c = a^T @ b WITHOUT materializing a^T: [N, I]^T @ [N, J] -> [I, J] with
-    #     c[i, j] = sum_n a[n, i] * b[n, j].
-    # Both operands share the contraction dimension N as their ROW count, so the
-    # guard is a.rows == b.rows. This is the mirror of matmul_transpose_b for the
-    # backward pass, where products are spelled transpose(w) @ d — Linear's
-    # dW = d_out^T @ x, attention's dV/dK/dQ, the tied head's d_table.
-    #
-    # Class A (order-preserving), UNLIKE matmul_transpose_b: it accumulates over n
-    # ascending in exactly the order transpose(a) @ b (ikj) does — for each n it
-    # adds a[n, i] * b[n, :] into row i, vectorized over the independent columns j,
-    # never regrouping the n reduction — so it is BIT-IDENTICAL to the composed
-    # spelling (a test pins exact equality). It skips the [I, N] transpose
-    # allocation, which profiling showed was 28-65% of each backward product once
-    # the matmul itself was vectorized. Threads over output rows i above the work
-    # threshold, like the @ operator. Raises on a row-count mismatch; allocates.
+    """Compute c = a^T @ b without materializing a^T.
+
+    [N, I]^T @ [N, J] -> [I, J] with c[i, j] = sum_n a[n, i] * b[n, j]. Both share
+    the contraction dimension N as their row count, so the guard is
+    a.rows == b.rows. The mirror of matmul_transpose_b for the backward pass
+    (Linear's dW, attention's dV/dK/dQ, the tied head's d_table). Order-preserving:
+    it accumulates over n ascending in exactly transpose(a) @ b (ikj) order,
+    vectorizing only the independent columns j, so it is bit-identical to the
+    composed spelling. Skips the [I, N] transpose allocation (28-65% of each
+    backward product once the matmul was vectorized). Threads over output rows i.
+    Allocates.
+
+    Raises:
+        Error: On a row-count mismatch (a.rows != b.rows).
+    """
     if a.rows != b.rows:
         raise Error(
             "matmul_transpose_a shape mismatch: a.rows="
@@ -388,9 +396,12 @@ def matmul_transpose_a(a: Tensor2D, b: Tensor2D) raises -> Tensor2D:
 
 
 def softmax_row(input: Span[Float64, _]) -> List[Float64]:
-    # Numerically stable softmax over one vector: subtract the row max before
-    # exponentiating so the largest exponent is exp(0) = 1 and nothing overflows.
-    # An empty input yields an empty output. Allocates the result.
+    """Numerically stable softmax over one vector.
+
+    Subtracts the row max before exponentiating so the largest exponent is
+    exp(0) = 1 and nothing overflows. An empty input yields an empty output.
+    Allocates the result.
+    """
     var n = len(input)
     var out = List[Float64](
         capacity=n
@@ -415,10 +426,12 @@ def softmax_row(input: Span[Float64, _]) -> List[Float64]:
 
 
 def softmax_rows(scores: Tensor2D) -> Tensor2D:
-    # Row-wise stable softmax over a Tensor2D — the shape attention uses. Each
-    # row is normalized independently. Allocates the result. A zero-column input
-    # has no logits to normalize, so it returns unchanged (mirrors softmax_row's
-    # empty-input handling) rather than reading scores[r, 0] out of bounds.
+    """Row-wise stable softmax over a Tensor2D — the shape attention uses.
+
+    Each row is normalized independently. A zero-column input has no logits to
+    normalize, so it returns unchanged rather than reading out of bounds.
+    Allocates the result.
+    """
     var out = zeros_2d(scores.rows, scores.cols)
     if scores.cols == 0:
         return out^
@@ -440,19 +453,18 @@ def softmax_rows(scores: Tensor2D) -> Tensor2D:
 def softmax_rows_backward(
     weights: Tensor2D, d_weights: Tensor2D
 ) raises -> Tensor2D:
-    # VJP of softmax_rows. Given W = softmax_rows(scores) — the *output* W, not
-    # the input scores — and d_weights = dL/dW, return dL/dscores.
-    #
-    # Row Jacobian: for one row p = softmax(s), dp_i/ds_j = p_i (delta_ij - p_j).
-    # The VJP contracts the upstream dW against it, column by column:
-    #     dS_j = sum_i dW_i * p_i (delta_ij - p_j)
-    #          = p_j dW_j - p_j sum_i dW_i p_i
-    #          = p_j (dW_j - sum_i dW_i p_i).
-    # So per row  dS = W * (dW - rowsum(dW * W)). The subtracted rowsum is one
-    # scalar shared across the row, so a blocked entry (W ~ 0) both contributes
-    # ~0 to it and receives ~0 back — this is why masked positions leak no
-    # gradient through attention. Shapes [R, C] -> [R, C]. Reads its args;
-    # allocates the result; raises on a shape mismatch (a caller error).
+    """VJP of softmax_rows: given W = softmax_rows(scores) (the output, not scores)
+    and d_weights = dL/dW, return dL/dscores.
+
+    Per row with p = softmax(s), the row Jacobian dp_i/ds_j = p_i (delta_ij - p_j)
+    contracts to dS = W * (dW - rowsum(dW * W)). The subtracted rowsum is one
+    scalar shared across the row, so a blocked entry (W ~ 0) both contributes ~0
+    and receives ~0 back — why masked positions leak no gradient. Shapes
+    [R, C] -> [R, C]. Allocates the result.
+
+    Raises:
+        Error: On a shape mismatch.
+    """
     if weights.rows != d_weights.rows or weights.cols != d_weights.cols:
         raise Error("softmax_rows_backward shape mismatch")
     var out = zeros_2d(weights.rows, weights.cols)
@@ -468,18 +480,17 @@ def softmax_rows_backward(
 def softmax_row_temperature(
     input: Span[Float64, _], temperature: Float64
 ) raises -> List[Float64]:
-    # Softmax of input / temperature. T < 1 sharpens, T > 1 flattens. Raises if
-    # temperature <= 0; an empty input yields an empty output.
-    #
-    # Stability note: this does NOT delegate to softmax_row(input / temperature).
-    # Dividing first would overflow — a near-zero T sends a large logit to +inf
-    # before any max subtraction can help, and inf - inf is NaN. Instead we
-    # subtract the row max first and divide the *difference*:
-    #     exp((x_i - max) / T)
-    # which is algebraically identical (exp(m/T) cancels in the ratio) but keeps
-    # every exponent <= 0, so the argmax term is exp(0) = 1 and the rest underflow
-    # safely to 0. The chapter's "thin wrapper" form is subtly wrong at extreme T;
-    # this is the honest stable version.
+    """Softmax of input / temperature. T < 1 sharpens, T > 1 flattens.
+
+    Does NOT divide first then delegate to softmax_row: dividing first would
+    overflow (a near-zero T sends a large logit to +inf before any max
+    subtraction). Instead it subtracts the row max and divides the difference,
+    exp((x_i - max) / T), which is algebraically identical but keeps every
+    exponent <= 0. An empty input yields an empty output.
+
+    Raises:
+        Error: If temperature <= 0.
+    """
     if temperature <= 0.0:
         raise Error("temperature must be positive")
     var n = len(input)
@@ -509,8 +520,10 @@ def softmax_row_temperature(
 
 
 def logsumexp(x: Span[Float64, _]) -> Float64:
-    # Stable log(sum(exp(x))) = max(x) + log(sum(exp(x - max(x)))). Assumes a
-    # non-empty x.
+    """Stable log(sum(exp(x))) = max(x) + log(sum(exp(x - max(x)))).
+
+    Assumes a non-empty x.
+    """
     var n = len(x)
     var m = x[0]
     for i in range(1, n):
@@ -523,9 +536,13 @@ def logsumexp(x: Span[Float64, _]) -> Float64:
 
 
 def cross_entropy_one(logits: Span[Float64, _], target: Int) raises -> Float64:
-    # Cross-entropy loss for one position: logsumexp(logits) - logits[target],
-    # the stable form of -log(softmax(logits)[target]). Raises if target is out
-    # of range.
+    """Cross-entropy loss for one position: logsumexp(logits) - logits[target].
+
+    The stable form of -log(softmax(logits)[target]).
+
+    Raises:
+        Error: If target is out of range.
+    """
     if target < 0 or target >= len(logits):
         raise Error("target out of range")
     return logsumexp(logits) - logits[target]
@@ -534,11 +551,14 @@ def cross_entropy_one(logits: Span[Float64, _], target: Int) raises -> Float64:
 def cross_entropy_grad(
     logits: Span[Float64, _], target: Int
 ) raises -> List[Float64]:
-    # Gradient of cross_entropy_one wrt logits: softmax(logits) - onehot(target),
-    # i.e. p_i - y_i. Cheap, bounded, and the backbone of every training step.
-    # Allocates the result. Raises on an out-of-range target — the same guard
-    # cross_entropy_one uses, so the loss and its gradient reject bad targets
-    # symmetrically instead of silently writing out of bounds.
+    """Gradient of cross_entropy_one wrt logits: softmax(logits) - onehot(target).
+
+    That is p_i - y_i, the backbone of every training step. Allocates the result.
+
+    Raises:
+        Error: On an out-of-range target — the same guard as cross_entropy_one, so
+            loss and gradient reject bad targets symmetrically.
+    """
     if target < 0 or target >= len(logits):
         raise Error("target out of range")
     var p = softmax_row(logits)
@@ -547,14 +567,16 @@ def cross_entropy_grad(
 
 
 def cross_entropy_rows(logits: Tensor2D, targets: List[Int]) raises -> Float64:
-    # Mean cross-entropy over N rows:
-    #     (1/N) * sum_i cross_entropy_one(logits[i, :], targets[i]).
-    # logits [N, V]; targets has length N (one target id per row). This is the
-    # batched training loss the backward chain differentiates — the mean, not the
-    # sum, so the gradient scale is independent of batch size. Reads its args;
-    # borrows each row as a Span (no per-row copy); raises on a length mismatch,
-    # an empty batch (no mean is defined), or an out-of-range target (surfaced by
-    # cross_entropy_one).
+    """Mean cross-entropy over N rows: (1/N) * sum_i CE(logits[i, :], targets[i]).
+
+    logits [N, V]; targets has length N (one target id per row). The mean, not the
+    sum, so the gradient scale is independent of batch size. Borrows each row as a
+    Span (no per-row copy).
+
+    Raises:
+        Error: On a length mismatch, an empty batch (no mean is defined), or an
+            out-of-range target.
+    """
     var n = logits.rows
     if len(targets) != n:
         raise Error(
@@ -574,14 +596,16 @@ def cross_entropy_rows(logits: Tensor2D, targets: List[Int]) raises -> Float64:
 def cross_entropy_rows_backward(
     logits: Tensor2D, targets: List[Int]
 ) raises -> Tensor2D:
-    # Gradient of cross_entropy_rows wrt logits: (softmax(logits) - onehot) / N,
-    # row by row. logits [N, V] -> [N, V]. Each row is cross_entropy_grad
-    # (softmax - onehot, which sums to 0) scaled by 1/N — the mean's factor — so
-    # every row still sums to 0 after scaling. Reads its args; borrows each row
-    # as a Span (no per-row copy); allocates the result; raises on a length
-    # mismatch, empty batch, or out-of-range target — the same guards as the
-    # loss, so loss and gradient reject bad input symmetrically instead of one
-    # writing out of bounds.
+    """Gradient of cross_entropy_rows wrt logits: (softmax(logits) - onehot) / N.
+
+    logits [N, V] -> [N, V], row by row. Each row is cross_entropy_grad (sums to
+    0) scaled by the mean's 1/N factor, so every row still sums to 0. Borrows each
+    row as a Span (no per-row copy); allocates the result.
+
+    Raises:
+        Error: On a length mismatch, empty batch, or out-of-range target — the
+            same guards as the loss.
+    """
     var n = logits.rows
     if len(targets) != n:
         raise Error(
@@ -607,9 +631,10 @@ def cross_entropy_rows_backward(
 
 
 def argmax(values: Span[Float64, _]) -> Int:
-    # Index of the maximum value, first-wins on ties (strict >). The tie rule is
-    # deliberate: greedy decoding must be deterministic, and two logits can
-    # genuinely tie. Assumes a non-empty input.
+    """Index of the maximum value, first-wins on ties (strict >).
+
+    The tie rule keeps greedy decoding deterministic. Assumes a non-empty input.
+    """
     var best_idx = 0
     var best_value = values[0]
     for i in range(1, len(values)):

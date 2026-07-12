@@ -1,23 +1,19 @@
-# GPT forward+backward step timing.
-#
-# One training step assembles a cache for every layer on the forward pass and
-# consumes it on the backward pass. This harness times that whole round trip so
-# a change to how the caches are assembled (copied vs moved) shows up as a step
-# time, not a guess.
-#
-# This is outside the test gate — it measures, it does not assert. Run it
-# (ideally a release build) and record your own numbers:
-#     pixi run mojo precompile src/llm -o build/llm.mojopkg
-#     pixi run mojo run -I build benchmarks/bench_gpt_step.mojo
-#
-# The timer uses perf_counter_ns; the median comes from the unit-tested helper
-# in llm.utils.timing.
-#
-# Config: a scaled-down GPT-2 (same proportions — 4x MLP, C/H head width, tied
-# head — small enough to run in seconds): V=256, T=64, C=128, L=6, H=4,
-# dropout=0. dropout=0 keeps the run deterministic; the cached forward still
-# builds every layer's cache exactly as training does, which is the assembly the
-# step time reflects.
+"""GPT forward+backward step timing.
+
+One training step assembles a cache for every layer on the forward pass and
+consumes it on the backward pass. This harness times that whole round trip so a
+change to how the caches are assembled (copied vs moved) shows up as a step time,
+not a guess. It measures, it does not assert.
+
+Config is a scaled-down GPT-2 (same proportions, small enough to run in seconds):
+V=256, T=64, C=128, L=6, H=4, dropout=0. dropout=0 keeps the run deterministic
+while the cached forward still builds every layer's cache exactly as training
+does.
+
+Run (ideally a release build) and record your own numbers:
+    pixi run mojo precompile src/llm -o build/llm.mojopkg
+    pixi run mojo run -I build benchmarks/bench_gpt_step.mojo
+"""
 
 from std.time import perf_counter_ns
 from std.collections import List
@@ -30,6 +26,14 @@ from llm.utils.timing import median_ns
 
 
 def bench_gpt_step(steps: Int, warmup: Int) raises:
+    """Time `steps` forward+backward passes after `warmup` untimed ones.
+
+    Prints the median step time in ns and ms.
+
+    Args:
+        steps: Number of timed passes.
+        warmup: Number of untimed warmup passes.
+    """
     var cfg = GPTConfig(256, 64, 128, 6, 4, 0.0)  # V, T, C, L, H, dropout
     var init_rng = Rng(0)
     var gpt = GPT.init_random(cfg, init_rng)
@@ -70,4 +74,5 @@ def bench_gpt_step(steps: Int, warmup: Int) raises:
 
 
 def main() raises:
+    """Run the step benchmark."""
     bench_gpt_step(steps=21, warmup=5)

@@ -1,9 +1,4 @@
-# Finite-difference gradient check for cross_entropy_grad.
-#
-# Before trusting an analytic gradient, verify it numerically with a central
-# difference: df/dx ~ (f(x+h) - f(x-h)) / 2h. This is the same technique every
-# backward pass later gets validated with. h = 1e-6 sits near the sweet spot for
-# Float64 (see test_finite_difference_step for why).
+"""Finite-difference gradient check for cross_entropy_grad, verifying the analytic gradient against a central difference df/dx ~ (f(x+h) - f(x-h)) / 2h with h = 1e-6."""
 
 from std.testing import assert_almost_equal, TestSuite
 
@@ -19,6 +14,8 @@ def perturbed_loss(
 
 
 def test_cross_entropy_gradient_matches_finite_difference() raises:
+    """The analytic cross_entropy_grad matches a central finite difference at every logit.
+    """
     var logits = [0.5, -1.0, 2.0, 0.25]
     var target = 2
     var analytic = cross_entropy_grad(logits, target)

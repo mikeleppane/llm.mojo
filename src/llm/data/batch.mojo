@@ -1,23 +1,18 @@
-# A batch of token ids: two flat [B, T] arrays, inputs and targets.
-#
-# A `TokenBatch` is what the training loop consumes each step: B sequences of
-# length T for the model to read (`inputs`) and, aligned position-for-position,
-# the next token the model should predict (`targets`). The shift-by-one that
-# links them is baked in by whoever builds the batch (the loader), not by this
-# struct — here they are just two parallel arrays.
-#
-# Layout is flat row-major: element (b, t) lives at `b * seq_len + t`. Flat
-# storage (rather than a `List[List[Int]]`) mirrors how the model-parameter layer
-# will index tokens and keeps the memory contiguous. Ids are integers, so this
-# lives in `data/` and depends on nothing float-valued — the tensor layer is a
-# separate concern.
+"""A batch of token ids: two flat [B, T] arrays, inputs and targets.
+
+A `TokenBatch` is what the training loop consumes each step: B sequences of
+length T for the model to read (`inputs`) and, aligned position-for-position,
+the next token to predict (`targets`). The shift-by-one that links them is baked
+in by the loader, not here. Layout is flat row-major: element (b, t) lives at
+`b * seq_len + t`, keeping the memory contiguous.
+"""
 
 
 struct TokenBatch(Copyable, Movable):
-    # inputs and targets are each a flat row-major [B, T] array; element (b, t)
-    # is at index b * seq_len + t.
-    var inputs: List[Int]
-    var targets: List[Int]
+    """A batch of B*T ids: inputs and targets, each a flat row-major [B, T]."""
+
+    var inputs: List[Int]  # flat [B, T]; element (b, t) at b * seq_len + t
+    var targets: List[Int]  # flat [B, T]; the inputs shifted left by one
     var batch_size: Int  # B: number of sequences
     var seq_len: Int  # T: tokens per sequence
 
@@ -28,11 +23,22 @@ struct TokenBatch(Copyable, Movable):
         batch_size: Int,
         seq_len: Int,
     ) raises:
-        # Take ownership of both arrays. Raises unless the shape is positive and
-        # each flat array has exactly batch_size * seq_len elements, so a
-        # mis-shaped batch is caught at construction rather than as a bad read
-        # later. The positivity check matters on its own: a negative batch_size
-        # and seq_len can multiply to the right length and otherwise slip through.
+        """Take ownership of both arrays after validating the shape.
+
+        A mis-shaped batch is caught at construction rather than as a bad read
+        later. The positivity check matters on its own: a negative batch_size
+        and seq_len can multiply to the right length and otherwise slip through.
+
+        Args:
+            inputs: Flat [B, T] input ids (ownership transferred).
+            targets: Flat [B, T] target ids (ownership transferred).
+            batch_size: B, must be >= 1.
+            seq_len: T, must be >= 1.
+
+        Raises:
+            Error: If a dimension is < 1, or an array length is not
+                batch_size * seq_len.
+        """
         if batch_size < 1:
             raise Error(
                 "TokenBatch: batch_size must be >= 1, got " + String(batch_size)
@@ -62,9 +68,21 @@ struct TokenBatch(Copyable, Movable):
         self.seq_len = seq_len
 
     def _flat_index(self, b: Int, t: Int) raises -> Int:
-        # Bounds-checked row-major index for coordinate (b, t). Raises if either
-        # index is outside its dimension — the single place both accessors funnel
-        # through, so the check can't drift between inputs and targets.
+        """Bounds-checked row-major index for coordinate (b, t).
+
+        The single place both accessors funnel through, so the check can't drift
+        between inputs and targets.
+
+        Args:
+            b: Batch index, in [0, batch_size).
+            t: Sequence index, in [0, seq_len).
+
+        Returns:
+            The flat index b * seq_len + t.
+
+        Raises:
+            Error: If either index is out of range.
+        """
         if b < 0 or b >= self.batch_size:
             raise Error(
                 "TokenBatch: batch index "
@@ -84,9 +102,31 @@ struct TokenBatch(Copyable, Movable):
         return b * self.seq_len + t
 
     def input_at(self, b: Int, t: Int) raises -> Int:
-        # The input token at (b, t). Bounds-checked.
+        """Return the input token at (b, t), bounds-checked.
+
+        Args:
+            b: Batch index.
+            t: Sequence index.
+
+        Returns:
+            The input token id.
+
+        Raises:
+            Error: If (b, t) is out of range.
+        """
         return self.inputs[self._flat_index(b, t)]
 
     def target_at(self, b: Int, t: Int) raises -> Int:
-        # The target token at (b, t). Bounds-checked.
+        """Return the target token at (b, t), bounds-checked.
+
+        Args:
+            b: Batch index.
+            t: Sequence index.
+
+        Returns:
+            The target token id.
+
+        Raises:
+            Error: If (b, t) is out of range.
+        """
         return self.targets[self._flat_index(b, t)]

@@ -1,11 +1,11 @@
-# Tests for the GPT-2 tokenizer — the capstone of Part V.
-#
-# The decisive test is parity: for a fixed set of sample strings, our encoder
-# must produce byte-exact the same token ids as an independent reference (the
-# vendored OpenAI encoder.py in tests/oracles/). We also freeze a few golden id
-# sequences so the suite still catches a silently broken oracle and survives
-# offline. Pre-tokenization is checked separately so a failure localizes to the
-# regex split versus the merge loop.
+"""Tests for the GPT-2 tokenizer.
+
+The decisive test is parity: for a fixed set of sample strings, our encoder must
+produce byte-exact the same token ids as an independent reference (the vendored
+OpenAI encoder.py in tests/oracles/). A few golden id sequences are frozen so the
+suite catches a silently broken oracle and survives offline. Pre-tokenization is
+checked separately so a failure localizes to the regex split versus the merge loop.
+"""
 
 from std.python import Python, PythonObject
 from std.testing import assert_equal, assert_true, assert_raises, TestSuite
@@ -32,7 +32,8 @@ def _tmp_path(name: String) raises -> String:
 
 
 def _oracle() raises -> PythonObject:
-    # The vendored reference encoder (tests/oracles/gpt2_reference_encoder.py).
+    """The vendored reference encoder (tests/oracles/gpt2_reference_encoder.py).
+    """
     Python.add_to_path("tests/oracles")
     return Python.import_module("gpt2_reference_encoder")
 
@@ -49,9 +50,12 @@ def _load() raises -> GPT2Tokenizer:
 
 
 def _samples() -> List[String]:
-    # Plain ASCII, contractions, leading/trailing/interior whitespace, numbers,
-    # tabs and newlines, an emoji (non-BMP), accented text, a long word, the
-    # empty string. Chosen to exercise every branch of the pre-tokenizer.
+    """Sample strings chosen to exercise every branch of the pre-tokenizer.
+
+    Plain ASCII, contractions, leading/trailing/interior whitespace, numbers,
+    tabs and newlines, an emoji (non-BMP), accented text, a long word, and the
+    empty string.
+    """
     var samples: List[String] = [
         String(""),
         String("Hello world"),
@@ -82,13 +86,15 @@ def _assert_ids_equal(got: List[Int], expected: List[Int]) raises:
 
 
 def test_vocab_size_is_50257() raises:
+    """The vocabulary has exactly 50257 entries."""
     var tok = _load()
     assert_equal(tok.vocab_size(), 50257)
     assert_equal(GPT2_VOCAB_SIZE, 50257)
 
 
 def test_byte_unicode_table_is_bijection() raises:
-    # 256 entries, all distinct codepoints; the inverse composes to identity.
+    """The byte->unicode table has 256 distinct codepoints and its inverse composes to identity.
+    """
     var table = gpt2_byte_to_unicode()
     assert_equal(len(table), 256)
     var seen = Dict[Int, Int]()
@@ -104,23 +110,25 @@ def test_byte_unicode_table_is_bijection() raises:
 
 
 def test_all_merges_loaded() raises:
-    # GPT-2 has exactly 50000 merges. A structural count guards against the
-    # loader silently dropping rules (e.g. skipping every '#'-led line) even
-    # when no parity sample happens to exercise the dropped merges.
+    """Exactly 50000 merges load, guarding against the loader silently dropping rules (e.g. '#'-led lines).
+    """
     var tok = _load()
     assert_equal(len(tok.bpe.merge_rank), 50000)
 
 
 def test_end_of_text_id() raises:
-    # <|endoftext|> is id 50256. It is not special-cased in encode (matching
-    # OpenAI's encoder.py); it is the last vocabulary entry, and decoding it
-    # yields the literal marker text.
+    """<|endoftext|> is id 50256, the last vocab entry, and decodes to its literal marker text.
+
+    It is not special-cased in encode, matching OpenAI's encoder.py.
+    """
     assert_equal(END_OF_TEXT_ID, 50256)
     var tok = _load()
     assert_equal(tok.decode([END_OF_TEXT_ID]), String("<|endoftext|>"))
 
 
 def test_pre_tokenize_matches_oracle() raises:
+    """Pre-tokenization matches the reference oracle chunk-for-chunk on every sample.
+    """
     var tok = _load()
     var oracle = _oracle()
     for s in _samples():
@@ -134,6 +142,8 @@ def test_pre_tokenize_matches_oracle() raises:
 
 
 def test_parity_with_reference_oracle() raises:
+    """Our encoder produces byte-exact the same token ids as the reference oracle on every sample.
+    """
     var tok = _load()
     var oracle = _oracle()
     for s in _samples():
@@ -143,14 +153,15 @@ def test_parity_with_reference_oracle() raises:
 
 
 def test_round_trip() raises:
+    """decode(encode(s)) recovers every sample string exactly."""
     var tok = _load()
     for s in _samples():
         assert_equal(tok.decode(tok.encode(s)), s)
 
 
 def test_golden_ids() raises:
-    # Frozen from the reference oracle during implementation (never from memory).
-    # Guards against a broken oracle and survives fully offline.
+    """Encoding matches id sequences frozen from the reference oracle, guarding against a broken oracle offline.
+    """
     var tok = _load()
     _assert_ids_equal(tok.encode(String("Hello world")), [15496, 995])
     _assert_ids_equal(tok.encode(String("Hello, World!")), [15496, 11, 2159, 0])
@@ -161,8 +172,8 @@ def test_golden_ids() raises:
 
 
 def test_save_load_round_trip() raises:
-    # The GPT-2 merges/vocab persist through our BPETOK v1 format: after a save
-    # and load, the underlying BPE encodes every pre-tokenized chunk identically.
+    """After save and load through the BPETOK v1 format, the BPE encodes every pre-tokenized chunk identically.
+    """
     var tok = _load()
     var oracle = _oracle()
     var path = _tmp_path("gpt2_bpe_roundtrip.bpetok")
@@ -182,8 +193,8 @@ def test_save_load_round_trip() raises:
 
 
 def test_loader_rejects_wrong_vocab_size() raises:
-    # A vocab that is not exactly 50257 entries must be rejected, not silently
-    # loaded. Build a tiny fixture rather than committing a broken file.
+    """A vocab that is not exactly 50257 entries is rejected, not silently loaded.
+    """
     var vpath = _tmp_path("bad_vocab.json")
     with open(vpath, "w") as f:
         f.write(String('{"a": 0, "b": 1}'))

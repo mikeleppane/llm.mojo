@@ -1,13 +1,14 @@
-# Train the encoder-decoder lab on the reverse task and watch cross-attention
-# learn the alignment the task demands.
-#
-# The figure this prints is the chapter's thesis: before training the decoder's
-# cross-attention row-argmax map is noise; after training it is the anti-diagonal
-# — target position i attends to source position T-1-i, exactly the fetch reverse
-# requires. Alongside it, a handful of held-out sources are greedy-decoded next
-# to their reversed truths: the model reverses sequences it never trained on.
-#
-# Run:  pixi run mojo run -I src examples/encdec_reverse.mojo
+"""Train the encoder-decoder lab on the reverse task and watch cross-attention
+learn the alignment the task demands.
+
+Before training the decoder's cross-attention row-argmax map is noise; after
+training it is the anti-diagonal (target position i attends to source position
+T-1-i), exactly what reversing requires. Held-out sources are then greedy-decoded
+next to their reversed truths: the model reverses sequences it never trained on.
+
+Run:
+    pixi run mojo run -I src examples/encdec_reverse.mojo
+"""
 
 from std.math import log
 
@@ -37,11 +38,19 @@ comptime BOS = 8
 
 
 def averaged_cross_weights(model: EncDec, src: List[Int]) raises -> Tensor2D:
-    # The decoder block's cross-attention weights, averaged over heads:
-    # [T_tgt, T_src], row i = what target position i attends to across the source.
-    # Uses teacher-forced inputs (the true reverse target) so the map reflects the
-    # aligned decoding path. Pulled straight from the forward cache — no second
-    # code path recomputes the weights.
+    """Average the decoder's cross-attention weights over heads.
+
+    Uses teacher-forced inputs (the true reverse target) so the map reflects the
+    aligned decoding path, and reads straight from the forward cache.
+
+    Args:
+        model: The encoder-decoder model.
+        src: Source sequence to encode.
+
+    Returns:
+        Weights of shape [T_tgt, T_src]; row i is what target position i attends
+        to across the source. Allocates a new tensor.
+    """
     var tgt = reverse_target(src)
     var tgt_in = decoder_input(tgt, BOS)
     var fwd = model.forward_cached(src, tgt_in)
@@ -56,9 +65,14 @@ def averaged_cross_weights(model: EncDec, src: List[Int]) raises -> Tensor2D:
 
 
 def print_alignment(model: EncDec, src: List[Int]) raises:
-    # Print the row-argmax of the averaged cross-attention weights: for each
-    # target position, the source position it most attends to. A trained reverse
-    # model tends toward 5 4 3 2 1 0 (the anti-diagonal at T=6).
+    """Print, per target position, the source position it most attends to.
+
+    A trained reverse model tends toward 5 4 3 2 1 0 (the anti-diagonal at T=6).
+
+    Args:
+        model: The encoder-decoder model.
+        src: Source sequence to encode.
+    """
     var avg = averaged_cross_weights(model, src)
     var line = String("  target pos -> source pos:  ")
     for i in range(T):
@@ -77,6 +91,15 @@ def train_reverse(
     steps: Int,
     batch: Int,
 ) raises:
+    """Train the model on reverse pairs with mini-batch SGD.
+
+    Args:
+        model: The encoder-decoder model; parameters are updated in place.
+        srcs: Source sequences to train on (targets are their reverses).
+        lr: SGD learning rate.
+        steps: Number of optimization steps.
+        batch: Mini-batch size; gradients are averaged over the batch.
+    """
     var n = len(srcs)
     var inv_b = 1.0 / Float64(batch)
     for step in range(steps):
@@ -97,6 +120,7 @@ def train_reverse(
 
 
 def print_sequence(label: String, seq: List[Int]):
+    """Print `label` followed by the space-separated tokens of `seq`."""
     var line = label
     for i in range(len(seq)):
         line += String(seq[i])
@@ -105,6 +129,7 @@ def print_sequence(label: String, seq: List[Int]):
 
 
 def main() raises:
+    """Train the reverse task and report alignment plus held-out accuracy."""
     print("Encoder-decoder lab: the reverse task")
     print("=====================================")
     var rng = Rng(101)
