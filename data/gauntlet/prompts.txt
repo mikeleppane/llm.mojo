@@ -47,6 +47,8 @@ Visit https://example.com/path?q=1&r=2#frag or write a.b-c_d@sub.example.co.uk t
 === id: whitespace-mixed === leading spaces, a tab, doubled internal spaces, and a trailing newline
    leading spaces and	a tab, then  doubled  spaces  inside.
 
+=== id: unicode-separators === non-ASCII whitespace: NBSP and the U+2028/U+2029 line/paragraph separators that splitlines() would split on but split('\n') keeps inline
+Non breaking space, then a line separator, then a paragraph separator, all on one logical record.
 === id: newline-heavy === multi-paragraph text with blank lines between paragraphs
 First paragraph, first line.
 First paragraph, second line.
