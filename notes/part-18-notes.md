@@ -222,7 +222,7 @@ at representative contexts, and the cheaper allocation-hygiene fix (contiguous
 memcpy in slice/concat, Class A) addressed the copy cost without a fused-attention
 rewrite:
 
-| KV copies per layer (slice_rows + slice_cols) | element-loop | memcpy | 
+| KV copies per layer (slice_rows + slice_cols) | element-loop | memcpy |
 |-----------------------------------------------|--------------|--------|
 | context 32 (the demo)                         | 46.7 µs      | 5.0 µs |
 | context 512                                   | 798 µs       | 152 µs |
@@ -277,15 +277,39 @@ the arbiter and pass unchanged.
 
 ## Class A / Class B inventory of every changed path
 
+The classification is of the FINAL code, not of each commit in isolation — a
+subtlety worth stating because the forward call-site retrofits (Stage 1a) were
+Class A *when committed* (matmul_transpose_b was still scalar then) but became
+transitively Class B once Stage 1b made the kernel reassociate. The final-state
+truth:
+
 - **Class B (reassociating, 1e-12-relative tested):** `_simd_dot`, and through it
-  `matvec` and `matmul_transpose_b`. The only reassociating change; confined to
-  the contiguous-row dot kernel where the decode win lives.
+  `matvec` and `matmul_transpose_b` — the only reassociating kernel — AND, by
+  transitivity, every forward product now routed through it: the Linear forwards,
+  the attention `q @ k^T` scores, and the tied head (batch and cached step). These
+  paths reassociate the reduction (~k·eps vs their old scalar `@ transpose(·)`
+  spelling); they are covered by matmul_transpose_b's 1e-12 kernel test, the
+  per-layer hand-computed/finite-diff tests, and the frozen 124M 1e-6 logit
+  goldens. That they are Class B does not threaten XVII's exact parity: batch and
+  cached-step both moved to the SAME kernel together, so they stay bit-identical
+  to *each other* even though both now differ from the old scalar bits.
 - **Class A (order-preserving, exact-equality tested):** the `@` operator's
-  SIMD-over-j and its threading; `matmul_transpose_b`'s column threading;
-  `matmul_transpose_a` and its backward retrofits; the Linear/score/tied-head
-  call-site retrofits (bit-identical operand-for-operand to the spellings they
-  replace); the slice/concat memcpy hygiene. `matmul` is untouched — the scalar
-  oracle every fast kernel is tested against.
+  SIMD-over-columns and its row threading; `matmul_transpose_b`'s column threading
+  (bit-identical to the serial `_simd_dot`, pinned by a threaded-vs-serial test);
+  `matmul_transpose_a` and its backward retrofits (bit-identical to the scalar
+  `matmul(transpose(a), b)` oracle); the slice/concat memcpy hygiene (bit-exact,
+  fractional-value tested). `matmul` is untouched — the scalar oracle every fast
+  kernel is tested against.
+
+## Elementwise/reduction ops (gelu, layernorm, softmax) — SIMD SKIPPED with evidence
+
+Measured at decode shapes after Stage 1/2 (median µs): gelu_rows [1,3072] 18.9,
+layernorm [1,768] 3.4, softmax_rows [1,1024] 4.1, vs one c_attn kernel 18.8.
+Per token that is ~gelu 12·18.9 + layernorm 24·3.4 + softmax 144·~1 ≈ 0.45 ms —
+**~1.8% of the ~25 ms token** and ~6% of the ~7 ms of matmul kernels. Below the
+bar worth a hand-written SIMD elementwise kernel; the plan gated this on "the
+post-matmul profile row says they matter," and it does not. SKIPPED, measured not
+gold-plated.
 
 ## Goldens that failed during development
 
@@ -307,4 +331,50 @@ exact step-vs-forward parity and the exact gradient-doubling backward tests.
 - The gate is `pixi run test-fast` throughout (excludes test_seq_tasks per the
   standing #6554 rule).
 
+## Review triage
 
+Dual external review over `git diff main...part-18-performance` — Codex GPT-5.6
+(high, danger-full-access; it independently ran `pixi run fmt-check` and
+`pixi run test-fast` green) and Claude Opus 4.8 (xhigh; independently ran the
+affected suite green). Both VERIFIED the code is correct, the threading is a sound
+static partition, XVII's exact step-vs-forward parity still holds with
+matmul_transpose_b now Class B, and every category was audited clean (naive
+`matmul` oracle intact, `_simd_dot` tail correct, no unsafe_ptr across a
+reallocation, kv_cache/step untouched, no fast-math/Float32/GPU/BLAS/syntax
+drift, all edits in-scope). The findings were about test rigor and classification
+honesty, not runtime bugs. All were FIXED:
+
+- **FIXED (both, classification) — forward retrofits mislabelled order-preserving.**
+  The Linear-forward, attention-score, and tied-head comments claimed "the same
+  k-ascending accumulation" / "bit-identical to the spellings they replace," but
+  those paths now route through the Class B `_simd_dot` and reassociate. Corrected
+  the comments (linear.mojo, attention.mojo) and the Class A/B inventory above to
+  state the forward products are transitively Class B; gpt.mojo's tied-head
+  comment was already worded correctly.
+- **FIXED (Codex, blocking) — the Class B test's 1e-9 floor was too loose.**
+  `_assert_close_rel` mixed a 1e-9 absolute floor with the 1e-12 relative term, so
+  the floor dominated at unit scale and the test was effectively non-relative.
+  Measured the actual reassociation error (max ~2.3e-13 at k=4, <1e-13 at
+  k=768/3072) and tightened to a genuine `1e-12·|want| + 1e-13` bound — the
+  relative term governs every real cell with ~4× margin.
+- **FIXED (both) — matmul_transpose_a compared against the fast `@`.** Both
+  matmul_transpose_a and `@` vectorize over columns, so that was a fast-vs-fast
+  check (sound only transitively). Now compares exactly against the scalar
+  `matmul(transpose(a), b)` oracle.
+- **FIXED (Codex, blocking) — memcpy slice/concat lacked a bit-exact test.** Added
+  `test_slice_concat_bit_exact_fractional`: slice_rows/slice_cols/concat_cols on
+  not-exactly-representable fractional values, asserting bit-for-bit equality
+  (`assert_equal`) against the source — a byte-misaligned or short copy can't hide
+  under a tolerance.
+- **FIXED (Codex + Opus) — threading tests strengthened.** Added
+  `test_matmul_transpose_b_threaded_matches_serial` (threaded result EXACTLY equals
+  the serial `_simd_dot` via `matvec(b, a.row(i))` — proves threading is Class A,
+  not merely deterministic) and `test_matmul_transpose_a_threaded_is_deterministic`
+  (two-call exact agreement, matching the coverage the other two kernels had).
+- **FIXED (both) — elementwise-SIMD skip lacked a profile row.** Added the measured
+  evidence above (elementwise ~1.8% of a token) and the explicit SKIP.
+- **FIXED (Codex, nit) — trailing whitespace + EOF blank line** in these notes.
+
+No findings were rejected; the reviewers converged on the same substance at
+different severities (Codex graded the classification/rigor items blocking, Opus
+graded them nice-to-have/nit), and fixing all of them was cheap and correct.

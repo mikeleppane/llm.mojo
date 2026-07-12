@@ -112,7 +112,11 @@ def scaled_dot_product_attention(
         )
 
     # scores[i, j] = sum_d q[i, d] * k[j, d] = q @ k^T, computed directly (no
-    # [D, T_k] transpose copy of k), same d-ascending accumulation as before.
+    # [D, T_k] transpose copy of k). matmul_transpose_b is a Class B SIMD dot, so
+    # the scores reassociate the d-sum (~d*eps) vs the old `q @ transpose(k)`
+    # scalar spelling — the kernel's 1e-12 test and the attention/124M goldens
+    # bound it, and step and batch scoring share this kernel so they stay
+    # bit-identical to each other (XVII's exact parity).
     var scores = matmul_transpose_b(q, k)  # [T_q, T_k]
     var scaled = scale(scores, 1.0 / sqrt(Float64(d)))  # 1/sqrt(d_head)
     var biased = add(scaled, mask)  # additive mask, after the scale

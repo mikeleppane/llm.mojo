@@ -104,8 +104,10 @@ struct Linear(Copyable, Movable):
             )
         # x @ W^T directly: W is [out, in], so out[n, o] = sum_i x[n, i] *
         # W[o, i] — a[i,k]*b[j,k] with a=x, b=W. No [in, out] transpose copy of
-        # the weight per forward, and the same k-ascending accumulation as the
-        # transpose-then-matmul spelling it replaces.
+        # the weight per forward. matmul_transpose_b is a Class B (reassociating)
+        # SIMD dot, so this output differs from the old scalar `x @ transpose(W)`
+        # by ~k*eps — the deliberate arithmetic tradeoff, bounded by the kernel's
+        # 1e-12 test and covered end to end by the layer and 124M logit goldens.
         var out = matmul_transpose_b(x, self.weight.value)  # [N, out]
         for r in range(out.rows):
             for c in range(out.cols):
