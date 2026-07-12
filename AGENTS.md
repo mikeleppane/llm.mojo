@@ -20,6 +20,11 @@ When two options tie, pick the one a reader learns more from and can verify:
   never by making the code unreadable.
 - **Every shape is documented.** Tensor code carries `# [B, T, C]`-style shape
   comments. A reader must be able to follow the dimensions without running it.
+- **Every module, struct, and public function has a Google-style docstring.**
+  Triple-quoted, short (what it does and why), with `Args:` / `Returns:` /
+  `Raises:` folding in the four facts a caller needs (shapes, mutates, allocates,
+  raises). Not `#`-comment doc blocks. The full format and a worked example are in
+  [mojo-coding-guidance](.agents/skills/mojo-coding-guidance/SKILL.md#docstrings--google-style-triple-quoted-mandatory).
 - **If it matters, it is tested.** Correctness is checkable, not asserted in
   prose. See [test-driven-development](.agents/skills/test-driven-development/SKILL.md).
 - **No magic.** No undocumented constants, no unexplained clever tricks, no
